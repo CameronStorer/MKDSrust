@@ -601,3 +601,38 @@ pub fn t1_enabled(entry: u32) -> bool {
     });
     set.as_ref().is_none_or(|s| s.contains(&entry) || s.contains(&(entry & !1)))
 }
+
+// ---- T1 memory helpers: the exact accesses of the translation, with the alignment the ARM
+// applies made implicit (a word access ignores address bits 0-1, a halfword access bit 0).
+#[inline(always)]
+pub fn ld32<M: Mem + ?Sized>(m: &mut M, a: u32) -> u32 {
+    m.r32(a & !3)
+}
+#[inline(always)]
+pub fn ld16<M: Mem + ?Sized>(m: &mut M, a: u32) -> u32 {
+    m.r16(a & !1) as u32
+}
+#[inline(always)]
+pub fn ld16s<M: Mem + ?Sized>(m: &mut M, a: u32) -> u32 {
+    m.r16(a & !1) as i16 as i32 as u32
+}
+#[inline(always)]
+pub fn ld8<M: Mem + ?Sized>(m: &mut M, a: u32) -> u32 {
+    m.r8(a) as u32
+}
+#[inline(always)]
+pub fn ld8s<M: Mem + ?Sized>(m: &mut M, a: u32) -> u32 {
+    m.r8(a) as i8 as i32 as u32
+}
+#[inline(always)]
+pub fn st32<M: Mem + ?Sized>(m: &mut M, a: u32, v: u32) {
+    m.w32(a & !3, v)
+}
+#[inline(always)]
+pub fn st16<M: Mem + ?Sized>(m: &mut M, a: u32, v: u32) {
+    m.w16(a & !1, v as u16)
+}
+#[inline(always)]
+pub fn st8<M: Mem + ?Sized>(m: &mut M, a: u32, v: u32) {
+    m.w8(a, v as u8)
+}

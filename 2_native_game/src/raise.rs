@@ -59,7 +59,7 @@ pub fn expr_reads(e: &E) -> u8 {
         E::Cond(cc) => cond_reads(*cc),
         E::Cpsr => NZCV,
         E::Rrx(a) => C | expr_reads(a),
-        E::Bin(_, a, b) => expr_reads(a) | expr_reads(b),
+        E::Bin(_, a, b) | E::Cmp(_, _, a, b) => expr_reads(a) | expr_reads(b),
         E::Not(a) | E::Shl(a, _) | E::Lsr(a, _) | E::Asr(a, _) | E::Ror(a, _) | E::Bit(a, _) | E::Msb(a) | E::Lsb(a) | E::BoolU32(a) | E::Clz(a) | E::Iw(a) => expr_reads(a),
         E::Load { addr, .. } => expr_reads(addr),
         E::Call(h, args) => helper_flags(*h, args).0 | args.iter().map(expr_reads).fold(0, |x, y| x | y),
@@ -144,6 +144,11 @@ fn successors(f: &Func, start: u32, insts: &[Ins]) -> (Vec<u32>, bool) {
 /// Pass 1 result for one function: for each instruction (by address), the flags still needed after
 /// it. A flag an instruction writes outside this mask is dead.
 pub fn flag_liveness(f: &Func, img: Option<&Image>) -> BTreeMap<u32, u8> {
+    flag_liveness_blocks(f, img).0
+}
+
+/// [`flag_liveness`], plus the flags live at each block start (what a slice end there must keep).
+pub fn flag_liveness_blocks(f: &Func, img: Option<&Image>) -> (BTreeMap<u32, u8>, BTreeMap<u32, u8>) {
     let blocks: Vec<(u32, Vec<Ins>)> = f.blocks.iter().map(|&b| (b, ir::lower_block(f, b, img))).collect();
     let succ: BTreeMap<u32, (Vec<u32>, bool)> = blocks.iter().map(|(b, i)| (*b, successors(f, *b, i))).collect();
     let mut live_in: BTreeMap<u32, u8> = blocks.iter().map(|(b, _)| (*b, 0)).collect();
@@ -176,7 +181,7 @@ pub fn flag_liveness(f: &Func, img: Option<&Image>) -> BTreeMap<u32, u8> {
             live = if ins.cond == 14 { inner } else { inner | live | cond_reads(ins.cond) };
         }
     }
-    after
+    (after, live_in)
 }
 
 /// Removes flag computations nobody reads from one instruction's statements, given the flags

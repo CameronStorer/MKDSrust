@@ -322,6 +322,17 @@ struct Lifted {
     t1: Result<String, &'static str>,
 }
 
+/// Dictionary names by (segment, address without the Thumb bit), for call comments in T1 code.
+static CALL_NAMES: std::sync::OnceLock<HashMap<(String, u32), String>> = std::sync::OnceLock::new();
+
+/// The dictionary name of the function a call from `segment` reaches at `target`: the caller's own
+/// segment first (overlays share addresses), then any other segment with a function there.
+fn call_name(segment: &str, target: u32) -> Option<String> {
+    let names = CALL_NAMES.get()?;
+    let a = target & !1;
+    names.get(&(segment.to_string(), a)).or_else(|| names.iter().find(|((s, e), _)| *e == a && !s.starts_with("ov")).map(|(_, n)| n)).cloned()
+}
+
 /// An ARM9 function: its translation and, when the exact passes are on, its raised version.
 fn lifted9(segment: String, f: &lift::Func, id: String, img: &lift::Image) -> Lifted {
     let code = lift::emit_full(f, &id, Some(img), None, raise());
@@ -330,7 +341,7 @@ fn lifted9(segment: String, f: &lift::Func, id: String, img: &lift::Image) -> Li
     } else if std::env::var_os("MKDS_NO_T1").is_some() {
         Err("T1 off (MKDS_NO_T1)")
     } else {
-        raise_emit::emit_t1(f, &id, Some(img))
+        raise_emit::emit_t1_named(f, &id, Some(img), &|t| call_name(&segment, t))
     };
     Lifted { arm7: false, segment, entry: f.entry, code, t1, id }
 }
@@ -363,6 +374,15 @@ fn run() -> Result<ExitCode, String> {
 
     // lift every entry; each gets exactly one row
     let mut rows = Vec::new();
+    // dictionary names for call comments in raised code (the comment lines come later)
+    {
+        let mut merged = HashMap::new();
+        for p in &args.names {
+            let text = std::fs::read_to_string(p).map_err(|e| format!("cannot read names table {}: {e}", p.display()))?;
+            merge_names(&text, &mut merged)?;
+        }
+        let _ = CALL_NAMES.set(merged.into_iter().filter(|(_, e)| !e.name.is_empty()).map(|(k, e)| (k, e.name)).collect());
+    }
     let mut funcs = Vec::new();
     let mut spans: BTreeMap<String, Vec<(u32, u32)>> = BTreeMap::new();
     let mut pending: Vec<Pending> = Vec::new();

@@ -12,7 +12,7 @@
 //! - T1 is installed at the entry only. Leaving early is always safe: a call that returns somewhere
 //!   unexpected, or a slice end in the flat runtime, spills and returns the pc, and the dispatcher
 //!   continues in the T0 translation, which stays registered for every block.
-use crate::ir::{self, Width, E, H, S};
+use crate::ir::{self, CmpOp, Width, E, H, S};
 use crate::lift::{Func, Image};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
@@ -37,6 +37,7 @@ struct Ctx<'a> {
     merge: BTreeSet<u32>,
     header: BTreeSet<u32>,
     children: BTreeMap<u32, Vec<u32>>,
+    names: &'a dyn Fn(u32) -> Option<String>,
 }
 
 /// Needs the locals written to `c.r` first (and read back after): the helper uses `c.r` itself.
@@ -54,7 +55,7 @@ fn regs_e(e: &E, set: &mut BTreeSet<u8>) {
         set.insert(*i);
     }
     match e {
-        E::Bin(_, a, b) => {
+        E::Bin(_, a, b) | E::Cmp(_, _, a, b) => {
             regs_e(a, set);
             regs_e(b, set);
         }
@@ -87,6 +88,123 @@ fn regs_s(s: &S, used: &mut BTreeSet<u8>, written: &mut BTreeSet<u8>) {
 /// The raised (T1) Rust function `f_<id>_t1` for `f`, or why it stays T0. `t0` is the name of the
 /// exact translation it falls back to when entered anywhere but its entry.
 pub fn emit_t1(f: &Func, id: &str, img: Option<&Image>) -> Result<String, Reason> {
+    emit_t1_named(f, id, img, &|_| None)
+}
+
+/// The condition `cc` after a compare as one expression, if it has a plain form: `cmp a, b`
+/// (`R::subs`), `cmn a, b` (`R::adds`, Z/N only) or a flag-setting logical result (Z/N only).
+fn fold_cond(cmp: &[S], cc: u8) -> Option<E> {
+    use CmpOp::*;
+    let b = |e: &E| Box::new(e.clone());
+    let zn = |v: &E| -> Option<E> {
+        let zero = Box::new(E::Lit(0));
+        Some(match cc {
+            0 => E::Cmp(Eq, false, b(v), zero),
+            1 => E::Cmp(Ne, false, b(v), zero),
+            4 => E::Cmp(Lt, true, b(v), zero),
+            5 => E::Cmp(Ge, true, b(v), zero),
+            _ => return None,
+        })
+    };
+    match cmp {
+        [S::Do(E::Call(H::Subs, a))] if a.len() == 3 => {
+            let (x, y) = (&a[1], &a[2]);
+            Some(match cc {
+                0 => E::Cmp(Eq, false, b(x), b(y)),
+                1 => E::Cmp(Ne, false, b(x), b(y)),
+                2 => E::Cmp(Ge, false, b(x), b(y)),
+                3 => E::Cmp(Lt, false, b(x), b(y)),
+                8 => E::Cmp(Gt, false, b(x), b(y)),
+                9 => E::Cmp(Le, false, b(x), b(y)),
+                10 => E::Cmp(Ge, true, b(x), b(y)),
+                11 => E::Cmp(Lt, true, b(x), b(y)),
+                12 => E::Cmp(Gt, true, b(x), b(y)),
+                13 => E::Cmp(Le, true, b(x), b(y)),
+                4 | 5 => return zn(&E::Bin(ir::Bin::Sub, b(x), b(y))),
+                _ => return None,
+            })
+        }
+        [S::Do(E::Call(H::Adds, a))] if a.len() == 3 => zn(&E::Bin(ir::Bin::Add, b(&a[1]), b(&a[2]))),
+        [S::SetNz(v)] => zn(v),
+        _ => None,
+    }
+}
+
+/// `cmp`/`cmn`/`tst`-like instruction followed by one conditional instruction that is the only
+/// reader of the flags: the compare goes, the condition becomes an expression (`if r0 == 0x13`).
+fn fold_compares(insts: &mut [ir::Ins], live: &BTreeMap<u32, u8>) {
+    'outer: for k in 0..insts.len().saturating_sub(1) {
+        if insts[k].cond != 14 || fold_cond(&insts[k].stmts, 0).is_none() {
+            continue;
+        }
+        // registers the compare reads: nothing in between may change them
+        let (mut read, mut _w) = (BTreeSet::new(), BTreeSet::new());
+        insts[k].stmts.iter().for_each(|s| regs_s(s, &mut read, &mut _w));
+        let mut j = k + 1;
+        while j < insts.len() {
+            let ins = &insts[j];
+            if ins.cond != 14 {
+                break;
+            }
+            // a plain instruction: no flags, no sync, no control transfer, keeps the compared registers
+            let (mut r, mut w) = (BTreeSet::new(), BTreeSet::new());
+            let mut flags = 0;
+            for s in &ins.stmts {
+                regs_s(s, &mut r, &mut w);
+                let (fr, fw) = crate::raise::stmt_flags(s);
+                flags |= fr | fw;
+                if matches!(s, S::Goto(_) | S::Call { .. } | S::IfSome(..) | S::ExcReturn(_)) || matches!(s, S::Do(e) if syncs(e)) {
+                    continue 'outer;
+                }
+            }
+            if flags != 0 || w.iter().any(|x| read.contains(x)) {
+                continue 'outer;
+            }
+            j += 1;
+        }
+        if j >= insts.len() {
+            continue;
+        }
+        let next = &insts[j];
+        if next.guard.is_some() || live[&next.addr] != 0 {
+            continue;
+        }
+        if next.stmts.iter().any(|s| crate::raise::stmt_flags(s).0 != 0 && !matches!(s, S::Goto(_) | S::Call { .. })) {
+            continue;
+        }
+        if live[&insts[k].addr] & !crate::raise::cond_reads(next.cond) != 0 {
+            continue;
+        }
+        if let Some(g) = fold_cond(&insts[k].stmts, next.cond) {
+            insts[j].guard = Some(g);
+            insts[k].stmts.clear();
+        }
+    }
+}
+
+/// `{r4, r5, lr}` for a register list.
+fn reg_list(list: u32) -> String {
+    let regs: Vec<String> = (0..16).filter(|i| list >> i & 1 != 0).map(|i| if i == 15 { "pc".into() } else { ir::reg_name(i as u8) }).collect();
+    format!("{{{}}}", regs.join(", "))
+}
+
+/// A readable note for a block transfer: `push {r4, lr}`, `pop {r4, pc}`, else `ldm`/`stm`.
+fn block_note(e: &E) -> String {
+    if let E::Call(H::Block | H::BlockUser, a) = e {
+        if let [_, _, E::Bool(load), E::Bool(pre), E::Bool(up), E::Bool(wb), E::Lit(rn), E::Hex(list), _] = a.as_slice() {
+            let what = match (load, pre, up, wb, rn) {
+                (false, true, false, true, 13) => "push".to_string(),
+                (true, false, true, true, 13) => "pop".to_string(),
+                _ => format!("{} {}{}", if *load { "ldm" } else { "stm" }, ir::reg_name(*rn as u8), if *wb { "!" } else { "" }),
+            };
+            return format!(" // {what} {}", reg_list(*list));
+        }
+    }
+    String::new()
+}
+
+/// [`emit_t1`]; `names(target)` gives a call target's name for a comment.
+pub fn emit_t1_named(f: &Func, id: &str, img: Option<&Image>, names: &dyn Fn(u32) -> Option<String>) -> Result<String, Reason> {
     let live = crate::raise::flag_liveness(f, img);
     // blocks reachable from the entry through internal edges
     let mut blocks: BTreeMap<u32, Block> = BTreeMap::new();
@@ -105,6 +223,9 @@ pub fn emit_t1(f: &Func, id: &str, img: Option<&Image>) -> Result<String, Reason
         for ins in &mut insts {
             crate::raise::drop_dead_flags(&mut ins.stmts, live[&ins.addr]);
             ir::fold_temps(&mut ins.stmts);
+        }
+        fold_compares(&mut insts, &live);
+        for ins in &mut insts {
             for s in &ins.stmts {
                 let unconditional = ins.cond == 14;
                 match s {
@@ -226,10 +347,13 @@ pub fn emit_t1(f: &Func, id: &str, img: Option<&Image>) -> Result<String, Reason
     for b in blocks.values() {
         for ins in &b.insts {
             ins.stmts.iter().for_each(|s| regs_s(s, &mut used, &mut written));
+            if let Some(g) = &ins.guard {
+                regs_e(g, &mut used);
+            }
         }
     }
     let all: BTreeSet<u8> = used.union(&written).copied().filter(|&i| i < 15).collect();
-    let ctx = Ctx { blocks: &blocks, rpo, idom, merge, header, children };
+    let ctx = Ctx { blocks: &blocks, rpo, idom, merge, header, children, names };
     let mut body = String::new();
     do_tree(&ctx, f.entry, 2, &mut body);
 
@@ -314,14 +438,21 @@ fn block_code(c: &Ctx, x: u32, depth: usize, out: &mut String) {
     let _ = writeln!(out, "budget!({:#X}, {}); // {:#X}", b.start, b.charge, b.start & !1);
     for ins in &b.insts {
         let mut text = String::new();
-        let inner = if ins.cond == 14 { depth } else { depth + 1 };
+        let inner = if ins.cond == 14 && ins.guard.is_none() { depth } else { depth + 1 };
         for s in &ins.stmts {
             stmt_code(c, x, s, inner, &mut text);
         }
         if text.is_empty() {
             continue;
         }
-        if ins.cond == 14 {
+        if let Some(g) = &ins.guard {
+            indent(out, depth);
+            let _ = writeln!(out, "if {} {{", ir::expr_locals(g));
+            out.push_str(&text);
+            indent(out, depth);
+            out.push_str("}
+");
+        } else if ins.cond == 14 {
             out.push_str(&text);
         } else {
             indent(out, depth);
@@ -355,19 +486,22 @@ fn stmt_code(c: &Ctx, x: u32, s: &S, depth: usize, out: &mut String) {
             let v = ir::expr_locals(e);
             line(out, &format!("spill!(); let v = {v}; let th = c.restore_spsr(); leave!(if th {{ v | 1 }} else {{ v & !3 }});"))
         }
-        S::Call { target, ret } => line(
-            out,
-            &format!("spill!(); let x = m.call(c, {}, {ret:#X}); if x != {ret:#X} {{ leave!(x); }} reload!();", ir::expr_locals(target)),
-        ),
+        S::Call { target, ret } => {
+            let name = match target {
+                E::Const(t) => (c.names)(*t).map(|n| format!(" // {n}")).unwrap_or_default(),
+                _ => String::new(),
+            };
+            line(out, &format!("spill!(); let x = m.call(c, {}, {ret:#X}); if x != {ret:#X} {{ leave!(x); }} reload!();{name}", ir::expr_locals(target)))
+        }
         S::IfSome(e, body) => {
             let exit = match body.as_slice() {
                 [S::Goto(E::Iw(v))] if **v == E::Tmp(ir::Tmp::V) => "leave!(iw(v));".to_string(),
                 [S::ExcReturn(E::Tmp(ir::Tmp::V))] => "let th = c.restore_spsr(); leave!(if th { v | 1 } else { v & !3 });".to_string(),
                 _ => unreachable!("block loads only jump"),
             };
-            line(out, &format!("spill!(); if let Some(v) = {} {{ {exit} }} reload!();", ir::expr_locals(e)))
+            line(out, &format!("spill!(); if let Some(v) = {} {{ {exit} }} reload!();{}", ir::expr_locals(e), block_note(e)))
         }
-        S::Do(e) if syncs(e) => line(out, &format!("spill!(); {}; reload!();", ir::expr_locals(e))),
+        S::Do(e) if syncs(e) => line(out, &format!("spill!(); {}; reload!();{}", ir::expr_locals(e), block_note(e))),
         S::SetReg(i, e) if syncs(e) => line(out, &format!("spill!(); let t = {}; reload!(); {} = t;", ir::expr_locals(e), ir::reg_name(*i))),
         S::Store { w: Width::B32, .. } | _ => line(out, &ir::print_locals(std::slice::from_ref(s))),
     }

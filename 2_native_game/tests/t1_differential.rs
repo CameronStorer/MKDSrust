@@ -22,6 +22,11 @@ fn build_checks(funcs: &[(String, u32, Func)], image: &[u8], base: u32, seeds: u
         raised += 1;
         src.push_str(&emit_full(f, name, Some(&img), None, true));
         src.push_str(&t1);
+        // flags live at each block start: at a slice end only these must match (dead flags may differ)
+        let (_, live_in) = recomp::raise::flag_liveness_blocks(f, Some(&img));
+        let rows: Vec<String> = live_in.iter().map(|(b, l)| format!("({b:#X}, {l})")).collect();
+        src.push_str(&format!("static LIVE_{name}: &[(u32, u8)] = &[{}];
+", rows.join(", ")));
         checks.push_str(&format!(
             r#"
     for seed in 0..{seeds}u64 {{
@@ -37,6 +42,14 @@ fn build_checks(funcs: &[(String, u32, Func)], image: &[u8], base: u32, seeds: u
         let p = f_{name}(&mut a, &mut x, {entry:#X});
         let q = f_{name}_t1(&mut b, &mut y, {entry:#X});
         assert_eq!(p, q, "{name} exit, seed {{seed}}");
+        if p == recomp::rt::BUDGET_EXHAUSTED {{
+            // dead flags may differ at a slice end: compare only the live ones
+            let live = LIVE_{name}.iter().find(|e| e.0 == a.r[15]).map_or(15, |e| e.1);
+            for (bit, (x, y)) in [(a.n, b.n), (a.z, b.z), (a.c, b.c), (a.v, b.v)].into_iter().enumerate() {{
+                if live >> bit & 1 != 0 {{ assert_eq!(x, y, "{name} live flag {{bit}}, seed {{seed}}"); }}
+            }}
+            a.n = b.n; a.z = b.z; a.c = b.c; a.v = b.v;
+        }}
         assert_eq!(a.state(), b.state(), "{name} state, seed {{seed}}");
         assert_eq!(a.budget, b.budget, "{name} budget, seed {{seed}}");
         assert_eq!(x.writes, y.writes, "{name} writes, seed {{seed}}");

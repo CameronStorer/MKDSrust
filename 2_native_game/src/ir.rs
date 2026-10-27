@@ -167,6 +167,19 @@ pub enum E {
     Load { w: Width, signed: bool, addr: Box<E> },
     /// A helper call.
     Call(H, Vec<E>),
+    /// A comparison (T1 only, from a compare whose flags only one condition reads): `signed`
+    /// compares as `i32`.
+    Cmp(CmpOp, bool, Box<E>, Box<E>),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CmpOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -553,7 +566,7 @@ fn prec(e: &E) -> u8 {
         E::Not(_) => 8,
         E::Load { w, .. } if *w != Width::B32 => 6, // `... as u32`
         E::BoolU32(_) => 6,
-        E::Bit(..) | E::Msb(_) | E::Lsb(_) => 0, // `... != 0`
+        E::Bit(..) | E::Msb(_) | E::Lsb(_) | E::Cmp(..) => 0, // `... != 0`
         E::Cond(cc) if matches!(cc, 8..=13) => 9, // printed with its own parentheses
         _ => 9,
     }
@@ -734,6 +747,18 @@ fn expr(out: &mut String, e: &E) {
             expr(out, a);
             out.push(')');
         }
+        E::Load { w, signed, addr } if LOCALS.with(|l| l.get()) && unmask(addr, *w).is_some() => {
+            let name = match (w, signed) {
+                (Width::B8, false) => "ld8",
+                (Width::B8, true) => "ld8s",
+                (Width::B16, false) => "ld16",
+                (Width::B16, true) => "ld16s",
+                (Width::B32, _) => "ld32",
+            };
+            let _ = write!(out, "R::{name}(m, ");
+            expr(out, unmask(addr, *w).unwrap());
+            out.push(')');
+        }
         E::Load { w, signed, addr } => {
             out.push_str(match w {
                 Width::B8 => "m.r8(",
@@ -748,6 +773,32 @@ fn expr(out: &mut String, e: &E) {
                 (Width::B8, true) => " as i8 as i32 as u32",
                 (Width::B16, true) => " as i16 as i32 as u32",
             });
+        }
+        E::Cmp(op, signed, a, b) => {
+            let side = |out: &mut String, e: &E| {
+                if *signed {
+                    out.push('(');
+                    sub(out, e, 9);
+                    out.push_str(" as i32)");
+                } else {
+                    sub(out, e, 9);
+                }
+            };
+            side(out, a);
+            out.push_str(match op {
+                CmpOp::Eq => " == ",
+                CmpOp::Ne => " != ",
+                CmpOp::Lt => " < ",
+                CmpOp::Le => " <= ",
+                CmpOp::Gt => " > ",
+                CmpOp::Ge => " >= ",
+            });
+            side(out, b);
+        }
+        E::Call(H::Ldr, a) if LOCALS.with(|l| l.get()) && a.len() == 2 => {
+            out.push_str("R::ldr(m, ");
+            expr(out, &a[1]);
+            out.push(')');
         }
         E::Call(h, a) => {
             out.push_str(match h {
@@ -791,6 +842,10 @@ fn stmt(out: &mut String, s: &S) {
             expr(out, e);
             out.push(';');
         }
+        S::SetReg(i, E::Const(v)) if LOCALS.with(|l| l.get()) => {
+            reg(out, *i);
+            let _ = write!(out, " = {v:#X};");
+        }
         S::SetReg(i, e) => {
             reg(out, *i);
             out.push_str(" = ");
@@ -805,6 +860,18 @@ fn stmt(out: &mut String, s: &S) {
         S::SetNz(e) => {
             out.push_str("R::set_nz(c, ");
             expr(out, e);
+            out.push_str(");");
+        }
+        S::Store { w, addr, val } if LOCALS.with(|l| l.get()) && unmask(addr, *w).is_some() => {
+            let name = match w {
+                Width::B8 => "st8",
+                Width::B16 => "st16",
+                Width::B32 => "st32",
+            };
+            let _ = write!(out, "R::{name}(m, ");
+            expr(out, unmask(addr, *w).unwrap());
+            out.push_str(", ");
+            expr(out, val);
             out.push_str(");");
         }
         S::Store { w, addr, val } => {
@@ -877,6 +944,8 @@ pub struct Ins {
     /// Condition code (14 = always).
     pub cond: u8,
     pub stmts: Vec<S>,
+    /// T1: the condition as an expression replacing `cond` (a folded compare).
+    pub guard: Option<E>,
 }
 
 /// The lowered instructions of the block starting at `start`.
@@ -885,7 +954,7 @@ pub fn lower_block(f: &crate::lift::Func, start: u32, img: Option<&Image>) -> Ve
         .into_iter()
         .map(|(a, d)| {
             let next = crate::lift::Func::next(a, &d);
-            Ins { addr: a, cond: d.cond, stmts: lower(&d, a & !1, next & !1, img) }
+            Ins { addr: a, cond: d.cond, stmts: lower(&d, a & !1, next & !1, img), guard: None }
         })
         .collect()
 }
@@ -902,7 +971,7 @@ pub fn is_pure(e: &E) -> bool {
     match e {
         E::Call(H::ShiftImmValue | H::ShiftReg, a) => a.iter().all(is_pure),
         E::Call(..) | E::Load { .. } => false,
-        E::Bin(_, a, b) => is_pure(a) && is_pure(b),
+        E::Bin(_, a, b) | E::Cmp(_, _, a, b) => is_pure(a) && is_pure(b),
         E::Not(a) | E::Shl(a, _) | E::Lsr(a, _) | E::Asr(a, _) | E::Ror(a, _) | E::Rrx(a) | E::Bit(a, _) | E::Msb(a) | E::Lsb(a) | E::BoolU32(a) | E::Clz(a) | E::Iw(a) => is_pure(a),
         _ => true,
     }
@@ -910,7 +979,7 @@ pub fn is_pure(e: &E) -> bool {
 
 fn expr_children(e: &mut E) -> Vec<&mut E> {
     match e {
-        E::Bin(_, a, b) => vec![&mut **a, &mut **b],
+        E::Bin(_, a, b) | E::Cmp(_, _, a, b) => vec![&mut **a, &mut **b],
         E::Not(a) | E::Shl(a, _) | E::Lsr(a, _) | E::Asr(a, _) | E::Ror(a, _) | E::Rrx(a) | E::Bit(a, _) | E::Msb(a) | E::Lsb(a) | E::BoolU32(a) | E::Clz(a) | E::Iw(a) => vec![&mut **a],
         E::Load { addr, .. } => vec![&mut **addr],
         E::Call(_, a) => a.iter_mut().collect(),
@@ -1007,5 +1076,18 @@ pub fn fold_temps(stmts: &mut Vec<S>) {
         if !changed {
             break;
         }
+    }
+}
+
+/// The address without the alignment mask a `w`-wide access applies (`a & !3` -> `a`), if it has it.
+fn unmask(addr: &E, w: Width) -> Option<&E> {
+    let k = match w {
+        Width::B8 => return Some(addr),
+        Width::B16 => 1,
+        Width::B32 => 3,
+    };
+    match addr {
+        E::Bin(Bin::And, a, m) if **m == E::Not(Box::new(E::Lit(k))) => Some(a),
+        _ => None,
     }
 }
