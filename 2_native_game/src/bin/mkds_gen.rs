@@ -842,6 +842,7 @@ fn run() -> Result<ExitCode, String> {
     );
     let mut table7 = String::from("/// The ARM7 program, found by whole-program discovery (no metadata), plus our ARM7 IRQ stub at 0x18.\npub static LIFTED7: &[recomp::mem::Lifted] = &[\n");
     let mut members = Vec::new();
+    let mut part_of: HashMap<String, String> = HashMap::new();
     let mut deps = String::new();
     let mut bytes = 0usize;
     for (n, chunk) in parts.iter().enumerate().filter(|(_, c)| !c.is_empty()) {
@@ -851,6 +852,7 @@ fn run() -> Result<ExitCode, String> {
         put(dir.join("Cargo.toml"), &format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n{recomp_dep}\n"))?;
         let mut src = String::from("//! Generated from the user's ROM (lifted machine code).\n#![allow(non_snake_case, non_upper_case_globals, clippy::all)]\n");
         for f in chunk {
+            part_of.insert(f.id.clone(), name.clone());
             src.push_str(&f.code);
             let t = if f.arm7 { &mut table7 } else { &mut table };
             if let Ok(t1) = &f.t1 {
@@ -975,13 +977,15 @@ fn run() -> Result<ExitCode, String> {
     let fallback_sites = fallback_sites + fallback_sites7;
     put(args.out.join("coverage.csv"), &csv_out)?;
     // block 4B tiers: which functions run raised (T1) and why the others stay exact translations
-    let mut tiers = String::from("segment,entry,tier,reason
+    let mut tiers = String::from("segment,entry,tier,name,part,reason
 ");
     let mut tier_counts: BTreeMap<&str, usize> = BTreeMap::new();
     for f in &funcs {
         let (tier, reason) = match &f.t1 { Ok(_) => ("T1", ""), Err(r) => ("T0", *r) };
         *tier_counts.entry(if f.t1.is_ok() { "T1" } else { reason }).or_default() += 1;
-        let _ = writeln!(tiers, "{},{:#010X},{tier},{reason}", f.segment, f.entry);
+        let part = part_of.get(&f.id).map(|s| s.as_str()).unwrap_or("");
+        let name = if f.t1.is_ok() { f.t1_name.as_str() } else { "" };
+        let _ = writeln!(tiers, "{},{:#010X},{tier},{name},{part},{reason}", f.segment, f.entry);
     }
     put(args.out.join("tiers.csv"), &tiers)?;
     eprintln!("mkds_gen: tiers {tier_counts:?}");

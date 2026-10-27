@@ -635,14 +635,27 @@ pub fn recompile(
 
 /// Placed in the bundle's `source/`: how to read and rebuild the generated code.
 const SOURCE_README: &str = "This is the Rust generated on your machine from your own ROM by mkds_builder.
-part_NN/  the game's machine code, lifted to Rust (one function per ROM function)
-lifted/   the table of lifted functions and the ROM/metadata hashes they came from
-game/     the program: checks your ROM, then runs the lifted code on the native host
+
+part_NN/  the game's code, one Rust function per ROM function, in two versions:
+          - the readable version (named after the function, e.g. `os_sleep_thread`, or `sub_<segment>_<address>`):
+            registers as local variables, if/loop/match control flow, calls and struct fields commented with
+            the names the project's research found. This is the version that runs at each function's entry.
+          - the exact translation `f_<segment>_<address>` (a loop over the ARM blocks): the readable version
+            continues there when control does something unusual (a thread switch, a computed jump).
+          Both behave identically; each charges the same instruction budget at every original block.
+lifted/   the table of all functions (both versions) and the ROM/metadata hashes they came from
+game/     the program: checks your files, then runs the code on the native host
+tiers.csv  every function: address, tier (T1 readable / T0 exact only), Rust name, crate, reason
 coverage.csv / generation.json  every function the generator was given and what happened to it
+
+How to read it: open tiers.csv, find a function by name, then its crate part_NN/src/lib.rs.
+`budget!(..)` lines keep the console's timing; `spill!()`/`reload!()` keep the CPU registers exact around
+calls; `R::ld32`/`R::st32` etc. are the game's memory accesses (DS addresses).
 
 Rebuild (from this folder, with the project checkout still where it was when you built):
     cargo build --release --locked --offline
 The runtime crates (recomp, mkds_native, mkds_builder) are referenced by absolute path into that checkout.
+Environment switches when running: MKDS_T1=off (exact translations only), MKDS_FLAT=1 (no fibers).
 This code is derived from copyrighted game data: keep it for your own use and do not distribute it.
 ";
 
