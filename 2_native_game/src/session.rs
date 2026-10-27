@@ -354,6 +354,7 @@ impl<'a> Session<'a> {
         self.cpu.budget = limit;
         let called_interp = self.dispatcher.interpreted();
         fibered::run_slice(self)?;
+        self.pc = self.fibers.as_ref().map_or(self.pc, |f| f.last_end.0); // diagnostics only
         if let Some(e) = self.dispatcher.take_error() {
             return Err(e);
         }

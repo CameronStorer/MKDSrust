@@ -242,9 +242,10 @@ fn write_signatures(
     Ok(())
 }
 
-/// Block 4B passes in the generated code (experimental until proven by a race): `MKDS_RAISE=1`.
+/// Block 4B passes that keep exact behaviour (proven by a bit-identical race): on by default;
+/// `MKDS_EXACT=1` generates the plain translation.
 fn raise() -> bool {
-    std::env::var_os("MKDS_RAISE").is_some()
+    std::env::var_os("MKDS_EXACT").is_none()
 }
 
 fn sha_hex(bytes: &[u8]) -> String {

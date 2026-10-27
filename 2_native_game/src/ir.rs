@@ -593,11 +593,48 @@ fn args(out: &mut String, a: &[E]) {
     }
 }
 
+thread_local! {
+    /// Print registers as the T1 local variables (`r0`.., `sp`, `lr`) instead of `c.r[i]`.
+    static LOCALS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The T1 local variable holding register `i`.
+pub fn reg_name(i: u8) -> String {
+    match i {
+        13 => "sp".into(),
+        14 => "lr".into(),
+        _ => format!("r{i}"),
+    }
+}
+
+fn reg(out: &mut String, i: u8) {
+    if LOCALS.with(|l| l.get()) {
+        out.push_str(&reg_name(i));
+    } else {
+        let _ = write!(out, "c.r[{i}]");
+    }
+}
+
+/// [`print`] with registers as T1 local variables.
+pub fn print_locals(stmts: &[S]) -> String {
+    LOCALS.with(|l| l.set(true));
+    let s = print(stmts);
+    LOCALS.with(|l| l.set(false));
+    s
+}
+
+/// [`expr`] text with registers as T1 local variables.
+pub fn expr_locals(e: &E) -> String {
+    LOCALS.with(|l| l.set(true));
+    let mut s = String::new();
+    expr(&mut s, e);
+    LOCALS.with(|l| l.set(false));
+    s
+}
+
 fn expr(out: &mut String, e: &E) {
     match e {
-        E::Reg(i) => {
-            let _ = write!(out, "c.r[{i}]");
-        }
+        E::Reg(i) => reg(out, *i),
         E::Const(v) => {
             let _ = write!(out, "{v:#X}u32");
         }
@@ -755,7 +792,8 @@ fn stmt(out: &mut String, s: &S) {
             out.push(';');
         }
         S::SetReg(i, e) => {
-            let _ = write!(out, "c.r[{i}] = ");
+            reg(out, *i);
+            out.push_str(" = ");
             expr(out, e);
             out.push(';');
         }
@@ -855,4 +893,119 @@ pub fn lower_block(f: &crate::lift::Func, start: u32, img: Option<&Image>) -> Ve
 /// Collapses whitespace runs to one space (the T0 contract compares text up to whitespace).
 pub fn normalize(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+// ---- temp folding (T1) -----------------------------------------------------------------------
+
+/// True if evaluating `e` has no effect besides its value (no helper with effects, no memory read).
+pub fn is_pure(e: &E) -> bool {
+    match e {
+        E::Call(H::ShiftImmValue | H::ShiftReg, a) => a.iter().all(is_pure),
+        E::Call(..) | E::Load { .. } => false,
+        E::Bin(_, a, b) => is_pure(a) && is_pure(b),
+        E::Not(a) | E::Shl(a, _) | E::Lsr(a, _) | E::Asr(a, _) | E::Ror(a, _) | E::Rrx(a) | E::Bit(a, _) | E::Msb(a) | E::Lsb(a) | E::BoolU32(a) | E::Clz(a) | E::Iw(a) => is_pure(a),
+        _ => true,
+    }
+}
+
+fn expr_children(e: &mut E) -> Vec<&mut E> {
+    match e {
+        E::Bin(_, a, b) => vec![&mut **a, &mut **b],
+        E::Not(a) | E::Shl(a, _) | E::Lsr(a, _) | E::Asr(a, _) | E::Ror(a, _) | E::Rrx(a) | E::Bit(a, _) | E::Msb(a) | E::Lsb(a) | E::BoolU32(a) | E::Clz(a) | E::Iw(a) => vec![&mut **a],
+        E::Load { addr, .. } => vec![&mut **addr],
+        E::Call(_, a) => a.iter_mut().collect(),
+        _ => vec![],
+    }
+}
+
+/// Occurrences of `t` in `e`; with `with`, replaces them.
+fn subst_expr(e: &mut E, t: Tmp, with: Option<&E>) -> usize {
+    if *e == E::Tmp(t) {
+        if let Some(w) = with {
+            *e = w.clone();
+        }
+        return 1;
+    }
+    expr_children(e).into_iter().map(|c| subst_expr(c, t, with)).sum()
+}
+
+fn stmt_exprs(s: &mut S) -> Vec<&mut E> {
+    match s {
+        S::Let(_, e) | S::Let2(_, _, e) | S::SetReg(_, e) | S::SetFlag(_, e) | S::SetNz(e) | S::Do(e) | S::Goto(e) | S::ExcReturn(e) => vec![e],
+        S::Store { addr, val, .. } => vec![addr, val],
+        S::Call { target, .. } => vec![target],
+        S::IfSome(e, body) => {
+            let mut v = vec![e];
+            for b in body.iter_mut() {
+                v.extend(stmt_exprs(b));
+            }
+            v
+        }
+    }
+}
+
+fn binds(s: &S, t: Tmp) -> bool {
+    match s {
+        S::Let(a, _) => *a == t,
+        S::Let2(a, b, _) => *a == t || *b == t,
+        _ => false,
+    }
+}
+
+/// Uses of `t` in `stmts` until it is bound again.
+fn uses(stmts: &mut [S], t: Tmp) -> usize {
+    let mut n = 0;
+    for s in stmts.iter_mut() {
+        n += stmt_exprs(s).into_iter().map(|e| subst_expr(e, t, None)).sum::<usize>();
+        if binds(s, t) {
+            break;
+        }
+    }
+    n
+}
+
+/// Folds single-use temporaries into the statement that uses them and drops unused pure ones, so
+/// `let res = a.wrapping_add(b); c.r[3] = res;` reads `r3 = a.wrapping_add(b);`. Evaluation order is
+/// kept: an expression with effects only moves into the very next statement, and only when that
+/// statement is just a copy of it.
+pub fn fold_temps(stmts: &mut Vec<S>) {
+    loop {
+        let mut changed = false;
+        let mut k = 0;
+        while k < stmts.len() {
+            let S::Let(t, e) = stmts[k].clone() else {
+                k += 1;
+                continue;
+            };
+            let n = uses(&mut stmts[k + 1..], t);
+            if n == 0 {
+                if is_pure(&e) {
+                    stmts.remove(k);
+                } else {
+                    stmts[k] = S::Do(e);
+                    k += 1;
+                }
+                changed = true;
+                continue;
+            }
+            if n == 1 && k + 1 < stmts.len() {
+                let next_uses = stmt_exprs(&mut stmts[k + 1]).into_iter().map(|x| subst_expr(x, t, None)).sum::<usize>();
+                let copy = matches!(&stmts[k + 1], S::SetReg(_, E::Tmp(u)) | S::Let(_, E::Tmp(u)) if *u == t);
+                // a pure value may move into any position of the next statement: nothing in a
+                // statement writes registers or flags before its operands are evaluated
+                if next_uses == 1 && (copy || is_pure(&e)) && !matches!(stmts[k + 1], S::IfSome(..)) {
+                    for x in stmt_exprs(&mut stmts[k + 1]) {
+                        subst_expr(x, t, Some(&e));
+                    }
+                    stmts.remove(k);
+                    changed = true;
+                    continue;
+                }
+            }
+            k += 1;
+        }
+        if !changed {
+            break;
+        }
+    }
 }

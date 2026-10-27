@@ -99,6 +99,11 @@ pub fn run_with_tables(
             .configure_lifted(table7, false);
     }
     session.configure_residency(signatures)?;
+    // Block 4A.2: the ARM9 runs in fibers (nested calls; proven identical to the flat loop over a
+    // full race). MKDS_FLAT=1 restores the flat loop.
+    if std::env::var_os("MKDS_FLAT").is_none() {
+        session.enable_fibers();
+    }
     // MKDS_SHADOW=1: every native function, each call checked against its translation (block 3)
     if std::env::var_os("MKDS_SHADOW").is_some() {
         session.enable_shadow(recomp::native::NATIVE);

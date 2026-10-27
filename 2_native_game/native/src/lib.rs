@@ -380,6 +380,11 @@ fn emulate(
             .configure_lifted(table7, options.diagnostic_arm7_interpreter);
     }
     session.configure_residency(signatures)?;
+    // Block 4A.2: the ARM9 runs in fibers (nested calls; proven identical to the flat loop over a
+    // full race). MKDS_FLAT=1 restores the flat loop.
+    if std::env::var_os("MKDS_FLAT").is_none() {
+        session.enable_fibers();
+    }
     if let Some(path) = &options.gx_trace {
         session
             .machine

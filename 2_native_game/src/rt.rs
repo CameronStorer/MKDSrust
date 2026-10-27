@@ -581,3 +581,23 @@ mod tests {
         assert_eq!(mul_long(&mut c, true, false, false, (-3i32) as u32, 5, 0, 0), ((-15i32) as u32, u32::MAX));
     }
 }
+
+/// Block 4B: whether the raised (T1) version of the function at `entry` runs (else its exact T0
+/// translation does). `MKDS_T1` unset or `all`: every T1; `off`: none; otherwise a file of entry
+/// addresses (hex, one per line) for bisecting.
+pub fn t1_enabled(entry: u32) -> bool {
+    use std::sync::OnceLock;
+    static SET: OnceLock<Option<std::collections::HashSet<u32>>> = OnceLock::new();
+    let set = SET.get_or_init(|| match std::env::var("MKDS_T1").ok().as_deref() {
+        None | Some("all") | Some("") => None,
+        Some("off") => Some(Default::default()),
+        Some(path) => Some(
+            std::fs::read_to_string(path)
+                .unwrap_or_else(|e| panic!("MKDS_T1 file {path}: {e}"))
+                .lines()
+                .filter_map(|l| u32::from_str_radix(l.trim().trim_start_matches("0x").trim_start_matches("0X"), 16).ok())
+                .collect(),
+        ),
+    });
+    set.as_ref().is_none_or(|s| s.contains(&entry) || s.contains(&(entry & !1)))
+}
