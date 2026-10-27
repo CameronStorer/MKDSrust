@@ -35,7 +35,7 @@ mod thumb;
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -322,6 +322,8 @@ struct Lifted {
     t1: Result<String, &'static str>,
     /// The raised version's Rust name (the dictionary name where there is one).
     t1_name: String,
+    /// The field accessors the raised version calls (defined in the `layout` crate).
+    fields: Vec<(ir::FieldRef, ir::Access)>,
 }
 
 const RUST_KEYWORDS: &[&str] = &[
@@ -373,7 +375,10 @@ fn call_name(segment: &str, target: u32) -> Option<String> {
 /// function uses (by entry, without the Thumb bit) and global names by address.
 #[derive(Default)]
 struct Layout {
-    fields: HashMap<(String, u32), String>,
+    /// (struct, offset) -> (field name, type).
+    fields: HashMap<(String, u32), (String, String)>,
+    /// Struct -> its Rust module name.
+    modules: BTreeMap<String, String>,
     uses: HashMap<u32, Vec<(String, u32)>>,
     globals: HashMap<u32, String>,
 }
@@ -389,10 +394,29 @@ fn load_layout(dir: &Path) -> Layout {
     let rows = |name: &str| -> Vec<Vec<String>> {
         std::fs::read_to_string(dir.join(name)).map(|t| csv_records(&t).into_iter().skip(1).collect()).unwrap_or_default()
     };
+    let mut taken: HashSet<(String, String)> = HashSet::new();
     for r in rows("fields.csv") {
         if let (Some(st), Some(off), Some(n)) = (r.first(), r.get(1).and_then(|o| hex(o)), r.get(2)) {
-            l.fields.insert((st.clone(), off), n.clone());
+            // field names unique per struct, usable as Rust names
+            let mut name = rust_ident(&snake_case(n));
+            if !taken.insert((st.clone(), name.clone())) {
+                name = format!("{name}_{off:x}");
+                taken.insert((st.clone(), name.clone()));
+            }
+            l.fields.insert((st.clone(), off), (name, r.get(3).cloned().unwrap_or_default()));
         }
+    }
+    let mut used: HashSet<String> = ["std", "core", "alloc", "recomp", "layout", "r", "iw", "m", "c"].iter().map(|s| s.to_string()).collect();
+    let structs: BTreeSet<String> = l.fields.keys().map(|(st, _)| st.clone()).collect();
+    for st in structs {
+        let base = rust_ident(&snake_case(&st));
+        let mut m = base.clone();
+        let mut k = 2;
+        while !used.insert(m.clone()) {
+            m = format!("{base}_{k}");
+            k += 1;
+        }
+        l.modules.insert(st, m);
     }
     for r in rows("field_uses.csv") {
         if let (Some(f), Some(st), Some(off)) = (r.first().and_then(|f| hex(f)), r.get(1), r.get(2).and_then(|o| hex(o))) {
@@ -407,15 +431,161 @@ fn load_layout(dir: &Path) -> Layout {
     l
 }
 
-/// `Struct.field` if the function at `entry` is known to access exactly one named field at `off`.
-fn field_name(entry: u32, off: u32) -> Option<String> {
+/// The field if the function at `entry` is known to access exactly one named field at `off`.
+fn field_name(entry: u32, off: u32) -> Option<ir::FieldRef> {
     let l = LAYOUT.get()?;
     let mut hits = l.uses.get(&(entry & !1))?.iter().filter(|(_, o)| *o == off);
     let (st, o) = hits.next()?;
     if hits.next().is_some() {
         return None;
     }
-    Some(format!("{st}.{}", l.fields.get(&(st.clone(), *o))?))
+    let (name, ty) = l.fields.get(&(st.clone(), *o))?;
+    Some(ir::FieldRef { strukt: st.clone(), module: l.modules.get(st)?.clone(), name: name.clone(), off: *o, primary: primary_access(ty) })
+}
+
+/// Fields without a scalar type take the access the code uses most as their plain accessor
+/// (`kart::bounce(m, p)` instead of `kart::bounce_u32(m, p)`): the raised text and the recorded
+/// uses are renamed to match.
+fn untyped_field_widths(funcs: &mut [Lifted]) {
+    let mut count: HashMap<(String, u32), BTreeMap<ir::Access, usize>> = HashMap::new();
+    for f in funcs.iter() {
+        for (r, a) in &f.fields {
+            if r.primary.is_none() && !a.is_store() {
+                *count.entry((r.strukt.clone(), r.off)).or_default().entry(*a).or_default() += 1;
+            }
+        }
+    }
+    // most used load; ties go to the first kind
+    let pick: HashMap<(String, u32), ir::Access> = count.into_iter().map(|(k, m)| {
+        let best = m.iter().max_by(|x, y| x.1.cmp(y.1).then(y.0.cmp(x.0))).map(|(a, _)| *a).unwrap();
+        (k, best)
+    }).collect();
+    for f in funcs.iter_mut() {
+        if f.fields.is_empty() {
+            continue;
+        }
+        let mut renames: BTreeMap<String, String> = BTreeMap::new();
+        for (r, a) in f.fields.iter_mut() {
+            if r.primary.is_some() {
+                continue;
+            }
+            if let Some(&p) = pick.get(&(r.strukt.clone(), r.off)) {
+                let old = format!("{}::{}(", r.module, r.accessor(*a));
+                r.primary = Some(p);
+                renames.insert(old, format!("{}::{}(", r.module, r.accessor(*a)));
+            }
+        }
+        if let Ok(t) = &mut f.t1 {
+            // longest first, so `x_u32(` is not hit by a shorter name's pattern
+            let mut v: Vec<_> = renames.into_iter().filter(|(a, b)| a != b).collect();
+            v.sort_by_key(|(a, _)| std::cmp::Reverse(a.len()));
+            for (a, b) in v {
+                *t = replace_word(t, &a, &b);
+            }
+        }
+    }
+}
+
+/// `text` with `from` replaced where it starts a word (not preceded by an identifier character).
+fn replace_word(text: &str, from: &str, to: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find(from) {
+        let prev = if i > 0 { rest[..i].chars().last() } else { out.chars().last() };
+        out.push_str(&rest[..i]);
+        if prev.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+            out.push_str(from);
+        } else {
+            out.push_str(to);
+        }
+        rest = &rest[i + from.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The access a field type implies: scalars of 1, 2 or 4 bytes (`fx12`/`fx32` are 4-byte fixed
+/// point, `fx16` 2-byte); none for vectors, arrays and unknown types.
+fn primary_access(ty: &str) -> Option<ir::Access> {
+    use ir::Access::*;
+    let t = ty.trim().trim_matches('"').trim().to_ascii_lowercase();
+    match t.as_str() {
+        "u8" | "bool" => Some(U8),
+        "s8" | "i8" => Some(I8),
+        "u16" => Some(U16),
+        "s16" | "i16" | "fx16" => Some(I16),
+        "u32" | "s32" | "i32" | "fx12" | "fx32" | "fnptr" => Some(U32),
+        _ if t.starts_with("ptr") => Some(U32),
+        _ => None,
+    }
+}
+
+/// `CamelCase` / `mixed_Case` -> `snake_case`.
+fn snake_case(s: &str) -> String {
+    let mut out = String::new();
+    let mut prev_lower = false;
+    for ch in s.chars() {
+        if ch.is_ascii_uppercase() {
+            if prev_lower {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+            prev_lower = false;
+        } else if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            prev_lower = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+        } else {
+            if !out.ends_with('_') {
+                out.push('_');
+            }
+            prev_lower = false;
+        }
+    }
+    out.trim_matches('_').to_string()
+}
+
+/// `s` as a usable Rust identifier: never empty, never starting with a digit, never a keyword.
+fn rust_ident(s: &str) -> String {
+    const KW: &[&str] = &["as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "self", "static", "struct", "super", "trait", "true", "type", "unsafe", "use", "where", "while", "async", "await", "dyn", "abstract", "become", "box", "do", "final", "macro", "override", "priv", "typeof", "unsized", "virtual", "yield", "try", "gen", "union"];
+    let s = if s.is_empty() { "field".to_string() } else { s.to_string() };
+    let s = if s.starts_with(|c: char| c.is_ascii_digit()) { format!("f_{s}") } else { s };
+    if KW.contains(&s.as_str()) { format!("{s}_") } else { s }
+}
+
+/// The `layout` crate: every research struct as a module with its field offsets (`pub const`) and
+/// the accessors the raised code calls, each the exact helper call it replaces.
+fn layout_crate(used: &BTreeSet<(ir::FieldRef, ir::Access)>) -> String {
+    let mut s = String::from(
+        "//! Struct layouts from our research: field offsets, and the accessors the raised code uses\n\
+         //! (`kart::racer_index(m, p)` reads the field of the struct at `p`). Each accessor is exactly\n\
+         //! the memory access it names. Generated; the names come from the dictionary.\n\
+         #![allow(non_snake_case, dead_code, clippy::all)]\n",
+    );
+    let Some(l) = LAYOUT.get() else { return s };
+    let mut by_struct: BTreeMap<&str, Vec<(u32, &str, &str)>> = BTreeMap::new();
+    for ((st, off), (n, ty)) in &l.fields {
+        by_struct.entry(st).or_default().push((*off, n, ty));
+    }
+    for (st, mut fields) in by_struct {
+        fields.sort();
+        let module = &l.modules[st];
+        let _ = writeln!(s, "\n/// `{st}`.\npub mod {module} {{\n    #[allow(unused_imports)] use recomp::rt as R;\n    #[allow(unused_imports)] use recomp::rt::Mem;");
+        for (off, n, ty) in &fields {
+            let ty = if ty.is_empty() { String::new() } else { format!(": `{}`", ty.replace(['\n', '\r', '`'], " ")) };
+            let _ = writeln!(s, "    /// `{n}`{ty}\n    pub const {}: u32 = {off:#X};", n.to_ascii_uppercase());
+        }
+        for (f, a) in used.iter().filter(|(f, _)| f.strukt == st) {
+            let off = f.off;
+            let at = if off == 0 { "p".to_string() } else { format!("p.wrapping_add({off:#X})") };
+            if a.is_store() {
+                let _ = writeln!(s, "    #[inline(always)] pub fn {}<M: Mem + ?Sized>(m: &mut M, p: u32, v: u32) {{ R::{}(m, {at}, v) }}", f.accessor(*a), a.helper());
+            } else {
+                let _ = writeln!(s, "    #[inline(always)] pub fn {}<M: Mem + ?Sized>(m: &mut M, p: u32) -> u32 {{ R::{}(m, {at}) }}", f.accessor(*a), a.helper());
+            }
+        }
+        s.push_str("}\n");
+    }
+    s
 }
 
 fn global_name(a: u32) -> Option<String> {
@@ -434,8 +604,9 @@ fn lifted9(segment: String, f: &lift::Func, id: String, img: &lift::Image) -> Li
         let notes = raise_emit::Notes { call: &|t| call_name(&segment, t), field: &|off| field_name(entry, off), global: &global_name };
         raise_emit::emit_t1_annotated(f, &id, Some(img), &notes)
     };
+    let fields = if t1.is_ok() { ir::take_field_uses() } else { Vec::new() };
     let t1_name = format!("f_{id}_t1");
-    Lifted { arm7: false, segment, entry: f.entry, code, t1, t1_name, id }
+    Lifted { arm7: false, segment, entry: f.entry, code, t1, t1_name, id, fields }
 }
 
 fn run() -> Result<ExitCode, String> {
@@ -767,11 +938,11 @@ fn run() -> Result<ExitCode, String> {
         extra.push(discovered_row(&seg, f));
         funcs.push(Lifted { arm7: true, segment: seg, entry, code: lift::emit_full(f, &id, Some(&img7), Some(&|d, jumped| rt::arm7_cycles(d, true, jumped)), raise()), t1: if raise() && std::env::var_os("MKDS_NO_T1").is_none() {
             let none = |_: u32| None;
-            let notes = raise_emit::Notes { call: &none, field: &none, global: &none };
+            let notes = raise_emit::Notes { call: &none, field: &|_| None, global: &none };
             raise_emit::emit_t1_full(f, &id, Some(&img7), &notes, Some(&|d, jumped| rt::arm7_cycles(d, true, jumped)))
         } else {
             Err("exact generation")
-        }, t1_name: format!("f_{id}_t1"), id });
+        }, t1_name: format!("f_{id}_t1"), id, fields: Vec::new() });
     }
 
     // output directory: only create/replace our own previous output
@@ -788,7 +959,7 @@ fn run() -> Result<ExitCode, String> {
     if let Ok(dir) = std::fs::read_dir(&args.out) {
         for e in dir.flatten() {
             let n = e.file_name().to_string_lossy().into_owned();
-            if n.starts_with("part_") || n == "lifted" || n == "game" {
+            if n.starts_with("part_") || n == "lifted" || n == "game" || n == "layout" {
                 let _ = std::fs::remove_dir_all(e.path());
             }
         }
@@ -816,6 +987,7 @@ fn run() -> Result<ExitCode, String> {
     }
 
     name_t1(&mut funcs);
+    untyped_field_widths(&mut funcs);
 
     // balanced parts by emitted source size
     let recomp_dep = format!("recomp = {{ path = {} }}", toml_path(&recomp_path));
@@ -849,8 +1021,8 @@ fn run() -> Result<ExitCode, String> {
         let name = format!("part_{n:02}");
         let dir = args.out.join(&name);
         std::fs::create_dir_all(dir.join("src")).map_err(|e| e.to_string())?;
-        put(dir.join("Cargo.toml"), &format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n{recomp_dep}\n"))?;
-        let mut src = String::from("//! Generated from the user's ROM (lifted machine code).\n#![allow(non_snake_case, non_upper_case_globals, clippy::all)]\n");
+        put(dir.join("Cargo.toml"), &format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n{recomp_dep}\nlayout = {{ path = \"../layout\" }}\n"))?;
+        let mut src = String::from("//! Generated from the user's ROM (lifted machine code).\n#![allow(non_snake_case, non_upper_case_globals, clippy::all)]\n#[allow(unused_imports)]\nuse layout::*;\n");
         for f in chunk {
             part_of.insert(f.id.clone(), name.clone());
             src.push_str(&f.code);
@@ -905,6 +1077,21 @@ fn run() -> Result<ExitCode, String> {
     put(ldir.join("Cargo.toml"), &format!("[package]\nname = \"lifted\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n{recomp_dep}\n{deps}"))?;
     put(ldir.join("src/lib.rs"), &table)?;
     members.push("lifted".into());
+    // struct layouts and the field accessors the raised code calls
+    let used: BTreeSet<(ir::FieldRef, ir::Access)> = funcs.iter().flat_map(|f| f.fields.iter().cloned()).collect();
+    let ydir = args.out.join("layout");
+    std::fs::create_dir_all(ydir.join("src")).map_err(|e| e.to_string())?;
+    put(ydir.join("Cargo.toml"), &format!("[package]
+name = \"layout\"
+version = \"0.1.0\"
+edition = \"2024\"
+
+[dependencies]
+{recomp_dep}
+"))?;
+    put(ydir.join("src/lib.rs"), &layout_crate(&used))?;
+    members.push("layout".into());
+    eprintln!("mkds_gen: {} field accessors in layout", used.len());
     if args.game {
         let builder = recomp_path.parent().unwrap().join("1_build_tool");
         let gdir = args.out.join("game");
@@ -1026,7 +1213,7 @@ fn run() -> Result<ExitCode, String> {
     println!(
         "{status}: {lifted_n}/{} entries lifted in {} part crates ({:.1} MB), {fallback_sites} undecoded sites left to the interpreter -> {}",
         rows.len(),
-        members.len() - 1 - args.game as usize,
+        members.len() - 2 - args.game as usize,
         bytes as f64 / 1e6,
         args.out.display()
     );

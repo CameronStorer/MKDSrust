@@ -609,6 +609,137 @@ fn args(out: &mut String, a: &[E]) {
 thread_local! {
     /// Print registers as the T1 local variables (`r0`.., `sp`, `lr`) instead of `c.r[i]`.
     static LOCALS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Named struct fields by offset for the function being printed (T1 accessors).
+    static FIELDS: std::cell::RefCell<std::collections::HashMap<u32, FieldRef>> = std::cell::RefCell::new(Default::default());
+    /// The accessors printed since the last [`take_field_uses`].
+    static FIELD_USES: std::cell::RefCell<Vec<(FieldRef, Access)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// A named struct field: T1 prints `base + off` memory accesses as accessors
+/// (`kart::racer_index(m, r4)`, `kart::set_racer_index(m, r4, r0)`), defined in the `layout` crate.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FieldRef {
+    /// The research struct name (`Kart`).
+    pub strukt: String,
+    /// Its Rust module (`kart`).
+    pub module: String,
+    /// The field's Rust name (`racer_index`).
+    pub name: String,
+    pub off: u32,
+    /// The access its type implies (the accessor without a width suffix), if the type is a scalar.
+    pub primary: Option<Access>,
+}
+
+/// A memory access kind, by the runtime helper that does it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Access {
+    U8,
+    I8,
+    U16,
+    I16,
+    /// `R::ldr` (word load, rotated if unaligned).
+    U32,
+    /// `R::ld32` (aligned word load).
+    W32,
+    St8,
+    St16,
+    St32,
+}
+
+impl Access {
+    pub fn is_store(self) -> bool {
+        matches!(self, Access::St8 | Access::St16 | Access::St32)
+    }
+    /// The `R::` helper.
+    pub fn helper(self) -> &'static str {
+        match self {
+            Access::U8 => "ld8",
+            Access::I8 => "ld8s",
+            Access::U16 => "ld16",
+            Access::I16 => "ld16s",
+            Access::U32 => "ldr",
+            Access::W32 => "ld32",
+            Access::St8 => "st8",
+            Access::St16 => "st16",
+            Access::St32 => "st32",
+        }
+    }
+    fn store(self) -> Access {
+        match self {
+            Access::U8 | Access::I8 | Access::St8 => Access::St8,
+            Access::U16 | Access::I16 | Access::St16 => Access::St16,
+            _ => Access::St32,
+        }
+    }
+    fn suffix(self) -> &'static str {
+        match self {
+            Access::U8 | Access::St8 => "_u8",
+            Access::I8 => "_i8",
+            Access::U16 | Access::St16 => "_u16",
+            Access::I16 => "_i16",
+            Access::U32 | Access::St32 => "_u32",
+            Access::W32 => "_w32",
+        }
+    }
+}
+
+impl FieldRef {
+    /// The accessor's name: `racer_index` / `set_racer_index` for the field's own width, else with
+    /// the width (`racer_index_u8`).
+    pub fn accessor(&self, a: Access) -> String {
+        let base = if a.is_store() { format!("set_{}", self.name) } else { self.name.clone() };
+        let own = self.primary.is_some_and(|p| if a.is_store() { p.store() == a } else { p == a });
+        if own { base } else { format!("{base}{}", a.suffix()) }
+    }
+}
+
+/// Sets the named fields (by offset) for the function about to be printed; empty turns accessors off.
+pub fn set_fields(fields: std::collections::HashMap<u32, FieldRef>) {
+    FIELDS.with(|f| *f.borrow_mut() = fields);
+}
+
+/// The accessors printed since the last call.
+pub fn take_field_uses() -> Vec<(FieldRef, Access)> {
+    FIELD_USES.with(|u| std::mem::take(&mut *u.borrow_mut()))
+}
+
+/// The number of accessors printed so far (to tell whether a statement printed one).
+pub fn field_uses_len() -> usize {
+    FIELD_USES.with(|u| u.borrow().len())
+}
+
+/// Every constant in `s` (candidate field offsets).
+pub fn consts_in(s: &S, out: &mut Vec<u32>) {
+    fn walk(e: &mut E, out: &mut Vec<u32>) {
+        if let E::Const(v) = e {
+            out.push(*v);
+        }
+        for c in expr_children(e) {
+            walk(c, out);
+        }
+    }
+    let mut s = s.clone();
+    for e in stmt_exprs(&mut s) {
+        walk(e, out);
+    }
+}
+
+/// `base + off` (or `base` alone) at a named field: prints the accessor call's start
+/// (`kart::racer_index(m, base`) and records the use.
+fn field_access(out: &mut String, addr: &E, a: Access) -> bool {
+    let (base, off) = match addr {
+        E::Bin(Bin::Add, b, k) => match **k {
+            E::Const(v) => (&**b, v),
+            _ => return false,
+        },
+        E::Reg(_) => (addr, 0),
+        _ => return false,
+    };
+    let Some(f) = FIELDS.with(|m| m.borrow().get(&off).cloned()) else { return false };
+    let _ = write!(out, "{}::{}(m, ", f.module, f.accessor(a));
+    expr(out, base);
+    FIELD_USES.with(|u| u.borrow_mut().push((f, a)));
+    true
 }
 
 /// The T1 local variable holding register `i`.
@@ -748,6 +879,17 @@ fn expr(out: &mut String, e: &E) {
             out.push(')');
         }
         E::Load { w, signed, addr } if LOCALS.with(|l| l.get()) && unmask(addr, *w).is_some() => {
+            let acc = match (w, signed) {
+                (Width::B8, false) => Access::U8,
+                (Width::B8, true) => Access::I8,
+                (Width::B16, false) => Access::U16,
+                (Width::B16, true) => Access::I16,
+                (Width::B32, _) => Access::W32,
+            };
+            if field_access(out, unmask(addr, *w).unwrap(), acc) {
+                out.push(')');
+                return;
+            }
             let name = match (w, signed) {
                 (Width::B8, false) => "ld8",
                 (Width::B8, true) => "ld8s",
@@ -796,6 +938,10 @@ fn expr(out: &mut String, e: &E) {
             side(out, b);
         }
         E::Call(H::Ldr, a) if LOCALS.with(|l| l.get()) && a.len() == 2 => {
+            if field_access(out, &a[1], Access::U32) {
+                out.push(')');
+                return;
+            }
             out.push_str("R::ldr(m, ");
             expr(out, &a[1]);
             out.push(')');
@@ -863,6 +1009,17 @@ fn stmt(out: &mut String, s: &S) {
             out.push_str(");");
         }
         S::Store { w, addr, val } if LOCALS.with(|l| l.get()) && unmask(addr, *w).is_some() => {
+            let acc = match w {
+                Width::B8 => Access::St8,
+                Width::B16 => Access::St16,
+                Width::B32 => Access::St32,
+            };
+            if field_access(out, unmask(addr, *w).unwrap(), acc) {
+                out.push_str(", ");
+                expr(out, val);
+                out.push_str(");");
+                return;
+            }
             let name = match w {
                 Width::B8 => "st8",
                 Width::B16 => "st16",

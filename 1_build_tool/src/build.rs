@@ -638,11 +638,14 @@ const SOURCE_README: &str = "This is the Rust generated on your machine from you
 
 part_NN/  the game's code, one Rust function per ROM function, in two versions:
           - the readable version (named after the function, e.g. `os_sleep_thread`, or `sub_<segment>_<address>`):
-            registers as local variables, if/loop/match control flow, calls and struct fields commented with
-            the names the project's research found. This is the version that runs at each function's entry.
+            registers as local variables, if/loop/match control flow, calls commented with the names the
+            project's research found, and known struct fields read through named accessors
+            (`kart::racer_index(m, r4)`). This is the version that runs at each function's entry.
           - the exact translation `f_<segment>_<address>` (a loop over the ARM blocks): the readable version
             continues there when control does something unusual (a thread switch, a computed jump).
           Both behave identically; each charges the same instruction budget at every original block.
+layout/   the research structs: each a module with its field offsets and the accessors the code uses
+          (each accessor is exactly the memory access it replaces)
 lifted/   the table of all functions (both versions) and the ROM/metadata hashes they came from
 game/     the program: checks your files, then runs the code on the native host
 tiers.csv  every function: address, tier (T1 readable / T0 exact only), Rust name, crate, reason

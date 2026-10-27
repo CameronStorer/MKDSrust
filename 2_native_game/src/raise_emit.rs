@@ -210,7 +210,8 @@ fn block_note(e: &E) -> String {
 /// and global names by address.
 pub struct Notes<'a> {
     pub call: &'a dyn Fn(u32) -> Option<String>,
-    pub field: &'a dyn Fn(u32) -> Option<String>,
+    /// The named field at an offset (from a base register) in this function: printed as an accessor.
+    pub field: &'a dyn Fn(u32) -> Option<ir::FieldRef>,
     pub global: &'a dyn Fn(u32) -> Option<String>,
 }
 
@@ -253,7 +254,7 @@ fn stmt_note(n: &Notes, s: &S) -> Option<String> {
             }
         }
         if let Some(f) = off(a).and_then(|o| (n.field)(o)) {
-            return Some(f);
+            return Some(format!("{}.{}", f.strukt, f.name));
         }
     }
     if let Some(E::Const(v)) = value {
@@ -442,8 +443,20 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
     }
     let all: BTreeSet<u8> = used.union(&written).copied().filter(|&i| i < 15).collect();
     let ctx = Ctx { blocks: &blocks, rpo, idom, merge, header, children, names, notes, switches: &switches };
+    // named fields at the offsets this function uses: their accesses print as accessors
+    let mut consts = vec![0];
+    for b in blocks.values() {
+        for ins in &b.insts {
+            for s in &ins.stmts {
+                ir::consts_in(s, &mut consts);
+            }
+        }
+    }
+    ir::set_fields(consts.into_iter().filter_map(|k| (notes.field)(k).map(|f| (k, f))).collect());
+    ir::take_field_uses();
     let mut body = String::new();
     do_tree(&ctx, f.entry, 2, &mut body);
+    ir::set_fields(Default::default());
 
     let mut s = String::new();
     let _ = writeln!(s, "#[allow(non_snake_case, unused_variables, unused_assignments, unused_mut, unreachable_code, unused_parens, unused_braces, unused_macros, unused_labels, clippy::all)]");
@@ -604,8 +617,12 @@ fn stmt_code(c: &Ctx, x: u32, s: &S, depth: usize, out: &mut String) {
         S::Do(e) if syncs(e) => line(out, &format!("spill!(); {}; reload!();{}", ir::expr_locals(e), block_note(e))),
         S::SetReg(i, e) if syncs(e) => line(out, &format!("spill!(); let t = {}; reload!(); {} = t;", ir::expr_locals(e), ir::reg_name(*i))),
         S::Store { w: Width::B32, .. } | _ => {
-            let note = stmt_note(c.notes, s).map(|n| format!(" // {n}")).unwrap_or_default();
-            line(out, &format!("{}{note}", ir::print_locals(std::slice::from_ref(s))))
+            let before = ir::field_uses_len();
+            let text = ir::print_locals(std::slice::from_ref(s));
+            // an accessor names the field already; other notes stay comments
+            let note = if ir::field_uses_len() > before { stmt_note(&Notes { field: &|_| None, ..*c.notes }, s) } else { stmt_note(c.notes, s) };
+            let note = note.map(|n| format!(" // {n}")).unwrap_or_default();
+            line(out, &format!("{text}{note}"))
         }
     }
 }

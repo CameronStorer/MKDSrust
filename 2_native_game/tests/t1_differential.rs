@@ -25,7 +25,7 @@ fn build_checks_cost(funcs: &[(String, u32, Func)], image: &[u8], base: u32, see
     let mut raised = 0;
     for (name, entry, f) in funcs {
         let none = |_: u32| None;
-        let notes = Notes { call: &none, field: &none, global: &none };
+        let notes = Notes { call: &none, field: &|_| None, global: &none };
         let Ok(t1) = emit_t1_full(f, name, Some(&img), &notes, cost) else { continue };
         raised += 1;
         src.push_str(&emit_full(f, name, Some(&img), cost, true));
