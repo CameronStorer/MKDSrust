@@ -225,6 +225,10 @@ impl<'a> Session<'a> {
             hw.r32(0x0400_0210),
             hw.r32(0x0400_0214),
         ) {
+            if hw.probe.is_some() {
+                let pending = hw.r32(0x0400_0210) & hw.r32(0x0400_0214);
+                hw.probe.as_mut().unwrap().irq(pending);
+            }
             self.pc = rt::take_irq(&mut self.cpu, self.pc, 0xffff_0000);
             self.stats.irqs += 1;
         }
@@ -306,6 +310,9 @@ impl<'a> Session<'a> {
         if self.trace.is_some() {
             self.trace_slice(self.pc, used);
         }
+        if let Some(p) = self.machine.hw.probe.as_mut() {
+            p.slice_end(self.pc, used);
+        }
         // Preserve half bus cycles between slices instead of rounding every slice up.
         self.half_cycle += used as u64;
         self.machine.tick(self.half_cycle / 2);
@@ -371,6 +378,9 @@ impl<'a> Session<'a> {
             let pc = self.fibers.as_ref().unwrap().last_end.0;
             self.trace_slice(pc, used);
         }
+        if let Some(p) = self.machine.hw.probe.as_mut() {
+            p.slice_end(self.pc, used);
+        }
         self.half_cycle += used as u64;
         self.machine.tick(self.half_cycle / 2);
         self.half_cycle %= 2;
@@ -422,6 +432,14 @@ impl<'a> Session<'a> {
 
     pub fn frame_number(&self) -> u64 {
         self.machine.hw.cycles / FRAME_CYCLES
+    }
+
+    /// Block 5.0: the logical frame, the SDK's V-blank count (`OS_GetVBlankCount`, `0x027FFC3C`, incremented
+    /// by the OS V-blank handler on the ARM7) instead of hardware time. 0 until the ARM7 has booted.
+    pub fn logical_frame(&self) -> u64 {
+        let mut b = [0u8; 4];
+        self.machine.hw.peek_into(ds_mem::VBLANK_COUNT, &mut b);
+        u32::from_le_bytes(b) as u64
     }
 
     /// Immutable, Send GPU state for off-thread rendering.

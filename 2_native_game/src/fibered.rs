@@ -207,6 +207,11 @@ impl Guest {
         if !ready {
             return false;
         }
+        if self.s().machine.hw.probe.is_some() {
+            let hw = &mut self.s().machine.hw;
+            let pending = hw.r32(0x0400_0210) & hw.r32(0x0400_0214);
+            hw.probe.as_mut().unwrap().irq(pending);
+        }
         let sp = self.cpu().r[13];
         let vector = rt::take_irq(self.cpu(), pc, 0xffff_0000);
         self.s().stats.irqs += 1;

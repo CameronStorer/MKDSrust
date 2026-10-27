@@ -67,6 +67,9 @@ pub struct Machine<'a> {
     /// Arguments are hardware cycles and active-high DS buttons.
     pub input_observer: Option<Box<dyn FnMut(u64, u16) + 'a>>,
     pub host_quit: bool,
+    /// Block 5.0 oracle (`acceptance --record`): called with the BIOS call number when the ARM9 is about to
+    /// wait for an interrupt (SWI 4/5/6; 0x100 for the CP15 wait), before the wait. `None` by default.
+    pub wait_hook: Option<Box<dyn FnMut(&mut Machine<'a>, u32) + 'a>>,
 }
 
 /// Longest stretch (in 1000-cycle steps) a wait-for-interrupt may fast-forward before giving up.
@@ -99,6 +102,7 @@ impl<'a> Machine<'a> {
             idle_poll: None,
             input_observer: None,
             host_quit: false,
+            wait_hook: None,
         }
     }
 
@@ -179,7 +183,10 @@ impl Bus for Machine<'_> {
         match bios::swi(n, &mut c.r, &mut self.hw) {
             bios::Swi::Done => {}
             // Halt / IntrWait / VBlankIntrWait: run the hardware until an interrupt is pending
-            bios::Swi::Wait { .. } => self.wait_for_interrupt(),
+            bios::Swi::Wait { .. } => {
+                self.oracle_wait(n);
+                self.wait_for_interrupt()
+            }
             bios::Swi::Reset => self.note("swi SoftReset".into()),
             bios::Swi::Unsupported(n) => self.note(format!("swi {n:#04x}")),
         }
@@ -203,7 +210,10 @@ impl Bus for Machine<'_> {
             return;
         }
         match (crn, crm, op1, op2) {
-            (7, 0, 0, 4) => self.wait_for_interrupt(), // wait for interrupt
+            (7, 0, 0, 4) => {
+                self.oracle_wait(0x100);
+                self.wait_for_interrupt() // wait for interrupt
+            }
             (7, _, _, _) => {}                         // cache maintenance: memory is coherent
             (9, 1, 0, 0) => self.hw.dtcm_base = Some(v & 0xFFFF_F000),
             _ => {
@@ -376,6 +386,13 @@ impl Machine<'_> {
     /// Takes audio rendered since the last call (stereo frames at the configured SPU output rate).
     pub fn take_audio(&mut self) -> Vec<[i16; 2]> {
         std::mem::take(&mut self.audio)
+    }
+
+    fn oracle_wait(&mut self, what: u32) {
+        if let Some(mut hook) = self.wait_hook.take() {
+            hook(self, what);
+            self.wait_hook = Some(hook);
+        }
     }
 
     fn wait_for_interrupt(&mut self) {
