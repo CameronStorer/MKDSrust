@@ -955,6 +955,94 @@ fn run() -> Result<ExitCode, String> {
             Some(k) => lift::Image::new(images[k].0, &images[k].1),
         }
     };
+    // whole-program flag facts: calls and returns keep only the flags the other side reads
+    // (least fixed point: start from "nothing read" and grow until stable)
+    if raise() && std::env::var_os("MKDS_CALL_FLAGS_OFF").is_none() {
+        let entries: HashSet<u32> = jobs.iter().map(|j| j.1.entry & !1).collect();
+        // the functions each code address belongs to (jumps into the middle of a function)
+        let mut owner: HashMap<u32, Vec<u32>> = HashMap::new();
+        for j in &jobs {
+            for &b in &j.1.blocks {
+                owner.entry(b & !1).or_default().push(j.1.entry & !1);
+            }
+        }
+        // address-taken functions: an aligned word anywhere in the ARM9 program's images, or a
+        // constant in its code, equal to the entry (Thumb bit either way)
+        let mut taken: HashSet<u32> = HashSet::new();
+        let mut words = |data: &[u8]| {
+            for w in data.chunks_exact(4) {
+                let v = u32::from_le_bytes([w[0], w[1], w[2], w[3]]) & !1;
+                if entries.contains(&v) {
+                    taken.insert(v);
+                }
+            }
+        };
+        for (_, data) in images.values() {
+            words(data);
+        }
+        for (_, f, _, src) in &jobs {
+            let img = image(src);
+            for v in raise::code_constants(f, Some(&img)) {
+                if entries.contains(&(v & !1)) {
+                    taken.insert(v & !1);
+                }
+            }
+        }
+        let zero = || raise::FlagContext {
+            entry: owner.keys().map(|&b| (b, 0)).collect(),
+            ret: entries.iter().map(|&e| (e, 0)).collect(),
+            taken: taken.clone(),
+            any_entry: 0,
+            any_ret: 0,
+            restored: 0,
+        };
+        let mut ctx = zero();
+        let mut rounds = 0;
+        loop {
+            raise::set_flag_context(Some(ctx.clone()));
+            let mut next = zero();
+            for (_, f, _, src) in &jobs {
+                let img = image(src);
+                let (starts, calls, tails, restored) = raise::flag_facts(f, Some(&img));
+                next.restored |= restored;
+                let me = f.entry & !1;
+                for (b, v) in starts {
+                    *next.entry.get_mut(&(b & !1)).unwrap() |= v;
+                }
+                // returns of the code a call or jump reaches must keep `live`
+                // (a fixed address outside all known code can't return through our functions)
+                let needs = |t: Option<u32>, live: u8, next: &mut raise::FlagContext| match t {
+                    Some(t) => owner.get(&(t & !1)).into_iter().flatten().for_each(|g| *next.ret.get_mut(g).unwrap() |= live),
+                    None => next.any_ret |= live,
+                };
+                for (t, live) in calls {
+                    needs(t, live, &mut next);
+                }
+                // a tail jump returns to this function's callers
+                let mine = ctx.ret[&me] | if ctx.taken.contains(&me) { ctx.any_ret } else { 0 };
+                for t in tails {
+                    needs(Some(t), mine, &mut next);
+                }
+            }
+            next.any_entry = next.entry.iter().filter(|(e, _)| taken.contains(e)).fold(ctx.any_entry, |a, (_, b)| a | b);
+            next.any_ret |= ctx.any_ret;
+            next.restored |= ctx.restored;
+            for (k, v) in next.entry.iter_mut() {
+                *v |= ctx.entry[k];
+            }
+            for (k, v) in next.ret.iter_mut() {
+                *v |= ctx.ret[k];
+            }
+            rounds += 1;
+            if next == ctx {
+                break;
+            }
+            ctx = next;
+        }
+        raise::set_flag_context(Some(ctx.clone()));
+        let free = ctx.ret.iter().filter(|(e, v)| (**v | if taken.contains(*e) { ctx.any_ret } else { 0 }) == 0).count();
+        eprintln!("mkds_gen: flag facts in {rounds} rounds: {free}/{} functions return without live flags ({} address-taken; after computed calls {:#X}, after CPSR restores {:#X})", ctx.ret.len(), taken.len(), ctx.any_ret, ctx.restored);
+    }
     if raise() && std::env::var_os("MKDS_NO_T1").is_none() && LAYOUT.get().is_some() {
         for round in 0..TYPE_ROUNDS {
             let mut seen: BTreeMap<(u32, u8), BTreeSet<String>> = BTreeMap::new();
@@ -980,6 +1068,8 @@ fn run() -> Result<ExitCode, String> {
         let img = image(src);
         funcs.push(lifted9(seg.clone(), f, id.clone(), &img));
     }
+    // the ARM7 program keeps the per-function rule
+    raise::set_flag_context(None);
     let (arm7_entry, arm7_secs) = build_support::arm7_sections(&rom)?;
     let mut arm7_ranges: Vec<(String, u32, u32)> = vec![("bios7".into(), 0x18, 0x18 + stub7.len() as u32)];
     arm7_ranges.extend(arm7_secs.iter().map(|s| (s.name.clone(), s.ram_address, s.ram_address + s.data.len() as u32)));

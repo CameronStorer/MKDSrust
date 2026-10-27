@@ -13,7 +13,7 @@ use crate::lift::Image;
 use std::fmt::Write;
 
 /// Statement-local temporaries. Their names are part of the T0 text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Tmp {
     X,
     Sc,
