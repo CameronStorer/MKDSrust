@@ -381,6 +381,16 @@ struct Layout {
     modules: BTreeMap<String, String>,
     uses: HashMap<u32, Vec<(String, u32)>>,
     globals: HashMap<u32, String>,
+    /// Struct -> the struct it extends (its fields come first).
+    parent: HashMap<String, String>,
+    /// Global address -> the struct the pointer stored there points to.
+    points_global: HashMap<u32, String>,
+    /// (struct, offset) -> the struct the pointer in that field points to.
+    points_field: HashMap<(String, u32), String>,
+    /// Offset -> the structs with a field there.
+    by_offset: HashMap<u32, Vec<String>>,
+    /// Struct -> share of its word slots (up to its last field) holding a known field.
+    density: HashMap<String, f64>,
 }
 static LAYOUT: std::sync::OnceLock<Layout> = std::sync::OnceLock::new();
 
@@ -394,18 +404,82 @@ fn load_layout(dir: &Path) -> Layout {
     let rows = |name: &str| -> Vec<Vec<String>> {
         std::fs::read_to_string(dir.join(name)).map(|t| csv_records(&t).into_iter().skip(1).collect()).unwrap_or_default()
     };
+    // structs.csv: aliases (one struct under several research names), parents, global roots
+    // (`*0x0217ACF8`) and pointer fields (`*(kart+0x514)`)
+    let st_rows = rows("structs.csv");
+    let mut canon: HashMap<String, String> = st_rows.iter().filter_map(|r| r.first()).map(|n| (n.clone(), n.clone())).collect();
+    for r in &st_rows {
+        let (Some(n), Some(aliases)) = (r.first(), r.get(1)) else { continue };
+        for a in aliases.split(';').map(str::trim).filter(|a| !a.is_empty()) {
+            canon.entry(a.to_string()).or_insert_with(|| n.clone());
+        }
+    }
+    let canon = |s: &str| canon.get(s.trim()).cloned().unwrap_or_else(|| s.trim().to_string());
+    let pointee = |ty: &str| -> Option<String> {
+        let t = ty.trim().trim_matches('"').trim();
+        let inner = t.strip_prefix("ptr<")?.strip_suffix('>')?.trim();
+        Some(canon(inner))
+    };
+    let mut fields_at: Vec<(String, u32, String)> = Vec::new();
+    for r in &st_rows {
+        let Some(n) = r.first() else { continue };
+        if let Some(p) = r.get(2).filter(|p| !p.trim().is_empty()) {
+            l.parent.insert(n.clone(), canon(p));
+        }
+        if let Some(a) = r.get(3).and_then(|root| hex(root.trim().strip_prefix('*')?)) {
+            l.points_global.insert(a, n.clone());
+        }
+        // `*(kart+0x514)`: the struct a field of another struct points to
+        if let Some(rec) = r.get(5) {
+            if let Some(inner) = rec.trim().strip_prefix("*(").and_then(|x| x.split(')').next()) {
+                if let Some((base, off)) = inner.split_once('+') {
+                    if let Some(off) = hex(off) {
+                        fields_at.push((canon(base), off, n.clone()));
+                    }
+                }
+            }
+        }
+    }
     let mut taken: HashSet<(String, String)> = HashSet::new();
     for r in rows("fields.csv") {
         if let (Some(st), Some(off), Some(n)) = (r.first(), r.get(1).and_then(|o| hex(o)), r.get(2)) {
+            let st = canon(st);
+            if l.fields.contains_key(&(st.clone(), off)) {
+                continue; // an alias names the same field: the first name stays
+            }
             // field names unique per struct, usable as Rust names
             let mut name = rust_ident(&snake_case(n));
             if !taken.insert((st.clone(), name.clone())) {
                 name = format!("{name}_{off:x}");
                 taken.insert((st.clone(), name.clone()));
             }
-            l.fields.insert((st.clone(), off), (name, r.get(3).cloned().unwrap_or_default()));
+            let ty = r.get(3).cloned().unwrap_or_default();
+            if let Some(p) = pointee(&ty) {
+                l.points_field.insert((st.clone(), off), p);
+            }
+            l.fields.insert((st, off), (name, ty));
         }
     }
+    for (base, off, st) in fields_at {
+        l.points_field.entry((base, off)).or_insert(st);
+    }
+    // pointer seeds only to structs with known fields
+    let known: HashSet<String> = l.fields.keys().map(|(st, _)| st.clone()).collect();
+    l.points_global.retain(|_, st| known.contains(st));
+    l.points_field.retain(|_, st| known.contains(st));
+    for (st, off) in l.fields.keys() {
+        l.by_offset.entry(*off).or_default().push(st.clone());
+    }
+    for v in l.by_offset.values_mut() {
+        v.sort();
+    }
+    let mut slots: HashMap<String, (BTreeSet<u32>, u32)> = HashMap::new();
+    for (st, off) in l.fields.keys() {
+        let e = slots.entry(st.clone()).or_default();
+        e.0.insert(off / 4);
+        e.1 = e.1.max(off / 4 + 1);
+    }
+    l.density = slots.into_iter().map(|(st, (used, n))| (st, used.len() as f64 / n.max(1) as f64)).collect();
     let mut used: HashSet<String> = ["std", "core", "alloc", "recomp", "layout", "r", "iw", "m", "c"].iter().map(|s| s.to_string()).collect();
     let structs: BTreeSet<String> = l.fields.keys().map(|(st, _)| st.clone()).collect();
     for st in structs {
@@ -420,11 +494,14 @@ fn load_layout(dir: &Path) -> Layout {
     }
     for r in rows("field_uses.csv") {
         if let (Some(f), Some(st), Some(off)) = (r.first().and_then(|f| hex(f)), r.get(1), r.get(2).and_then(|o| hex(o))) {
-            l.uses.entry(f & !1).or_default().push((st.clone(), off));
+            l.uses.entry(f & !1).or_default().push((canon(st), off));
         }
     }
     for r in rows("globals.csv") {
         if let (Some(a), Some(n)) = (r.first().and_then(|a| hex(a)), r.get(1)) {
+            if let Some(p) = r.get(2).and_then(|t| pointee(t)) {
+                l.points_global.entry(a).or_insert(p);
+            }
             l.globals.insert(a, n.clone());
         }
     }
@@ -513,11 +590,17 @@ fn structs_at(entry: u32, off: u32) -> Vec<String> {
     v
 }
 
-/// Struct `st`'s field at `off`.
+/// Struct `st`'s field at `off` (or the field of the struct it extends).
 fn field_in(st: &str, off: u32) -> Option<ir::FieldRef> {
     let l = LAYOUT.get()?;
-    let (name, ty) = l.fields.get(&(st.to_string(), off))?;
-    Some(ir::FieldRef { strukt: st.to_string(), module: l.modules.get(st)?.clone(), name: name.clone(), off, primary: primary_access(ty) })
+    let mut st = st.to_string();
+    for _ in 0..8 {
+        if let Some((name, ty)) = l.fields.get(&(st.clone(), off)) {
+            return Some(ir::FieldRef { strukt: st.clone(), module: l.modules.get(&st)?.clone(), name: name.clone(), off, primary: primary_access(ty) });
+        }
+        st = l.parent.get(&st)?.clone();
+    }
+    None
 }
 
 /// The access a field type implies: scalars of 1, 2 or 4 bytes (`fx12`/`fx32` are 4-byte fixed
@@ -627,6 +710,10 @@ fn with_notes9<T>(segment: &str, entry: u32, k: impl FnOnce(&raise_emit::Notes) 
         field_in: &field_in,
         module_of: &|st| LAYOUT.get()?.modules.get(st).cloned(),
         arg_hint: &|r| arg_hint(entry, r),
+        global_points: &|a| LAYOUT.get()?.points_global.get(&a).cloned(),
+        field_points: &|st, off| LAYOUT.get()?.points_field.get(&(st.to_string(), off)).cloned(),
+        structs_with: &|off| LAYOUT.get().and_then(|l| l.by_offset.get(&off).cloned()).unwrap_or_default(),
+        density: &|st| LAYOUT.get().and_then(|l| l.density.get(st).copied()).unwrap_or(1.0),
         global: &global_name,
     })
 }

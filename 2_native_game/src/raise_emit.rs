@@ -281,12 +281,20 @@ pub struct Notes<'a> {
     pub module_of: &'a dyn Fn(&str) -> Option<String>,
     /// The struct an argument register (r0..r3) points to, as the callers pass it (votes).
     pub arg_hint: &'a dyn Fn(u8) -> Option<String>,
+    /// The struct the pointer stored at a global address points to (`*0x021755FC` is a race manager).
+    pub global_points: &'a dyn Fn(u32) -> Option<String>,
+    /// The struct the pointer in a struct's field points to.
+    pub field_points: &'a dyn Fn(&str, u32) -> Option<String>,
+    /// Every struct with a known field at an offset (layout matching for values without votes).
+    pub structs_with: &'a dyn Fn(u32) -> Vec<String>,
+    /// The share of a struct's word slots that have a known field (how easily offsets match it).
+    pub density: &'a dyn Fn(&str) -> f64,
     pub global: &'a dyn Fn(u32) -> Option<String>,
 }
 
 impl Notes<'static> {
     /// No comments, no field names.
-    pub const NONE: Notes<'static> = Notes { call: &|_| None, field: &|_| None, fields_of: &|_| Vec::new(), field_in: &|_, _| None, module_of: &|_| None, arg_hint: &|_| None, global: &|_| None };
+    pub const NONE: Notes<'static> = Notes { call: &|_| None, field: &|_| None, fields_of: &|_| Vec::new(), field_in: &|_, _| None, module_of: &|_| None, arg_hint: &|_| None, global_points: &|_| None, field_points: &|_, _| None, structs_with: &|_| Vec::new(), density: &|_| 1.0, global: &|_| None };
 }
 
 /// [`emit_t1`]; `names(target)` gives a call target's name for a comment.
@@ -507,6 +515,8 @@ fn infer_fields(blocks: &BTreeMap<u32, Block>, order: &[u32], preds: &BTreeMap<u
     let mut uses: Vec<((u32, u32, usize), u8, u32, usize)> = Vec::new();
     // argument registers at calls with a known target: (target, register, a reaching definition)
     let mut call_args: Vec<(u32, u8, usize)> = Vec::new();
+    // word loads into registers: (definition, global address or (base definition, offset))
+    let mut loads: Vec<(usize, Result<u32, (usize, u32)>)> = Vec::new();
     // every register read: (register, a reaching definition); its reaching definitions are united
     let mut reads_all: Vec<(u8, usize)> = Vec::new();
     let read_regs = |e: &[&E], st: &St, parent: &mut Vec<usize>, reads_all: &mut Vec<(u8, usize)>| {
@@ -558,6 +568,28 @@ fn infer_fields(blocks: &BTreeMap<u32, Block>, order: &[u32], preds: &BTreeMap<u
                 regs_s(s, &mut used, &mut _w);
                 let regs: Vec<E> = used.into_iter().map(E::Reg).collect();
                 read_regs(&regs.iter().collect::<Vec<_>>(), &st, &mut parent, &mut reads_all);
+                if let S::SetReg(i, e) = s {
+                    let addr = match e {
+                        E::Call(H::Ldr, a) if a.len() == 2 => Some(&a[1]),
+                        E::Load { w: ir::Width::B32, addr, .. } => Some(match &**addr {
+                            E::Bin(ir::Bin::And, x, k) if matches!(**k, E::Not(_)) => &**x,
+                            a => a,
+                        }),
+                        _ => None,
+                    };
+                    let from = match addr {
+                        Some(E::Const(g)) => Some(Ok(*g)),
+                        Some(E::Bin(ir::Bin::Add, x, k)) => match (&**x, &**k) {
+                            (E::Reg(r), E::Const(off)) if *r < 13 => st[*r as usize].iter().next().map(|&bd| Err((bd, *off))),
+                            _ => None,
+                        },
+                        Some(E::Reg(r)) if *r < 13 => st[*r as usize].iter().next().map(|&bd| Err((bd, 0))),
+                        _ => None,
+                    };
+                    if let (Some(from), Some(&d)) = (from, ids.get(&(b, ii, si, *i))) {
+                        loads.push((d, from));
+                    }
+                }
                 for (r, src) in defs_s(s) {
                     let d = ids[&(b, ii, si, r)];
                     if let Some(j) = src {
@@ -596,12 +628,54 @@ fn infer_fields(blocks: &BTreeMap<u32, Block>, order: &[u32], preds: &BTreeMap<u
             *votes.entry(g).or_default().entry(st).or_default() += 2;
         }
     }
-    let mut winner: HashMap<usize, String> = HashMap::new();
-    for (g, score) in &votes {
-        let best = score.values().copied().max().unwrap_or(0);
-        let mut top = score.iter().filter(|(_, v)| **v == best && best > 0);
-        if let (Some((st, _)), None) = (top.next(), top.next()) {
-            winner.insert(*g, st.clone());
+    let decide = |votes: &HashMap<usize, BTreeMap<String, usize>>| -> HashMap<usize, String> {
+        let mut winner = HashMap::new();
+        for (g, score) in votes {
+            let best = score.values().copied().max().unwrap_or(0);
+            let mut top = score.iter().filter(|(_, v)| **v == best && best > 0);
+            if let (Some((st, _)), None) = (top.next(), top.next()) {
+                winner.insert(*g, st.clone());
+            }
+        }
+        winner
+    };
+    let mut winner = decide(&votes);
+    // pointers loaded from typed globals and from pointer fields of typed values vote for what
+    // they point to; a newly typed value can type the pointers loaded from it, so repeat
+    for _ in 0..4 {
+        let mut more = votes.clone();
+        for (d, from) in &loads {
+            let st = match from {
+                Ok(g) => (notes.global_points)(*g),
+                Err((bd, off)) => winner.get(&find(&mut parent, *bd)).and_then(|w| (notes.field_points)(w, *off)),
+            };
+            if let Some(st) = st {
+                *more.entry(find(&mut parent, *d)).or_default().entry(st).or_default() += 2;
+            }
+        }
+        let next = decide(&more);
+        if next == winner {
+            break;
+        }
+        winner = next;
+    }
+    // values still untyped: accessed at 3+ distinct offsets that are all fields of exactly one
+    // known struct, and unlikely to all match it by chance (density^offsets under 2%)
+    for (g, ks) in &offs {
+        if winner.contains_key(g) || ks.len() < 3 {
+            continue;
+        }
+        let mut count: BTreeMap<String, usize> = BTreeMap::new();
+        for &k in ks {
+            for st in (notes.structs_with)(k) {
+                *count.entry(st).or_default() += 1;
+            }
+        }
+        let mut full = count.iter().filter(|(_, n)| **n == ks.len());
+        if let (Some((st, _)), None) = (full.next(), full.next()) {
+            if (notes.density)(st).powi(ks.len() as i32) < 0.02 {
+                winner.insert(*g, st.clone());
+            }
         }
     }
     // a register read only where it holds one struct-typed value takes the struct's name
