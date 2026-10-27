@@ -319,6 +319,109 @@ pub struct Bus {
     watched_main_code: Option<(usize, usize)>,
     /// Changes whenever either CPU or DMA writes a watched physical main-RAM byte.
     pub code_epoch: u64,
+    /// Block 5.0 oracle (`acceptance --record`): read-only observation of PXI, SPU writes, polled I/O and
+    /// IRQs. `None` (the default) costs one branch on those paths and changes nothing.
+    pub probe: Option<Box<Probe>>,
+}
+
+/// SDK V-blank counter (`OS_GetVBlankCount`, HW_VBLANK_COUNT_BUF): the ARM7's V-blank handler increments it.
+pub const VBLANK_COUNT: u32 = 0x027F_FC3C;
+
+/// PXI event kinds in [`Probe::events`].
+pub const EV_A9_WORD: u8 = 0; // ARM9 -> ARM7 FIFO word
+pub const EV_A7_WORD: u8 = 1; // ARM7 -> ARM9 FIFO word
+pub const EV_A9_SYNC: u8 = 2; // ARM9 IPCSYNC output nibble (value | 0x100 when it asks for an IRQ)
+pub const EV_A7_SYNC: u8 = 3; // ARM7 IPCSYNC output nibble (value | 0x100 when it asks for an IRQ)
+pub const EV_SPU: u8 = 4; // ARM7 SPU register write: value, with offset and width in `Event::off` / `bytes`
+
+/// One observed event, tagged with the SDK V-blank count at the time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Event {
+    pub frame: u32,
+    pub kind: u8,
+    pub bytes: u8,
+    pub off: u16,
+    pub value: u32,
+}
+
+/// Polled ARM9 I/O registers counted by [`Probe::io_reads`] (census): VCOUNT, DISPSTAT, TM0-3CNT_L,
+/// IPCSYNC, IPCFIFOCNT, GXSTAT, KEYINPUT.
+pub const POLLED_IO: [(usize, &str); 10] = [
+    (0x006, "VCOUNT"), (0x004, "DISPSTAT"), (0x100, "TM0CNT_L"), (0x104, "TM1CNT_L"), (0x108, "TM2CNT_L"),
+    (0x10C, "TM3CNT_L"), (0x180, "IPCSYNC"), (0x184, "IPCFIFOCNT"), (0x600, "GXSTAT"), (0x130, "KEYINPUT"),
+];
+
+/// Block 5.0 oracle state on the bus (see [`Bus::probe`]). The recorder drains it every logical frame.
+#[derive(Default, Clone, Debug)]
+pub struct Probe {
+    /// PXI traffic (and SPU writes when `log_spu`) since the last drain.
+    pub events: Vec<Event>,
+    pub log_spu: bool,
+    /// SPU register writes since the last drain, and a running hash of them (offset, value, width).
+    pub spu_writes: u64,
+    pub spu_hash: u64,
+    /// Reads of [`POLLED_IO`] registers since the last drain (same order).
+    pub io_reads: [u64; 10],
+    /// IRQs taken since the last drain, by IE & IF bit at the time.
+    pub irq_bits: [u64; 32],
+    /// Census of tight loops: slice-end pc of the current run, its instructions, and finished runs of more
+    /// than 1,000 instructions since the last drain as (first pc, instructions).
+    pub run_pc: u32,
+    pub run_len: u64,
+    pub spins: Vec<(u32, u64)>,
+    /// KEYINPUT as the ARM9 first read it since the last drain (the input the game saw).
+    pub first_key: Option<u16>,
+    /// Test perturbation (off = 0): added to TM0CNT_L reads, the counter `OS_GetTick` reads.
+    pub tm0_bias: u16,
+}
+
+impl Probe {
+    fn frame(main: &[u8]) -> u32 {
+        let o = (VBLANK_COUNT as usize) & (MAIN_RAM_SIZE - 1);
+        u32::from_le_bytes(main[o..o + 4].try_into().unwrap())
+    }
+
+    fn io_read(&mut self, off: usize) {
+        if let Some(i) = POLLED_IO.iter().position(|&(o, _)| off & !1 == o) {
+            self.io_reads[i] += 1;
+        }
+    }
+
+    /// An ARM9 slice ended at `pc` after `used` instructions: extends or closes the tight-loop run.
+    pub fn slice_end(&mut self, pc: u32, used: u32) {
+        if pc.wrapping_sub(self.run_pc) < 0x40 || self.run_pc.wrapping_sub(pc) < 0x40 {
+            self.run_len += used as u64;
+        } else {
+            if self.run_len > 1000 {
+                self.spins.push((self.run_pc, self.run_len));
+            }
+            self.run_pc = pc;
+            self.run_len = used as u64;
+        }
+    }
+
+    pub fn irq(&mut self, pending: u32) {
+        for b in 0..32 {
+            if pending >> b & 1 != 0 {
+                self.irq_bits[b] += 1;
+            }
+        }
+    }
+
+    /// The ARM7 wrote an SPU register (`crate::arm7`).
+    pub fn spu_write(&mut self, main: &[u8], off: u32, v: u32, n: usize) {
+        self.spu_writes += 1;
+        for x in [off, v, n as u32] {
+            self.spu_hash = (self.spu_hash ^ x as u64).wrapping_mul(0x100_0000_01b3).rotate_left(5);
+        }
+        if self.log_spu {
+            self.events.push(Event { frame: Self::frame(main), kind: EV_SPU, bytes: n as u8, off: off as u16, value: v });
+        }
+    }
+
+    fn pxi(&mut self, main: &[u8], kind: u8, value: u32) {
+        self.events.push(Event { frame: Self::frame(main), kind, bytes: 4, off: 0, value });
+    }
 }
 
 fn rd(buf: &[u8], off: usize, n: usize) -> u32 {
@@ -369,6 +472,7 @@ impl Bus {
             sync_irq_to_arm7: false,
             watched_main_code: None,
             code_epoch: 0,
+            probe: None,
             card: None,
             bios9: {
                 let mut b = vec![0u8; 0x8000];
@@ -394,6 +498,9 @@ impl Bus {
     /// The stand-in ARM7 sends `word` to the ARM9: queued for IPCFIFORECV, and the "receive FIFO not empty"
     /// interrupt is raised when it was empty and the ARM9 enabled it (IPCFIFOCNT bit 10, FIFO enabled bit 15).
     pub fn arm7_send(&mut self, word: u32) {
+        if let Some(p) = self.probe.as_mut() {
+            p.pxi(&self.main, EV_A7_WORD, word);
+        }
         let was_empty = self.fifo_in.is_empty();
         if self.fifo_in.len() < 16 {
             self.fifo_in.push_back(word);
@@ -407,6 +514,9 @@ impl Bus {
     /// The ARM7 writes its IPCSYNC output nibble (the ARM9 reads it in bits 0-3); `irq` (its bit 13)
     /// raises the ARM9's IPC sync interrupt when the ARM9 enabled it (its IPCSYNC bit 14).
     pub fn arm7_set_sync(&mut self, nibble: u8, irq: bool) {
+        if let Some(p) = self.probe.as_mut() {
+            p.pxi(&self.main, EV_A7_SYNC, (nibble & 0xF) as u32 | (irq as u32) << 8);
+        }
         self.arm7_sync = nibble & 0xF;
         let cur = self.io_get(0x180, 2);
         self.io_set(0x180, 2, (cur & !0xF) | self.arm7_sync as u32);
@@ -660,6 +770,14 @@ impl Bus {
     }
 
     fn read_io(&mut self, off: usize, n: usize) -> u32 {
+        if self.probe.is_some() {
+            let key = self.io_get(0x130, 2) as u16;
+            let p = self.probe.as_mut().unwrap();
+            p.io_read(off);
+            if off & !1 == 0x130 && p.first_key.is_none() {
+                p.first_key = Some(key);
+            }
+        }
         if (0x600..0x604).contains(&off) {
             // Commands are consumed synchronously by our GX backend: zero FIFO
             // entries, less than half full (25), empty (26), geometry not busy.
@@ -675,7 +793,12 @@ impl Bus {
         // timer counters are live
         if (0x100..0x110).contains(&off) && off % 4 < 2 {
             let t = self.timers[(off - 0x100) / 4];
-            let v = t.counter as u32;
+            let mut v = t.counter as u32;
+            if off & !3 == 0x100 {
+                if let Some(p) = &self.probe {
+                    v = (v as u16).wrapping_add(p.tm0_bias) as u32;
+                }
+            }
             return if n >= 2 || off % 4 == 0 {
                 v >> (8 * (off % 2)) & if n == 1 { 0xFF } else { 0xFFFF }
             } else {
@@ -783,6 +906,10 @@ impl Bus {
                     (0x181, 1) => (v & 0xF, (v & 0x4F) << 8),
                     _ => return, // byte write to the read-only low half
                 };
+                if let Some(p) = self.probe.as_mut() {
+                    let irq = if (off, n) == (0x181, 1) { v & 0x20 } else { v & 0x2000 } != 0;
+                    p.pxi(&self.main, EV_A9_SYNC, mine | (irq as u32) << 8);
+                }
                 if self.arm7_lle {
                     // the real ARM7 (crate::arm7) answers; bit 13 asks for an IPC sync IRQ on its side
                     if (off, n) != (0x181, 1) && v & 0x2000 != 0
@@ -811,6 +938,9 @@ impl Bus {
                 return;
             }
             0x188 => {
+                if let Some(p) = self.probe.as_mut() {
+                    p.pxi(&self.main, EV_A9_WORD, v);
+                }
                 self.ipc_out.push(v);
                 return;
             }

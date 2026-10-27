@@ -466,6 +466,9 @@ impl State7 {
 
     fn io_write(&mut self, hw: &mut ds_mem::Bus, off: u32, v: u32, n: usize) {
         if self.spu.write(off, v, n) {
+            if let Some(p) = hw.probe.as_mut() {
+                p.spu_write(&hw.main, off, v, n); // Block 5.0 oracle (off by default)
+            }
             return;
         }
         if self.periph.write(off, v, n) {
