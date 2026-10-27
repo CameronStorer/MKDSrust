@@ -789,11 +789,13 @@ pub struct Notes<'a> {
     /// The share of a struct's word slots that have a known field (how easily offsets match it).
     pub density: &'a dyn Fn(&str) -> f64,
     pub global: &'a dyn Fn(u32) -> Option<String>,
+    /// The struct stored at a global address itself (not a pointer to it).
+    pub global_is: &'a dyn Fn(u32) -> Option<String>,
 }
 
 impl Notes<'static> {
     /// No comments, no field names.
-    pub const NONE: Notes<'static> = Notes { call: &|_| None, field: &|_| None, fields_of: &|_| Vec::new(), field_in: &|_, _| None, module_of: &|_| None, arg_hint: &|_| None, global_points: &|_| None, field_points: &|_, _| None, structs_with: &|_| Vec::new(), density: &|_| 1.0, global: &|_| None };
+    pub const NONE: Notes<'static> = Notes { call: &|_| None, field: &|_| None, fields_of: &|_| Vec::new(), field_in: &|_, _| None, module_of: &|_| None, arg_hint: &|_| None, global_points: &|_| None, field_points: &|_, _| None, structs_with: &|_| Vec::new(), density: &|_| 1.0, global: &|_| None, global_is: &|_| None };
 }
 
 /// [`emit_t1`]; `names(target)` gives a call target's name for a comment.
@@ -832,34 +834,50 @@ fn stmt_note(n: &Notes, s: &S) -> Option<String> {
 
 /// Accesses to name, per printed statement: `(block, instruction, statement index)` (the index
 /// `usize::MAX` is the instruction's guard) -> `(base register, offset)` -> field.
-type FieldMap = HashMap<(u32, u32, usize), HashMap<(u8, u32), ir::FieldRef>>;
+type FieldMap = HashMap<(u32, u32, usize), HashMap<(u8, u32), (ir::FieldRef, u32)>>;
 
-/// `base + off` memory accesses in `e` with a register base (not `sp`/`pc`).
-fn accesses_e(e: &E, out: &mut Vec<(u8, u32)>) {
-    fn at(a: &E, out: &mut Vec<(u8, u32)>) {
-        let a = match a {
-            E::Bin(ir::Bin::And, x, k) if matches!(**k, E::Not(_)) => &**x,
-            _ => a,
-        };
-        match a {
-            E::Bin(ir::Bin::Add, b, k) => {
-                if let (E::Reg(r), E::Const(v)) = (&**b, &**k) {
-                    if *r < 13 {
-                        out.push((*r, *v));
-                    }
+/// The kind of a memory access, for the layout dump: loads `u8`/`s8`/`u16`/`s16`/`u32` (`ldr`)
+/// /`w32` (aligned), stores `st8`/`st16`/`st32`.
+const KINDS: [&str; 9] = ["u8", "s8", "u16", "s16", "u32", "w32", "st8", "st16", "st32"];
+
+fn load_kind(w: ir::Width, signed: bool) -> u8 {
+    match (w, signed) {
+        (ir::Width::B8, false) => 0,
+        (ir::Width::B8, true) => 1,
+        (ir::Width::B16, false) => 2,
+        (ir::Width::B16, true) => 3,
+        (ir::Width::B32, _) => 5,
+    }
+}
+
+/// `base + off` memory accesses in `e` with a register base (not `sp`/`pc`), each with its kind
+/// (an index into [`KINDS`]).
+fn at(a: &E, kind: u8, out: &mut Vec<(u8, u32, u8)>) {
+    let a = match a {
+        E::Bin(ir::Bin::And, x, k) if matches!(**k, E::Not(_)) => &**x,
+        _ => a,
+    };
+    match a {
+        E::Bin(ir::Bin::Add, b, k) => {
+            if let (E::Reg(r), E::Const(v)) = (&**b, &**k) {
+                if *r < 13 {
+                    out.push((*r, *v, kind));
                 }
             }
-            E::Reg(r) if *r < 13 => out.push((*r, 0)),
-            _ => {}
         }
+        E::Reg(r) if *r < 13 => out.push((*r, 0, kind)),
+        _ => {}
     }
+}
+
+fn accesses_e(e: &E, out: &mut Vec<(u8, u32, u8)>) {
     match e {
-        E::Load { addr, .. } => {
-            at(addr, out);
+        E::Load { w, signed, addr } => {
+            at(addr, load_kind(*w, *signed), out);
             accesses_e(addr, out);
         }
         E::Call(H::Ldr, a) if a.len() == 2 => {
-            at(&a[1], out);
+            at(&a[1], 4, out);
             accesses_e(&a[1], out);
         }
         E::Bin(_, a, b) | E::Cmp(_, _, a, b) => {
@@ -872,13 +890,12 @@ fn accesses_e(e: &E, out: &mut Vec<(u8, u32)>) {
     }
 }
 
-fn accesses_s(s: &S, out: &mut Vec<(u8, u32)>) {
+fn accesses_s(s: &S, out: &mut Vec<(u8, u32, u8)>) {
     match s {
         S::Let(_, e) | S::Let2(_, _, e) | S::SetFlag(_, e) | S::SetNz(e) | S::Do(e) | S::Goto(e) | S::ExcReturn(e) | S::SetReg(_, e) => accesses_e(e, out),
-        S::Store { addr, val, .. } => {
-            let mut a = Vec::new();
-            accesses_e(&E::Load { w: ir::Width::B8, signed: false, addr: Box::new(addr.clone()) }, &mut a);
-            out.extend(a);
+        S::Store { w, addr, val } => {
+            at(addr, 6 + load_kind(*w, false).min(4) / 2, out);
+            accesses_e(addr, out);
             accesses_e(val, out);
         }
         S::Call { target, .. } => accesses_e(target, out),
@@ -950,6 +967,25 @@ pub fn take_types() -> Types {
     LAST_TYPES.with(|t| std::mem::take(&mut *t.borrow_mut()))
 }
 
+thread_local! {
+    static DUMP: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Whether struct inference records its raw facts for the dictionary tools (`MKDS_TYPE_DUMP`).
+fn dumping() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("MKDS_TYPE_DUMP").is_some())
+}
+
+/// Takes the layout facts recorded since the last call (`MKDS_TYPE_DUMP`): CSV lines
+/// `miss,entry,struct,offset,kind` (a typed access with no known field), `gacc,entry,address,kind`
+/// (an access to a constant address), `gptr,entry,global,offset,kind,struct` (an access through the
+/// pointer stored at a global), `fptr,entry,struct,field,offset,kind` (through a pointer field),
+/// `arg,entry,register,offset,kind` (through an untyped argument).
+pub fn take_dump() -> Vec<String> {
+    DUMP.with(|d| std::mem::take(&mut *d.borrow_mut()))
+}
+
 fn infer_fields(blocks: &BTreeMap<u32, Block>, order: &[u32], preds: &BTreeMap<u32, Vec<u32>>, entry: u32, notes: &Notes) -> Typed {
     type St = Vec<BTreeSet<usize>>;
     let mut ids: HashMap<(u32, usize, usize, u8), usize> = HashMap::new();
@@ -1011,7 +1047,11 @@ fn infer_fields(blocks: &BTreeMap<u32, Block>, order: &[u32], preds: &BTreeMap<u
             p[a.max(b)] = a.min(b);
         }
     };
-    let mut uses: Vec<((u32, u32, usize), u8, u32, usize)> = Vec::new();
+    let mut uses: Vec<((u32, u32, usize), u8, u32, usize, u8)> = Vec::new();
+    // constant definitions (`r1 = 0x0217ACF8`) and definitions adding a constant to one reaching
+    // definition of another register (`r3 = r0 + 0x200`): (definition, base definition, constant)
+    let mut consts: HashMap<usize, u32> = HashMap::new();
+    let mut derived: Vec<(usize, usize, u32)> = Vec::new();
     // argument registers at calls with a known target: (target, register, a reaching definition)
     let mut call_args: Vec<(u32, u8, usize)> = Vec::new();
     // word loads into registers: (definition, global address or (base definition, offset))
@@ -1034,14 +1074,14 @@ fn infer_fields(blocks: &BTreeMap<u32, Block>, order: &[u32], preds: &BTreeMap<u
         let Some(mut st) = ins_state.get(&b).cloned() else { continue };
         for (ii, ins) in blocks[&b].insts.iter().enumerate() {
             let cond = ins.cond != 14 || ins.guard.is_some();
-            let mut reads = |key: (u32, u32, usize), acc: Vec<(u8, u32)>, st: &St, parent: &mut Vec<usize>| {
-                for (r, off) in acc {
+            let mut reads = |key: (u32, u32, usize), acc: Vec<(u8, u32, u8)>, st: &St, parent: &mut Vec<usize>| {
+                for (r, off, kind) in acc {
                     let defs = &st[r as usize];
                     let Some(&first) = defs.iter().next() else { continue };
                     for &d in defs {
                         union(parent, first, d);
                     }
-                    uses.push((key, r, off, first));
+                    uses.push((key, r, off, first, kind));
                 }
             };
             if let Some(g) = &ins.guard {
@@ -1088,6 +1128,21 @@ fn infer_fields(blocks: &BTreeMap<u32, Block>, order: &[u32], preds: &BTreeMap<u
                     if let (Some(from), Some(&d)) = (from, ids.get(&(b, ii, si, *i))) {
                         loads.push((d, from));
                     }
+                    if let Some(&d) = ids.get(&(b, ii, si, *i)) {
+                        match e {
+                            E::Const(v) => {
+                                consts.insert(d, *v);
+                            }
+                            E::Bin(ir::Bin::Add, x, k) => {
+                                if let (E::Reg(r), E::Const(k)) = (&**x, &**k) {
+                                    if *r < 13 && st[*r as usize].len() == 1 {
+                                        derived.push((d, *st[*r as usize].iter().next().unwrap(), *k));
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
                 }
                 for (r, src) in defs_s(s) {
                     let d = ids[&(b, ii, si, r)];
@@ -1105,11 +1160,64 @@ fn infer_fields(blocks: &BTreeMap<u32, Block>, order: &[u32], preds: &BTreeMap<u
             }
         }
     }
-    // vote per group
+    let groups = parent.len();
+    let mut gsize: HashMap<usize, usize> = HashMap::new();
+    for x in 0..groups {
+        *gsize.entry(find(&mut parent, x)).or_default() += 1;
+    }
+    // constants through added constants (`r2 = r1 + 0x10` with `r1 = 0x0217A9F4`)
+    for _ in 0..4 {
+        for &(d, bd, k) in &derived {
+            if let Some(&c) = consts.get(&bd) {
+                consts.entry(d).or_insert(c.wrapping_add(k));
+            }
+        }
+    }
+    // a group holding one constant wherever it is read (every definition sets the same value)
+    let mut gconst: HashMap<usize, Option<u32>> = HashMap::new();
+    let mut nconst: HashMap<usize, usize> = HashMap::new();
+    for (&d, &v) in &consts {
+        let g = find(&mut parent, d);
+        *nconst.entry(g).or_default() += 1;
+        let e = gconst.entry(g).or_insert(Some(v));
+        if *e != Some(v) {
+            *e = None;
+        }
+    }
+    let gconst: HashMap<usize, u32> = gconst.into_iter().filter_map(|(g, v)| Some((g, v?))).filter(|(g, _)| nconst[g] == gsize[g]).collect();
+    // interior pointers: a group whose definitions all add the same constant to one other group
+    // (`r3 = kart + 0x200`; halfword and byte accesses reach only 0xFF past their base)
+    let mut inner: HashMap<usize, Option<(usize, u32)>> = HashMap::new();
+    let mut nder: HashMap<usize, BTreeSet<usize>> = HashMap::new();
+    for &(d, bd, k) in &derived {
+        let (g, bg) = (find(&mut parent, d), find(&mut parent, bd));
+        nder.entry(g).or_default().insert(d);
+        let e = inner.entry(g).or_insert(Some((bg, k)));
+        if *e != Some((bg, k)) || bg == g {
+            *e = None;
+        }
+    }
+    let inner: HashMap<usize, (usize, u32)> = inner.into_iter().filter_map(|(g, v)| Some((g, v?))).filter(|(g, _)| nder[g].len() == gsize[g] && !gconst.contains_key(g)).collect();
+    // a group's root (the struct's own address) and the bias its values carry past it
+    let resolve = |mut g: usize| -> (usize, u32) {
+        let mut bias = 0u32;
+        for _ in 0..8 {
+            match inner.get(&g) {
+                Some(&(bg, k)) => {
+                    bias = bias.wrapping_add(k);
+                    g = bg;
+                }
+                None => break,
+            }
+        }
+        (g, bias)
+    };
+    // vote per root group, at the struct offsets (bias plus access offset)
     let mut offs: HashMap<usize, BTreeSet<u32>> = HashMap::new();
     for u in &uses {
         let g = find(&mut parent, u.3);
-        offs.entry(g).or_default().insert(u.2);
+        let (g, bias) = resolve(g);
+        offs.entry(g).or_default().insert(bias.wrapping_add(u.2));
     }
     let mut votes: HashMap<usize, BTreeMap<String, usize>> = HashMap::new();
     for (g, ks) in &offs {
@@ -1127,6 +1235,12 @@ fn infer_fields(blocks: &BTreeMap<u32, Block>, order: &[u32], preds: &BTreeMap<u
             *votes.entry(g).or_default().entry(st).or_default() += 2;
         }
     }
+    // the address of a global that is a struct itself
+    for (&g, &v) in &gconst {
+        if let Some(st) = (notes.global_is)(v) {
+            *votes.entry(g).or_default().entry(st).or_default() += 2;
+        }
+    }
     let decide = |votes: &HashMap<usize, BTreeMap<String, usize>>| -> HashMap<usize, String> {
         let mut winner = HashMap::new();
         for (g, score) in votes {
@@ -1139,14 +1253,27 @@ fn infer_fields(blocks: &BTreeMap<u32, Block>, order: &[u32], preds: &BTreeMap<u
         winner
     };
     let mut winner = decide(&votes);
+    // the global or the (root group, struct offset) a loaded pointer comes from
+    let source = |from: &Result<u32, (usize, u32)>, parent: &mut Vec<usize>| -> Result<u32, (usize, u32)> {
+        match from {
+            Ok(g) => Ok(*g),
+            Err((bd, off)) => match consts.get(bd) {
+                Some(&c) => Ok(c.wrapping_add(*off)),
+                None => {
+                    let (g, bias) = resolve(find(parent, *bd));
+                    Err((g, bias.wrapping_add(*off)))
+                }
+            },
+        }
+    };
     // pointers loaded from typed globals and from pointer fields of typed values vote for what
     // they point to; a newly typed value can type the pointers loaded from it, so repeat
     for _ in 0..4 {
         let mut more = votes.clone();
         for (d, from) in &loads {
-            let st = match from {
-                Ok(g) => (notes.global_points)(*g),
-                Err((bd, off)) => winner.get(&find(&mut parent, *bd)).and_then(|w| (notes.field_points)(w, *off)),
+            let st = match source(from, &mut parent) {
+                Ok(g) => (notes.global_points)(g),
+                Err((g, off)) => winner.get(&g).and_then(|w| (notes.field_points)(w, off)),
             };
             if let Some(st) = st {
                 *more.entry(find(&mut parent, *d)).or_default().entry(st).or_default() += 2;
@@ -1203,15 +1330,53 @@ fn infer_fields(blocks: &BTreeMap<u32, Block>, order: &[u32], preds: &BTreeMap<u
         Some((t, r, winner.get(&g)?.clone()))
     }).collect();
     let mut map = FieldMap::new();
-    for (key, r, off, d) in uses {
-        let g = find(&mut parent, d);
-        let f = match winner.get(&g) {
-            Some(st) => (notes.field_in)(st, off),
-            None => (notes.field)(off),
-        };
-        if let Some(f) = f {
-            map.entry(key).or_default().insert((r, off), f);
+    // what loaded pointers come from, by group (for the dump)
+    let mut loaded: HashMap<usize, Result<u32, (usize, u32)>> = HashMap::new();
+    if dumping() {
+        for (d, from) in &loads {
+            let g = find(&mut parent, *d);
+            let src = source(from, &mut parent);
+            loaded.insert(g, src);
         }
+    }
+    let mut dump = Vec::new();
+    for (key, r, off, d, kind) in uses {
+        let (g, bias) = resolve(find(&mut parent, d));
+        let at = bias.wrapping_add(off);
+        let f = match winner.get(&g) {
+            Some(st) => (notes.field_in)(st, at),
+            None => (notes.field)(at),
+        };
+        if dumping() {
+            let k = KINDS[kind as usize];
+            if let Some(&v) = gconst.get(&g) {
+                dump.push(format!("gacc,{entry:#X},{:#X},{k}", v.wrapping_add(at)));
+            } else if let (Some(st), None) = (winner.get(&g), &f) {
+                dump.push(format!("miss,{entry:#X},{st},{at:#X},{k}"));
+            } else if f.is_none() {
+                match loaded.get(&g) {
+                    Some(Ok(gl)) => dump.push(format!("gptr,{entry:#X},{gl:#X},{at:#X},{k},")),
+                    Some(Err((bg, foff))) => {
+                        if let Some(w) = winner.get(bg) {
+                            dump.push(format!("fptr,{entry:#X},{w},{foff:#X},{at:#X},{k}"));
+                        }
+                    }
+                    None => {
+                        if let Some(a) = (0..4u8).find(|&a| find(&mut parent, a as usize) == g) {
+                            dump.push(format!("arg,{entry:#X},{a},{at:#X},{k}"));
+                        }
+                    }
+                }
+            } else if let (Some(Ok(gl)), Some(st)) = (loaded.get(&g), winner.get(&g)) {
+                dump.push(format!("gptr,{entry:#X},{gl:#X},{at:#X},{k},{st}"));
+            }
+        }
+        if let Some(f) = f {
+            map.entry(key).or_default().insert((r, off), (f, bias));
+        }
+    }
+    if !dump.is_empty() {
+        DUMP.with(|x| x.borrow_mut().extend(dump));
     }
     Typed { fields: map, regs, args, calls }
 }

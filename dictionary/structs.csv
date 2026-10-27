@@ -128,3 +128,12 @@ ObjectKind,object_kind;kind_record,ObjectKindList,,,"record with count u16 at +4
 MapObjInstance,mapobj_instance,,,,"flags u16 at +2, fade counter +102","one live map-object instance walked by the manager: flags (+2 bit 4 skip update, 0x12 skip draw), position/displacement +4..+16, fade counter +102, priority +120, children +148"
 ItemPool,ItemTypePool,,,64,a1 in sub_20F02C0 / sub_20F1048 / sub_20F0F70 (one pool per item type),"pool of preallocated item objects of one type: pointer array, capacity, in-use cursor, live count, limits"
 ControllerSlot,controller_slot;PadSlot,,"0x02175608 (8 racer slots + UI slot, 92 bytes each)",92,"held u16 at +2, source type +0x3C","per-player controller slot: pressed/held/released keys, auto-repeat state machine, soft-reset detector, input source type, enabled-button mask, touch block"
+NetMatchmaking,,,*0x021B562C,,global pointer *0x021B562C,"matchmaking/connection state of the online session (net_start_match_connections, net_find_unused_player_slot)"
+MenuSharedState,,,*0x02174DFC,,global pointer *0x02174DFC,"menu-wide state words read and set by small getters/setters (ready flag, mode byte, slot palette)"
+MenuDialog,,,*0x0217D3D0,,global pointer *0x0217D3D0,menu message dialog: open/animate/input/tilemaps (menu_dialog_*)
+NetPeerSearch,,,*0x021B5624,,global pointer *0x021B5624,"online peer search: timers, results, duplicate removal (net_*search*, net_*peer*)"
+KartPreviewMenu,,,*0x0217ACE8,,global pointer *0x0217ACE8,"menu kart/driver preview: model, offsets, page loader (menu_*kart_preview*, menu_select_driver)"
+RaceGoalState,,,*0x0217B3C0,,global pointer *0x0217B3C0,"end-of-race goal presentation: resources, player reveal order, finish flags (race_goal_*)"
+MenuChoiceBox,,,*0x0217D3D4,,global pointer *0x0217D3D4,"two-way choice box: input, resources, highlight (menu_choice_*)"
+MenuReturnButton,,,*0x0217D3D8,,global pointer *0x0217D3D8,"the menu return button: press/appear/release animation, palette (menu_return_*)"
+ArchiveLoader,,,*0x0217A9F0,,global pointer *0x0217A9F0,"file-system archive loader: load buffer range, budgets, overlay archive requests (fs_*loader*, fs_*load_buffer)"
