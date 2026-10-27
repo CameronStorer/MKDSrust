@@ -12,6 +12,7 @@ pub mod gx;
 /// Reference interpreter: tests, differential checks and diagnostics only; never in a shipped game.
 #[cfg(feature = "interpreter")]
 pub mod interp;
+pub mod ir;
 pub mod input;
 pub mod input_bus;
 pub mod lift;

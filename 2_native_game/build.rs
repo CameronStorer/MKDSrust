@@ -4,6 +4,9 @@
 #[path = "src/arm.rs"]
 mod arm;
 mod build_support;
+#[path = "src/ir.rs"]
+#[allow(dead_code)]
+mod ir;
 #[path = "src/lift.rs"]
 mod lift;
 #[path = "src/rt.rs"]

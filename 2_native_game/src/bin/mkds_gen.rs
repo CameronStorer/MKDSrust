@@ -18,6 +18,8 @@
 mod arm;
 #[path = "../../build_support.rs"]
 mod build_support;
+#[path = "../ir.rs"]
+mod ir;
 #[path = "../lift.rs"]
 mod lift;
 #[path = "../rt.rs"]
@@ -248,6 +250,7 @@ fn generator_id() -> String {
     let mut h = Sha256::new();
     for src in [
         include_bytes!("../lift.rs").as_slice(),
+        include_bytes!("../ir.rs"),
         include_bytes!("../arm.rs"),
         include_bytes!("../thumb.rs"),
         include_bytes!("../rt.rs"),

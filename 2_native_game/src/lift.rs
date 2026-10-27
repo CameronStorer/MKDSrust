@@ -507,9 +507,10 @@ fn ea(rn: usize, o: Off, up: bool, pre: bool, wb: bool, addr: u32, t: bool) -> (
     }
 }
 
-/// Rust for one instruction. `next` is the code address after it; `img` allows folding literal
-/// pool loads (word loads from a constant address inside the function's own image).
-fn body(d: &Decoded, addr: u32, next: u32, img: Option<&Image>) -> String {
+/// The pre-IR string emitter for one instruction, kept as the oracle for the T0 contract
+/// (`tests/ir_t0.rs`): [`crate::ir::print`] of [`crate::ir::lower`] must equal it up to whitespace.
+#[doc(hidden)]
+pub fn legacy_body(d: &Decoded, addr: u32, next: u32, img: Option<&Image>) -> String {
     let t = d.thumb;
     match d.inst {
         Inst::Dp { op, s, rn, rd, op2: o } => {
@@ -739,7 +740,7 @@ pub fn emit_cost(f: &Func, id: &str, img: Option<&Image>, cost: Option<&dyn Fn(&
         let mut end = start;
         for (a, d) in &insts {
             let next = Func::next(*a, d);
-            let code = body(d, *a & !1, next & !1, img);
+            let code = crate::ir::print(&crate::ir::lower(d, *a & !1, next & !1, img));
             if code.is_empty() {
             } else if d.cond == 14 {
                 let _ = writeln!(s, "                {{ {code} }}");
