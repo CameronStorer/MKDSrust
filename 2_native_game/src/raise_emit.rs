@@ -262,6 +262,15 @@ fn stmt_note(n: &Notes, s: &S) -> Option<String> {
 
 /// [`emit_t1`] with comments from `notes`.
 pub fn emit_t1_annotated(f: &Func, id: &str, img: Option<&Image>, notes: &Notes) -> Result<String, Reason> {
+    emit_t1_full(f, id, img, notes, None)
+}
+
+/// Per-instruction budget cost `(instruction, ends its block with a jump)`, as for
+/// [`crate::lift::emit_cost`] (the ARM7 charges cycles); `None` charges one per instruction.
+pub type Cost<'a> = Option<&'a dyn Fn(&crate::arm::Decoded, bool) -> u32>;
+
+/// [`emit_t1_annotated`] with the translation's budget cost model.
+pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost: Cost) -> Result<String, Reason> {
     let names = notes.call;
     let live = crate::raise::flag_liveness(f, img);
     // blocks reachable from the entry through internal edges
@@ -307,7 +316,13 @@ pub fn emit_t1_annotated(f: &Func, id: &str, img: Option<&Image>, notes: &Notes)
         }
         succ.dedup();
         work.extend(succ.iter().copied());
-        let charge = insts.len() as u32;
+        let charge = match cost {
+            None => insts.len() as u32,
+            Some(cost) => {
+                let raw = f.block(b);
+                raw.iter().enumerate().map(|(i, (_, d))| cost(d, i + 1 == raw.len() && (d.inst.writes_pc() || d.inst.is_call()))).sum()
+            }
+        };
         blocks.insert(b, Block { start: b, insts, succ, falls_to, charge });
     }
     // reverse postorder

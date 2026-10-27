@@ -765,7 +765,13 @@ fn run() -> Result<ExitCode, String> {
         let hi = f.insts.iter().last().map(|(&a, d)| (a & !1) + d.size).unwrap_or(lo);
         spans7.entry(seg.clone()).or_default().push((lo, hi));
         extra.push(discovered_row(&seg, f));
-        funcs.push(Lifted { arm7: true, segment: seg, entry, code: lift::emit_full(f, &id, Some(&img7), Some(&|d, jumped| rt::arm7_cycles(d, true, jumped)), raise()), t1: Err("ARM7 (cycle-cost budget)"), t1_name: String::new(), id });
+        funcs.push(Lifted { arm7: true, segment: seg, entry, code: lift::emit_full(f, &id, Some(&img7), Some(&|d, jumped| rt::arm7_cycles(d, true, jumped)), raise()), t1: if raise() && std::env::var_os("MKDS_NO_T1").is_none() {
+            let none = |_: u32| None;
+            let notes = raise_emit::Notes { call: &none, field: &none, global: &none };
+            raise_emit::emit_t1_full(f, &id, Some(&img7), &notes, Some(&|d, jumped| rt::arm7_cycles(d, true, jumped)))
+        } else {
+            Err("exact generation")
+        }, t1_name: format!("f_{id}_t1"), id });
     }
 
     // output directory: only create/replace our own previous output

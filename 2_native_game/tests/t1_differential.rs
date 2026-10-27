@@ -4,7 +4,7 @@
 //! generated code with rustc, like `synthetic_lift.rs`.
 #![cfg(feature = "gen")]
 use recomp::lift::{discover, emit_full, Func, Image};
-use recomp::raise_emit::emit_t1;
+use recomp::raise_emit::{emit_t1, emit_t1_full, Notes};
 use std::{path::PathBuf, process::Command};
 
 #[path = "../build_support.rs"]
@@ -13,14 +13,22 @@ mod build_support;
 
 /// Generates T0 + T1 for each function and a `main` comparing them; returns how many were raised.
 fn build_checks(funcs: &[(String, u32, Func)], image: &[u8], base: u32, seeds: u32) -> (String, usize) {
+    build_checks_cost(funcs, image, base, seeds, None)
+}
+
+type Cost<'a> = Option<&'a dyn Fn(&recomp::arm::Decoded, bool) -> u32>;
+
+fn build_checks_cost(funcs: &[(String, u32, Func)], image: &[u8], base: u32, seeds: u32, cost: Cost) -> (String, usize) {
     let img = Image::new(base, image);
     let mut src = String::from("#![allow(non_upper_case_globals, unused)]\nstatic IMAGE: &[u8] = include_bytes!(\"image.bin\");\n");
     let mut checks = String::new();
     let mut raised = 0;
     for (name, entry, f) in funcs {
-        let Ok(t1) = emit_t1(f, name, Some(&img)) else { continue };
+        let none = |_: u32| None;
+        let notes = Notes { call: &none, field: &none, global: &none };
+        let Ok(t1) = emit_t1_full(f, name, Some(&img), &notes, cost) else { continue };
         raised += 1;
-        src.push_str(&emit_full(f, name, Some(&img), None, true));
+        src.push_str(&emit_full(f, name, Some(&img), cost, true));
         src.push_str(&t1);
         // flags live at each block start: at a slice end only these must match (dead flags may differ)
         let (_, live_in) = recomp::raise::flag_liveness_blocks(f, Some(&img));
@@ -170,4 +178,34 @@ fn raised_rom_functions_match_their_translation() {
     let (src, raised) = build_checks(&funcs, &image, base, 48);
     assert_eq!(raised, funcs.len());
     compile_and_run(&src, &image, "rom");
+}
+
+/// Real ROM (`MKDS_ROM`): the ARM7 program (found by discovery; its budget is charged in cycles).
+#[test]
+fn raised_arm7_functions_match_their_translation() {
+    let Ok(path) = std::env::var("MKDS_ROM") else {
+        eprintln!("MKDS_ROM not set: skipped");
+        return;
+    };
+    let rom = std::fs::read(path).unwrap();
+    let (entry, secs) = build_support::arm7_sections(&rom).unwrap();
+    // discover over all sections, then test the functions of the section holding the most of them
+    // (the test bus serves one image)
+    let full = Image { segs: secs.iter().map(|s| (s.ram_address, s.data.as_slice())).collect() };
+    let ranges: Vec<(u32, u32)> = secs.iter().map(|s| (s.ram_address, s.ram_address + s.data.len() as u32)).collect();
+    let is_code = |a: u32| ranges.iter().any(|&(l, h)| (l..h).contains(&(a & !1)));
+    let all = recomp::lift::discover_program(&full, &[entry], &is_code, 20_000);
+    let sec = secs.iter().max_by_key(|s| all.keys().filter(|&&e| (s.ram_address..s.ram_address + s.data.len() as u32).contains(&(e & !1))).count()).unwrap();
+    let (lo, hi) = (sec.ram_address, sec.ram_address + sec.data.len() as u32);
+    let image = sec.data.clone();
+    let funcs: Vec<(String, u32, Func)> = all
+        .into_iter()
+        .filter(|(_, f)| f.insts.keys().all(|&a| (lo..hi).contains(&(a & !1))))
+        .take(400)
+        .map(|(e, f)| (format!("a{:08X}", e & !1), e, f))
+        .collect();
+    let cost = |d: &recomp::arm::Decoded, jumped: bool| recomp::rt::arm7_cycles(d, true, jumped);
+    let (src, raised) = build_checks_cost(&funcs, &image, lo, 32, Some(&cost));
+    eprintln!("{raised} of {} ARM7 functions raised", funcs.len());
+    compile_and_run(&src, &image, "arm7");
 }
