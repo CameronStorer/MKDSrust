@@ -353,13 +353,15 @@ pub fn run_with_tables(
 
 /// Block 5.0 logical-frame oracle: the recorder behind `--record DIR` (see `frame_compare`).
 ///
-/// One sample per logical frame (SDK V-blank count, `Session::logical_frame`), taken when the game's main
-/// loop enters VBlankIntrWait (SWI 5) for the first time in that frame: the frame's work is done there, at
-/// the same point of the game's own code in every build. Files (no RAM bytes, only hashes and I/O words):
+/// One sample per logical frame (SDK V-blank count, `Session::logical_frame`), taken when the ARM9 takes
+/// the V-blank IRQ: the start of the logical frame. Without lag the game is idle there (its main loop sleeps
+/// in `OS_WaitIrq`), so the state does not depend on how the frame's work was interleaved.
+/// Files (no RAM bytes, only hashes and I/O words):
 /// - `regions.csv`: index, name, what the region covers. `mask.txt`: the mask the hashes were taken with.
 /// - `frames.bin`: `MKORC001`, u32 region count; per sample u32 frame, u32 hardware frame, u64 cycles, then
 ///   one u64 hash per region (masked bytes hashed as zero, masked regions as 0).
-/// - `inputs.csv`: buttons held from each logical frame on (change rows; `frame_compare` replays it).
+/// - `inputs.csv`: the buttons the game read (first KEYINPUT read) in each logical frame, as change rows;
+///   `--replay` applies row L at the start of logical frame L.
 /// - `events.bin`: 12-byte PXI events (u32 frame, u8 kind, u8 bytes, u16 offset, u32 value), kinds in
 ///   `recomp::ds_mem::EV_*`; SPU writes too with `MKDS_RECORD_SPU=1` (otherwise only their hash per frame).
 /// - `census.csv` / `spins.csv`: per-frame counters (waits, IRQ sources, polled I/O, lag) and tight loops.
@@ -503,8 +505,10 @@ pub mod oracle {
         }
     }
 
-    pub const IRQ_NAMES: [&str; 12] =
-        ["vblank", "hblank", "vcount", "tm0", "tm1", "tm2", "tm3", "ipcsync", "ipcrecv", "card", "gxfifo", "other"];
+    pub const IRQ_NAMES: [&str; 15] = [
+        "vblank", "hblank", "vcount", "tm0", "tm1", "tm2", "tm3", "ipcsync", "ipcrecv", "card", "gxfifo", "dma",
+        "ipcsend", "keypad", "other",
+    ];
 
     fn irq_column(bit: usize) -> usize {
         match bit {
@@ -513,7 +517,10 @@ pub mod oracle {
             18 => 8,
             19 => 9,
             21 => 10,
-            _ => 11,
+            8..=11 => 11,
+            17 => 12,
+            12 => 13,
+            _ => 14,
         }
     }
 
@@ -702,13 +709,14 @@ pub mod oracle {
         }
 
         fn on_wait(&mut self, m: &mut Machine<'_>, what: u32) -> std::io::Result<()> {
-            self.waits[match what {
-                4 => 0,
-                5 => 1,
-                6 => 2,
-                _ => 3,
-            }] += 1;
-            if what != 5 {
+            match what {
+                4 => self.waits[0] += 1,
+                5 => self.waits[1] += 1,
+                6 => self.waits[2] += 1,
+                0x100 => self.waits[3] += 1,
+                _ => {}
+            }
+            if what != recomp::machine::ORACLE_VBLANK_IRQ {
                 return Ok(());
             }
             let frame = self.word(m, ds_mem::VBLANK_COUNT);
@@ -768,7 +776,7 @@ pub mod oracle {
                 self.events.write_all(&b)?;
             }
             // census
-            let mut irq = [0u64; 12];
+            let mut irq = [0u64; IRQ_NAMES.len()];
             for (b, n) in probe.irq_bits.iter().enumerate() {
                 irq[irq_column(b)] += n;
             }
@@ -795,16 +803,19 @@ pub mod oracle {
             for (pc, n) in &probe.spins {
                 writeln!(self.spins, "{frame},{pc:#010x},{n}")?;
             }
-            // inputs: what is held now, then (replay) the script's value for the next frame
-            let held = self.buttons.get();
-            if self.logged_buttons != Some(held) {
-                writeln!(self.inputs, "{frame},{held},,")?;
-                self.logged_buttons = Some(held);
+            // inputs: what the game read in the frame that just ended (unchanged when it did not read)
+            if let (Some(prev), Some(key)) = (self.last, probe.first_key) {
+                let seen = !key & 0x3ff;
+                if self.logged_buttons != Some(seen) {
+                    writeln!(self.inputs, "{prev},{seen},,")?;
+                    self.logged_buttons = Some(seen);
+                }
             }
-            if let Some(next) = self.scripted(frame.wrapping_add(1)) {
-                if next != held {
-                    m.set_input(next, None);
-                    self.buttons.set(next);
+            // replay: the script's buttons for the frame that starts now
+            if let Some(now) = self.scripted(frame) {
+                if now != self.buttons.get() {
+                    m.set_input(now, None);
+                    self.buttons.set(now);
                 }
             }
             if self.dumps.contains(&frame) {

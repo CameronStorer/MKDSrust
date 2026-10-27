@@ -21,6 +21,9 @@ pub enum Hook {
 }
 
 /// Host events polled during a guest interrupt wait. No native UI types enter the runtime.
+/// [`Machine::wait_hook`] event: the ARM9 is taking an IRQ with V-blank pending.
+pub const ORACLE_VBLANK_IRQ: u32 = 0x200;
+
 #[derive(Default)]
 pub struct IdleAction {
     pub quit: bool,
@@ -68,7 +71,8 @@ pub struct Machine<'a> {
     pub input_observer: Option<Box<dyn FnMut(u64, u16) + 'a>>,
     pub host_quit: bool,
     /// Block 5.0 oracle (`acceptance --record`): called with the BIOS call number when the ARM9 is about to
-    /// wait for an interrupt (SWI 4/5/6; 0x100 for the CP15 wait), before the wait. `None` by default.
+    /// wait for an interrupt (SWI 4/5/6; 0x100 for the CP15 wait), and with [`ORACLE_VBLANK_IRQ`] when the
+    /// ARM9 takes an IRQ with V-blank pending (the start of a logical frame). `None` by default.
     pub wait_hook: Option<Box<dyn FnMut(&mut Machine<'a>, u32) + 'a>>,
 }
 
@@ -388,7 +392,7 @@ impl Machine<'_> {
         std::mem::take(&mut self.audio)
     }
 
-    fn oracle_wait(&mut self, what: u32) {
+    pub fn oracle_wait(&mut self, what: u32) {
         if let Some(mut hook) = self.wait_hook.take() {
             hook(self, what);
             self.wait_hook = Some(hook);

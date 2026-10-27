@@ -369,6 +369,8 @@ pub struct Probe {
     pub run_pc: u32,
     pub run_len: u64,
     pub spins: Vec<(u32, u64)>,
+    /// KEYINPUT as the ARM9 first read it since the last drain (the input the game saw).
+    pub first_key: Option<u16>,
     /// Test perturbation (off = 0): added to TM0CNT_L reads, the counter `OS_GetTick` reads.
     pub tm0_bias: u16,
 }
@@ -768,8 +770,13 @@ impl Bus {
     }
 
     fn read_io(&mut self, off: usize, n: usize) -> u32 {
-        if let Some(p) = self.probe.as_mut() {
+        if self.probe.is_some() {
+            let key = self.io_get(0x130, 2) as u16;
+            let p = self.probe.as_mut().unwrap();
             p.io_read(off);
+            if off & !1 == 0x130 && p.first_key.is_none() {
+                p.first_key = Some(key);
+            }
         }
         if (0x600..0x604).contains(&off) {
             // Commands are consumed synchronously by our GX backend: zero FIFO

@@ -81,6 +81,13 @@ fn mask_regions(path: Option<&String>) -> Result<Vec<(String, String)>, String> 
     Ok(out)
 }
 
+/// Drops input rows and events from logical frame `last` on (a run that stopped earlier is not a difference).
+fn cut(mut r: Recording, last: u32) -> Recording {
+    r.inputs.retain(|i| i.0 < last);
+    r.events.retain(|e| u32::from_le_bytes(e[..4].try_into().unwrap()) < last);
+    r
+}
+
 /// Compares two recordings; prints the report. `Ok(true)` when equal.
 fn compare(a: &Path, b: &Path, mask: Option<&String>) -> Result<bool, String> {
     let (ra, rb) = (load(a)?, load(b)?);
@@ -150,7 +157,9 @@ fn compare(a: &Path, b: &Path, mask: Option<&String>) -> Result<bool, String> {
     for (n, why) in &skip_names {
         println!("masked region {n}: {why}");
     }
-    // inputs
+    // inputs and events up to the last logical frame both runs reached
+    let common = ra.frames.last().map_or(0, |f| f.0).min(rb.frames.last().map_or(0, |f| f.0));
+    let (ra, rb) = (cut(ra, common), cut(rb, common));
     if ra.inputs != rb.inputs {
         let k = ra.inputs.iter().zip(&rb.inputs).position(|(x, y)| x != y).unwrap_or(ra.inputs.len().min(rb.inputs.len()));
         println!("inputs differ at change row {k}: A {:?} / B {:?}", ra.inputs.get(k), rb.inputs.get(k));

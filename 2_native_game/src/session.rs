@@ -228,6 +228,9 @@ impl<'a> Session<'a> {
             if hw.probe.is_some() {
                 let pending = hw.r32(0x0400_0210) & hw.r32(0x0400_0214);
                 hw.probe.as_mut().unwrap().irq(pending);
+                if pending & 1 != 0 {
+                    self.machine.oracle_wait(crate::machine::ORACLE_VBLANK_IRQ);
+                }
             }
             self.pc = rt::take_irq(&mut self.cpu, self.pc, 0xffff_0000);
             self.stats.irqs += 1;

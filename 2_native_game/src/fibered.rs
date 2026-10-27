@@ -211,6 +211,9 @@ impl Guest {
             let hw = &mut self.s().machine.hw;
             let pending = hw.r32(0x0400_0210) & hw.r32(0x0400_0214);
             hw.probe.as_mut().unwrap().irq(pending);
+            if pending & 1 != 0 {
+                self.s().machine.oracle_wait(crate::machine::ORACLE_VBLANK_IRQ);
+            }
         }
         let sp = self.cpu().r[13];
         let vector = rt::take_irq(self.cpu(), pc, 0xffff_0000);
