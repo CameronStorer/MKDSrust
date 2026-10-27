@@ -504,6 +504,22 @@ fn replace_word(text: &str, from: &str, to: &str) -> String {
     out
 }
 
+/// The structs the function at `entry` is known to use a field of at `off`.
+fn structs_at(entry: u32, off: u32) -> Vec<String> {
+    let Some(l) = LAYOUT.get() else { return Vec::new() };
+    let mut v: Vec<String> = l.uses.get(&(entry & !1)).into_iter().flatten().filter(|(_, o)| *o == off).map(|(st, _)| st.clone()).collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// Struct `st`'s field at `off`.
+fn field_in(st: &str, off: u32) -> Option<ir::FieldRef> {
+    let l = LAYOUT.get()?;
+    let (name, ty) = l.fields.get(&(st.to_string(), off))?;
+    Some(ir::FieldRef { strukt: st.to_string(), module: l.modules.get(st)?.clone(), name: name.clone(), off, primary: primary_access(ty) })
+}
+
 /// The access a field type implies: scalars of 1, 2 or 4 bytes (`fx12`/`fx32` are 4-byte fixed
 /// point, `fx16` 2-byte); none for vectors, arrays and unknown types.
 fn primary_access(ty: &str) -> Option<ir::Access> {
@@ -601,7 +617,13 @@ fn lifted9(segment: String, f: &lift::Func, id: String, img: &lift::Image) -> Li
         Err("T1 off (MKDS_NO_T1)")
     } else {
         let entry = f.entry;
-        let notes = raise_emit::Notes { call: &|t| call_name(&segment, t), field: &|off| field_name(entry, off), global: &global_name };
+        let notes = raise_emit::Notes {
+            call: &|t| call_name(&segment, t),
+            field: &|off| field_name(entry, off),
+            fields_of: &|off| structs_at(entry, off),
+            field_in: &field_in,
+            global: &global_name,
+        };
         raise_emit::emit_t1_annotated(f, &id, Some(img), &notes)
     };
     let fields = if t1.is_ok() { ir::take_field_uses() } else { Vec::new() };
@@ -937,8 +959,7 @@ fn run() -> Result<ExitCode, String> {
         spans7.entry(seg.clone()).or_default().push((lo, hi));
         extra.push(discovered_row(&seg, f));
         funcs.push(Lifted { arm7: true, segment: seg, entry, code: lift::emit_full(f, &id, Some(&img7), Some(&|d, jumped| rt::arm7_cycles(d, true, jumped)), raise()), t1: if raise() && std::env::var_os("MKDS_NO_T1").is_none() {
-            let none = |_: u32| None;
-            let notes = raise_emit::Notes { call: &none, field: &|_| None, global: &none };
+            let notes = raise_emit::Notes::NONE;
             raise_emit::emit_t1_full(f, &id, Some(&img7), &notes, Some(&|d, jumped| rt::arm7_cycles(d, true, jumped)))
         } else {
             Err("exact generation")

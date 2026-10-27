@@ -14,7 +14,7 @@
 //!   continues in the T0 translation, which stays registered for every block.
 use crate::ir::{self, CmpOp, Width, E, H, S};
 use crate::lift::{Func, Image};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write;
 
 /// Why a function stays T0.
@@ -32,6 +32,8 @@ struct Block {
 
 struct Ctx<'a> {
     blocks: &'a BTreeMap<u32, Block>,
+    /// The named field accesses, per statement.
+    fields: FieldMap,
     rpo: BTreeMap<u32, usize>,
     idom: BTreeMap<u32, u32>,
     merge: BTreeSet<u32>,
@@ -212,33 +214,31 @@ pub struct Notes<'a> {
     pub call: &'a dyn Fn(u32) -> Option<String>,
     /// The named field at an offset (from a base register) in this function: printed as an accessor.
     pub field: &'a dyn Fn(u32) -> Option<ir::FieldRef>,
+    /// The structs this function is known to use a field of at an offset (struct inference votes).
+    pub fields_of: &'a dyn Fn(u32) -> Vec<String>,
+    /// A struct's field at an offset.
+    pub field_in: &'a dyn Fn(&str, u32) -> Option<ir::FieldRef>,
     pub global: &'a dyn Fn(u32) -> Option<String>,
+}
+
+impl Notes<'static> {
+    /// No comments, no field names.
+    pub const NONE: Notes<'static> = Notes { call: &|_| None, field: &|_| None, fields_of: &|_| Vec::new(), field_in: &|_, _| None, global: &|_| None };
 }
 
 /// [`emit_t1`]; `names(target)` gives a call target's name for a comment.
 pub fn emit_t1_named(f: &Func, id: &str, img: Option<&Image>, names: &dyn Fn(u32) -> Option<String>) -> Result<String, Reason> {
-    emit_t1_annotated(f, id, img, &Notes { call: names, field: &|_| None, global: &|_| None })
+    emit_t1_annotated(f, id, img, &Notes { call: names, ..Notes::NONE })
 }
 
-/// The comment for one statement: the field a memory access reaches (`base + offset` in a function
-/// known to use that field) or the global a constant names.
+/// The comment for one statement: the global a constant address or value names. (Struct fields
+/// print as accessors, see [`infer_fields`].)
 fn stmt_note(n: &Notes, s: &S) -> Option<String> {
     fn addr_of(e: &E) -> Option<&E> {
         match e {
             E::Load { addr, .. } => Some(addr),
             E::Call(H::Ldr, a) => a.get(1),
             E::Bin(_, a, b) | E::Cmp(_, _, a, b) => addr_of(a).or_else(|| addr_of(b)),
-            _ => None,
-        }
-    }
-    fn off(a: &E) -> Option<u32> {
-        match a {
-            E::Bin(ir::Bin::And, x, _) => off(x),
-            E::Bin(ir::Bin::Add, _, k) => match **k {
-                E::Const(v) => Some(v),
-                _ => None,
-            },
-            E::Reg(_) => Some(0),
             _ => None,
         }
     }
@@ -253,14 +253,243 @@ fn stmt_note(n: &Notes, s: &S) -> Option<String> {
                 return Some(g);
             }
         }
-        if let Some(f) = off(a).and_then(|o| (n.field)(o)) {
-            return Some(format!("{}.{}", f.strukt, f.name));
-        }
     }
     if let Some(E::Const(v)) = value {
         return (n.global)(*v).map(|g| format!("&{g}"));
     }
     None
+}
+
+/// Accesses to name, per printed statement: `(block, instruction, statement index)` (the index
+/// `usize::MAX` is the instruction's guard) -> `(base register, offset)` -> field.
+type FieldMap = HashMap<(u32, u32, usize), HashMap<(u8, u32), ir::FieldRef>>;
+
+/// `base + off` memory accesses in `e` with a register base (not `sp`/`pc`).
+fn accesses_e(e: &E, out: &mut Vec<(u8, u32)>) {
+    fn at(a: &E, out: &mut Vec<(u8, u32)>) {
+        let a = match a {
+            E::Bin(ir::Bin::And, x, k) if matches!(**k, E::Not(_)) => &**x,
+            _ => a,
+        };
+        match a {
+            E::Bin(ir::Bin::Add, b, k) => {
+                if let (E::Reg(r), E::Const(v)) = (&**b, &**k) {
+                    if *r < 13 {
+                        out.push((*r, *v));
+                    }
+                }
+            }
+            E::Reg(r) if *r < 13 => out.push((*r, 0)),
+            _ => {}
+        }
+    }
+    match e {
+        E::Load { addr, .. } => {
+            at(addr, out);
+            accesses_e(addr, out);
+        }
+        E::Call(H::Ldr, a) if a.len() == 2 => {
+            at(&a[1], out);
+            accesses_e(&a[1], out);
+        }
+        E::Bin(_, a, b) | E::Cmp(_, _, a, b) => {
+            accesses_e(a, out);
+            accesses_e(b, out);
+        }
+        E::Not(a) | E::Shl(a, _) | E::Lsr(a, _) | E::Asr(a, _) | E::Ror(a, _) | E::Rrx(a) | E::Bit(a, _) | E::Msb(a) | E::Lsb(a) | E::BoolU32(a) | E::Clz(a) | E::Iw(a) => accesses_e(a, out),
+        E::Call(_, a) => a.iter().for_each(|x| accesses_e(x, out)),
+        _ => {}
+    }
+}
+
+fn accesses_s(s: &S, out: &mut Vec<(u8, u32)>) {
+    match s {
+        S::Let(_, e) | S::Let2(_, _, e) | S::SetFlag(_, e) | S::SetNz(e) | S::Do(e) | S::Goto(e) | S::ExcReturn(e) | S::SetReg(_, e) => accesses_e(e, out),
+        S::Store { addr, val, .. } => {
+            let mut a = Vec::new();
+            accesses_e(&E::Load { w: ir::Width::B8, signed: false, addr: Box::new(addr.clone()) }, &mut a);
+            out.extend(a);
+            accesses_e(val, out);
+        }
+        S::Call { target, .. } => accesses_e(target, out),
+        S::IfSome(e, b) => {
+            accesses_e(e, out);
+            b.iter().for_each(|x| accesses_s(x, out));
+        }
+    }
+}
+
+/// Registers a statement writes, each with the register it copies (`r6 = r0`), if a plain copy.
+/// Calls clobber the argument registers, `r12` and `lr` (the ARM calling convention).
+fn defs_s(s: &S) -> Vec<(u8, Option<u8>)> {
+    fn defs_e(e: &E, out: &mut Vec<(u8, Option<u8>)>) {
+        match e {
+            E::Call(H::Block | H::BlockUser, a) if a.len() == 9 => {
+                if a[2] == E::Bool(true) {
+                    if let E::Hex(list) = a[7] {
+                        out.extend((0..15u8).filter(|i| list >> i & 1 != 0).map(|i| (i, None)));
+                    }
+                }
+                if let (E::Bool(true), E::Lit(rn)) = (&a[5], &a[6]) {
+                    out.push((*rn as u8, None));
+                }
+            }
+            E::Call(H::Swi, _) => out.extend((0..4u8).map(|i| (i, None))),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    match s {
+        S::SetReg(i, E::Reg(j)) => out.push((*i, Some(*j))),
+        S::SetReg(i, e) => {
+            defs_e(e, &mut out);
+            out.push((*i, None));
+        }
+        S::Do(e) | S::IfSome(e, _) => defs_e(e, &mut out),
+        S::Call { .. } => out.extend([0u8, 1, 2, 3, 12, 14].map(|i| (i, None))),
+        _ => {}
+    }
+    out
+}
+
+/// Struct inference: which struct each base register points to. Reaching definitions give each
+/// register read the values it can hold; reads sharing a value, and plain copies, form one group.
+/// Each access in a group votes for the structs this function is known to use at that offset;
+/// a unique winner names every access of the group that is one of its fields. Accesses without a
+/// winner keep the per-offset rule (`notes.field`).
+fn infer_fields(blocks: &BTreeMap<u32, Block>, order: &[u32], preds: &BTreeMap<u32, Vec<u32>>, entry: u32, notes: &Notes) -> FieldMap {
+    type St = Vec<BTreeSet<usize>>;
+    let mut ids: HashMap<(u32, usize, usize, u8), usize> = HashMap::new();
+    let mut id = |k: (u32, usize, usize, u8)| -> usize {
+        let n = ids.len() + 16;
+        *ids.entry(k).or_insert(n)
+    };
+    let start: St = (0..16).map(|i| BTreeSet::from([i])).collect();
+    let mut ins_state: HashMap<u32, St> = HashMap::new();
+    let mut out_state: HashMap<u32, St> = HashMap::new();
+    // reaching definitions to a fixed point
+    loop {
+        let mut changed = false;
+        for &b in order {
+            let mut st: St = if b == entry { start.clone() } else { vec![BTreeSet::new(); 16] };
+            for p in preds.get(&b).into_iter().flatten() {
+                if let Some(o) = out_state.get(p) {
+                    for r in 0..16 {
+                        st[r].extend(o[r].iter().copied());
+                    }
+                }
+            }
+            if ins_state.get(&b) == Some(&st) && out_state.contains_key(&b) {
+                continue;
+            }
+            ins_state.insert(b, st.clone());
+            for (ii, ins) in blocks[&b].insts.iter().enumerate() {
+                let cond = ins.cond != 14 || ins.guard.is_some();
+                for (si, s) in ins.stmts.iter().enumerate() {
+                    for (r, _) in defs_s(s) {
+                        let d = id((b, ii, si, r));
+                        let set = &mut st[r as usize & 15];
+                        if !cond {
+                            set.clear();
+                        }
+                        set.insert(d);
+                    }
+                }
+            }
+            out_state.insert(b, st);
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
+    }
+    // group values: union-find over definitions
+    let mut parent: Vec<usize> = (0..ids.len() + 16).collect();
+    fn find(p: &mut [usize], mut x: usize) -> usize {
+        while p[x] != x {
+            p[x] = p[p[x]];
+            x = p[x];
+        }
+        x
+    }
+    let union = |p: &mut Vec<usize>, a: usize, b: usize| {
+        let (a, b) = (find(p, a), find(p, b));
+        if a != b {
+            p[a.max(b)] = a.min(b);
+        }
+    };
+    let mut uses: Vec<((u32, u32, usize), u8, u32, usize)> = Vec::new();
+    for &b in order {
+        let Some(mut st) = ins_state.get(&b).cloned() else { continue };
+        for (ii, ins) in blocks[&b].insts.iter().enumerate() {
+            let cond = ins.cond != 14 || ins.guard.is_some();
+            let mut reads = |key: (u32, u32, usize), acc: Vec<(u8, u32)>, st: &St, parent: &mut Vec<usize>| {
+                for (r, off) in acc {
+                    let defs = &st[r as usize];
+                    let Some(&first) = defs.iter().next() else { continue };
+                    for &d in defs {
+                        union(parent, first, d);
+                    }
+                    uses.push((key, r, off, first));
+                }
+            };
+            if let Some(g) = &ins.guard {
+                let mut acc = Vec::new();
+                accesses_e(g, &mut acc);
+                reads((b, ins.addr, usize::MAX), acc, &st, &mut parent);
+            }
+            for (si, s) in ins.stmts.iter().enumerate() {
+                let mut acc = Vec::new();
+                accesses_s(s, &mut acc);
+                reads((b, ins.addr, si), acc, &st, &mut parent);
+                for (r, src) in defs_s(s) {
+                    let d = ids[&(b, ii, si, r)];
+                    if let Some(j) = src {
+                        for &x in &st[j as usize & 15] {
+                            union(&mut parent, d, x);
+                        }
+                    }
+                    let set = &mut st[r as usize & 15];
+                    if !cond {
+                        set.clear();
+                    }
+                    set.insert(d);
+                }
+            }
+        }
+    }
+    // vote per group
+    let mut offs: HashMap<usize, BTreeSet<u32>> = HashMap::new();
+    for u in &uses {
+        let g = find(&mut parent, u.3);
+        offs.entry(g).or_default().insert(u.2);
+    }
+    let mut winner: HashMap<usize, String> = HashMap::new();
+    for (g, ks) in &offs {
+        let mut score: BTreeMap<String, usize> = BTreeMap::new();
+        for &k in ks {
+            for st in (notes.fields_of)(k) {
+                *score.entry(st).or_default() += 1;
+            }
+        }
+        let best = score.values().copied().max().unwrap_or(0);
+        let mut top = score.iter().filter(|(_, v)| **v == best && best > 0);
+        if let (Some((st, _)), None) = (top.next(), top.next()) {
+            winner.insert(*g, st.clone());
+        }
+    }
+    let mut map = FieldMap::new();
+    for (key, r, off, d) in uses {
+        let g = find(&mut parent, d);
+        let f = match winner.get(&g) {
+            Some(st) => (notes.field_in)(st, off),
+            None => (notes.field)(off),
+        };
+        if let Some(f) = f {
+            map.entry(key).or_default().insert((r, off), f);
+        }
+    }
+    map
 }
 
 /// [`emit_t1`] with comments from `notes`.
@@ -442,17 +671,9 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
         }
     }
     let all: BTreeSet<u8> = used.union(&written).copied().filter(|&i| i < 15).collect();
-    let ctx = Ctx { blocks: &blocks, rpo, idom, merge, header, children, names, notes, switches: &switches };
-    // named fields at the offsets this function uses: their accesses print as accessors
-    let mut consts = vec![0];
-    for b in blocks.values() {
-        for ins in &b.insts {
-            for s in &ins.stmts {
-                ir::consts_in(s, &mut consts);
-            }
-        }
-    }
-    ir::set_fields(consts.into_iter().filter_map(|k| (notes.field)(k).map(|f| (k, f))).collect());
+    // named struct fields at the accesses (printed as accessors)
+    let fields = infer_fields(&blocks, &order, &preds, f.entry, notes);
+    let ctx = Ctx { blocks: &blocks, rpo, idom, merge, header, children, names, notes, switches: &switches, fields };
     ir::take_field_uses();
     let mut body = String::new();
     do_tree(&ctx, f.entry, 2, &mut body);
@@ -540,13 +761,16 @@ fn block_code(c: &Ctx, x: u32, depth: usize, out: &mut String) {
     for ins in &b.insts {
         let mut text = String::new();
         let inner = if ins.cond == 14 && ins.guard.is_none() { depth } else { depth + 1 };
-        for s in &ins.stmts {
+        let set = |k: usize| ir::set_fields(c.fields.get(&(x, ins.addr, k)).cloned().unwrap_or_default());
+        for (si, s) in ins.stmts.iter().enumerate() {
+            set(si);
             stmt_code(c, x, s, inner, &mut text);
         }
         if text.is_empty() {
             continue;
         }
         if let Some(g) = &ins.guard {
+            set(usize::MAX);
             indent(out, depth);
             let _ = writeln!(out, "if {} {{", ir::expr_locals(g));
             out.push_str(&text);
@@ -617,11 +841,8 @@ fn stmt_code(c: &Ctx, x: u32, s: &S, depth: usize, out: &mut String) {
         S::Do(e) if syncs(e) => line(out, &format!("spill!(); {}; reload!();{}", ir::expr_locals(e), block_note(e))),
         S::SetReg(i, e) if syncs(e) => line(out, &format!("spill!(); let t = {}; reload!(); {} = t;", ir::expr_locals(e), ir::reg_name(*i))),
         S::Store { w: Width::B32, .. } | _ => {
-            let before = ir::field_uses_len();
             let text = ir::print_locals(std::slice::from_ref(s));
-            // an accessor names the field already; other notes stay comments
-            let note = if ir::field_uses_len() > before { stmt_note(&Notes { field: &|_| None, ..*c.notes }, s) } else { stmt_note(c.notes, s) };
-            let note = note.map(|n| format!(" // {n}")).unwrap_or_default();
+            let note = stmt_note(c.notes, s).map(|n| format!(" // {n}")).unwrap_or_default();
             line(out, &format!("{text}{note}"))
         }
     }

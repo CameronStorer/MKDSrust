@@ -610,7 +610,7 @@ thread_local! {
     /// Print registers as the T1 local variables (`r0`.., `sp`, `lr`) instead of `c.r[i]`.
     static LOCALS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Named struct fields by offset for the function being printed (T1 accessors).
-    static FIELDS: std::cell::RefCell<std::collections::HashMap<u32, FieldRef>> = std::cell::RefCell::new(Default::default());
+    static FIELDS: std::cell::RefCell<std::collections::HashMap<(u8, u32), FieldRef>> = std::cell::RefCell::new(Default::default());
     /// The accessors printed since the last [`take_field_uses`].
     static FIELD_USES: std::cell::RefCell<Vec<(FieldRef, Access)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -693,8 +693,9 @@ impl FieldRef {
     }
 }
 
-/// Sets the named fields (by offset) for the function about to be printed; empty turns accessors off.
-pub fn set_fields(fields: std::collections::HashMap<u32, FieldRef>) {
+/// Sets the named fields (by base register and offset) for the statement about to be printed;
+/// empty turns accessors off.
+pub fn set_fields(fields: std::collections::HashMap<(u8, u32), FieldRef>) {
     FIELDS.with(|f| *f.borrow_mut() = fields);
 }
 
@@ -703,39 +704,18 @@ pub fn take_field_uses() -> Vec<(FieldRef, Access)> {
     FIELD_USES.with(|u| std::mem::take(&mut *u.borrow_mut()))
 }
 
-/// The number of accessors printed so far (to tell whether a statement printed one).
-pub fn field_uses_len() -> usize {
-    FIELD_USES.with(|u| u.borrow().len())
-}
-
-/// Every constant in `s` (candidate field offsets).
-pub fn consts_in(s: &S, out: &mut Vec<u32>) {
-    fn walk(e: &mut E, out: &mut Vec<u32>) {
-        if let E::Const(v) = e {
-            out.push(*v);
-        }
-        for c in expr_children(e) {
-            walk(c, out);
-        }
-    }
-    let mut s = s.clone();
-    for e in stmt_exprs(&mut s) {
-        walk(e, out);
-    }
-}
-
 /// `base + off` (or `base` alone) at a named field: prints the accessor call's start
 /// (`kart::racer_index(m, base`) and records the use.
 fn field_access(out: &mut String, addr: &E, a: Access) -> bool {
-    let (base, off) = match addr {
-        E::Bin(Bin::Add, b, k) => match **k {
-            E::Const(v) => (&**b, v),
+    let (base, r, off) = match addr {
+        E::Bin(Bin::Add, b, k) => match (&**b, &**k) {
+            (E::Reg(r), E::Const(v)) => (&**b, *r, *v),
             _ => return false,
         },
-        E::Reg(_) => (addr, 0),
+        E::Reg(r) => (addr, *r, 0),
         _ => return false,
     };
-    let Some(f) = FIELDS.with(|m| m.borrow().get(&off).cloned()) else { return false };
+    let Some(f) = FIELDS.with(|m| m.borrow().get(&(r, off)).cloned()) else { return false };
     let _ = write!(out, "{}::{}(m, ", f.module, f.accessor(a));
     expr(out, base);
     FIELD_USES.with(|u| u.borrow_mut().push((f, a)));
