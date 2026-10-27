@@ -74,6 +74,8 @@ pub struct State7 {
     pub profile: Option<HashMap<u32, u64>>,
     /// An undecodable instruction was met (its entry is in `unhandled`); checked every ARM9 slice.
     pub undecodable: bool,
+    /// Diagnostics (`MKDS_PXI_LOG`): the block being run, for the main-RAM write summary.
+    pub trace_pc: u32,
 }
 
 pub struct Arm7 {
@@ -165,6 +167,7 @@ impl Arm7 {
                 crash: None,
                 profile: None,
                 undecodable: false,
+                trace_pc: 0,
                 audio_out: std::collections::VecDeque::new(),
                 audio_cycles: 0,
                 icache: vec![None; ((CODE_HI - CODE_LO) / 2) as usize],
@@ -245,6 +248,7 @@ impl Arm7 {
                     *p.entry(self.pc).or_insert(0) += 1;
                 }
                 if let Some(f) = self.dispatcher.as_ref().and_then(|d| d.get(self.pc)) {
+                    v.s.trace_pc = self.pc;
                     let budget = n - spent;
                     self.cpu.budget = budget;
                     let next = f(&mut self.cpu, &mut v, self.pc);
@@ -315,6 +319,12 @@ impl Arm7 {
 #[cfg(feature = "interpreter")]
 fn cost(d: &crate::arm::Decoded, passed: bool, jumped: bool) -> u32 {
     rt::arm7_cycles(d, passed, jumped)
+}
+
+impl Drop for Arm7 {
+    fn drop(&mut self) {
+        crate::hle7::trace::flush();
+    }
 }
 
 impl Default for Arm7 {
@@ -570,6 +580,7 @@ impl View<'_> {
             // IPCFIFORECV: the ARM9's next word
             if self.s.fifo_pos < self.hw.ipc_out.len() {
                 self.s.last_recv = self.hw.ipc_out[self.s.fifo_pos];
+                crate::hle7::trace::event("7R", self.hw.cycles, self.s.fifo_pos as u32, None);
                 self.s.fifo_pos += 1;
             } else {
                 self.s.fifo_ctl |= 0x4000;
@@ -583,7 +594,13 @@ impl View<'_> {
         };
         match self.region(a) {
             Region::Bios(o) => get(&self.s.bios, o),
-            Region::Main(o) => get(&self.hw.main, o),
+            Region::Main(o) => {
+                let v = get(&self.hw.main, o);
+                if crate::hle7::trace::on() && crate::hle7::trace::service_reader(self.s.trace_pc) {
+                    crate::hle7::trace::event(["7L1", "7L2", "7L3", "7L4"][n - 1], self.hw.cycles, v, Some(a));
+                }
+                v
+            }
             Region::Shared(o) => get(&self.hw.swram, o),
             Region::Wram(o) => get(&self.s.wram, o),
             Region::Vram7(o) => get(&self.s.vram7, o),
@@ -615,6 +632,12 @@ impl View<'_> {
         };
         match self.region(a) {
             Region::Main(o) => {
+                if crate::hle7::trace::on() {
+                    crate::hle7::trace::arm7_main_write(self.hw.cycles, a, v, self.s.trace_pc);
+                    if crate::hle7::trace::service_address(a) {
+                        crate::hle7::trace::event(["7M1", "7M2", "7M3", "7M4"][n - 1], self.hw.cycles, v, Some(a));
+                    }
+                }
                 self.hw.note_main_write(o, n);
                 put(&mut self.hw.main, o);
             }

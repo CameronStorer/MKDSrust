@@ -310,6 +310,11 @@ pub struct Bus {
     pub fifo_in: std::collections::VecDeque<u32>,
     /// The game's own ARM7 code runs (`crate::arm7`): the stand-in answers above are off.
     pub arm7_lle: bool,
+    /// PXI tags (bit n = tag n) whose ARM9 FIFO words go to the native ARM7 services (`crate::hle7`) instead
+    /// of the ARM7 CPU; 0 (the default, `MKDS_HW_ARM7=exact`) sends every word to the CPU.
+    pub hle7_tags: u32,
+    /// ARM9 FIFO words for `crate::hle7`, in order, not yet taken by the router.
+    pub hle7_in: Vec<u32>,
     /// 32 KB at 0xFFFF0000: no console BIOS, only our IRQ vector code (`rt::ARM9_IRQ_STUB` at +0x18).
     pub bios9: Vec<u8>,
     /// The game card in the slot (the user's ROM), when inserted.
@@ -366,6 +371,8 @@ impl Bus {
             arm7_sync: 0,
             fifo_in: std::collections::VecDeque::new(),
             arm7_lle: false,
+            hle7_tags: 0,
+            hle7_in: Vec::new(),
             sync_irq_to_arm7: false,
             watched_main_code: None,
             code_epoch: 0,
@@ -394,6 +401,7 @@ impl Bus {
     /// The stand-in ARM7 sends `word` to the ARM9: queued for IPCFIFORECV, and the "receive FIFO not empty"
     /// interrupt is raised when it was empty and the ARM9 enabled it (IPCFIFOCNT bit 10, FIFO enabled bit 15).
     pub fn arm7_send(&mut self, word: u32) {
+        crate::hle7::trace::event("7W", self.cycles, word, None);
         let was_empty = self.fifo_in.is_empty();
         if self.fifo_in.len() < 16 {
             self.fifo_in.push_back(word);
@@ -407,6 +415,7 @@ impl Bus {
     /// The ARM7 writes its IPCSYNC output nibble (the ARM9 reads it in bits 0-3); `irq` (its bit 13)
     /// raises the ARM9's IPC sync interrupt when the ARM9 enabled it (its IPCSYNC bit 14).
     pub fn arm7_set_sync(&mut self, nibble: u8, irq: bool) {
+        crate::hle7::trace::event("7S", self.cycles, nibble as u32, Some(irq as u32));
         self.arm7_sync = nibble & 0xF;
         let cur = self.io_get(0x180, 2);
         self.io_set(0x180, 2, (cur & !0xF) | self.arm7_sync as u32);
@@ -783,6 +792,7 @@ impl Bus {
                     (0x181, 1) => (v & 0xF, (v & 0x4F) << 8),
                     _ => return, // byte write to the read-only low half
                 };
+                crate::hle7::trace::event("9S", self.cycles, if (off, n) == (0x181, 1) { v << 8 } else { v } & 0xFFFF, None);
                 if self.arm7_lle {
                     // the real ARM7 (crate::arm7) answers; bit 13 asks for an IPC sync IRQ on its side
                     if (off, n) != (0x181, 1) && v & 0x2000 != 0
@@ -811,6 +821,11 @@ impl Bus {
                 return;
             }
             0x188 => {
+                crate::hle7::trace::event("9W", self.cycles, v, None);
+                if self.hle7_tags >> (v & 0x1F) & 1 != 0 {
+                    self.hle7_in.push(v);
+                    return;
+                }
                 self.ipc_out.push(v);
                 return;
             }
