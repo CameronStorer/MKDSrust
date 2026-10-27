@@ -727,6 +727,13 @@ pub fn emit_with(f: &Func, id: &str, img: Option<&Image>) -> String {
 /// [`emit_with`] with a per-block budget charge: `cost(inst, ends_block_with_jump)` summed over the
 /// block (the ARM7 table charges cycles, see `rt::arm7_cycles`); `None` charges one per instruction.
 pub fn emit_cost(f: &Func, id: &str, img: Option<&Image>, cost: Option<&dyn Fn(&Decoded, bool) -> u32>) -> String {
+    emit_full(f, id, img, cost, false)
+}
+
+/// [`emit_cost`]; `raise` applies the block 4B passes that keep the function's exact behaviour
+/// (today: dead flag computations are dropped, see [`crate::raise`]).
+pub fn emit_full(f: &Func, id: &str, img: Option<&Image>, cost: Option<&dyn Fn(&Decoded, bool) -> u32>, raise: bool) -> String {
+    let live = if raise { Some(crate::raise::flag_liveness(f, img)) } else { None };
     let mut s = format!(
         "#[allow(non_snake_case, unused_variables, unused_assignments, unused_mut, unreachable_code, unused_parens, unused_braces, clippy::all)]\npub fn f_{id}(c: &mut recomp::rt::Cpu, m: &mut dyn recomp::rt::Bus, mut pc: u32) -> u32 {{\n    #[allow(unused_imports)] use recomp::rt as R;\n    #[allow(unused_imports)] use recomp::arm::interwork as iw;\n    #[allow(unused_imports)] use recomp::rt::Mem as _;\n    loop {{\n        match pc {{\n"
     );
@@ -736,11 +743,15 @@ pub fn emit_cost(f: &Func, id: &str, img: Option<&Image>, cost: Option<&dyn Fn(&
             None => insts.len() as u32,
             Some(cost) => insts.iter().enumerate().map(|(i, (_, d))| cost(d, i + 1 == insts.len() && (d.inst.writes_pc() || d.inst.is_call()))).sum(),
         };
-        let _ = writeln!(s, "            {start:#X} => {{ if !R::spend(c, {charge}) {{ c.r[15] = pc; return R::BUDGET_EXHAUSTED; }}");
+        let _ = writeln!(s, "            {start:#X} => {{ if !R::spend(c, {charge}) && !m.slice_end(c, pc, {charge}) {{ c.r[15] = pc; return R::BUDGET_EXHAUSTED; }}");
         let mut end = start;
         for (a, d) in &insts {
             let next = Func::next(*a, d);
-            let code = crate::ir::print(&crate::ir::lower(d, *a & !1, next & !1, img));
+            let mut stmts = crate::ir::lower(d, *a & !1, next & !1, img);
+            if let Some(live) = &live {
+                crate::raise::drop_dead_flags(&mut stmts, live[a]);
+            }
+            let code = crate::ir::print(&stmts);
             if code.is_empty() {
             } else if d.cond == 14 {
                 let _ = writeln!(s, "                {{ {code} }}");

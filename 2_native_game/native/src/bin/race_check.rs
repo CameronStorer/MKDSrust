@@ -256,13 +256,14 @@ pub fn run_with_tables(
     }
     let arm7 = session.machine.arm7.as_ref();
     eprintln!(
-        "Acceptance driver stopped at frame {} after {:?}; stats {:?}; ARM7 lifted cycles {} interpreted instructions {}{}; results captures require inspection",
+        "Acceptance driver stopped at frame {} after {:?}; stats {:?}; ARM7 lifted cycles {} interpreted instructions {}{}; fiber thread switches {}; results captures require inspection",
         session.frame_number(),
         wall.elapsed(),
         session.stats,
         arm7.map_or(0, |a| a.lifted_cycles),
         arm7.map_or(0, |a| a.interpreted_instructions),
-        arm7.and_then(|a| a.execution_error.as_deref()).map_or(String::new(), |e| format!("; ARM7 error: {e}"))
+        arm7.and_then(|a| a.execution_error.as_deref()).map_or(String::new(), |e| format!("; ARM7 error: {e}")),
+        session.fiber_switches()
     );
     if let Some(e) = arm7.and_then(|a| a.execution_error.clone()) {
         return Err(format!("ARM7 stopped: {e}").into());

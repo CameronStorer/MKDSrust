@@ -68,9 +68,53 @@ decode -> CFG of IR operations (explicit reads and writes of registers, flags an
 - **Done when:** a fresh build from the IR emitter passes the race acceptance with 0 interpreted instructions, and
   `race_check` under `MKDS_SHADOW=1` shows 0 mismatches.
 
+**Status (2026-10-27):** done. `src/ir.rs` lowers each instruction to statements with explicit register, flag and
+memory effects, and prints T0. `tests/ir_t0.rs` compares it with the old string emitter on 400k random ARM words,
+every Thumb halfword and 835k ROM encodings, with no differences. A whole-ROM generation gives all 12,736 functions
+identical to `main`, up to whitespace.
+
+### 4A.2. Fiber runtime (needed before T1; owner-approved 2026-10-27)
+Today a call doesn't run the callee. The lifted function returns to the session's run loop at every call, return
+and slice end (at most 32 instructions), and is later re-entered at any block. That's why T0 must be a
+`loop { match pc }` over global registers. Raised code needs real calls. Same idea as WiiCompiled (a host fiber per
+guest thread), adapted so runs stay identical:
+- **Calls nest:** `Bus::call` runs a nested dispatch loop until the callee returns to `ret` with the call's `sp`.
+- **Slices end in place:** a block that can't pay its budget calls `Bus::slice_end`. The fiber suspends, the host
+  ticks the hardware and the ARM7, and on resume a pending IRQ runs as a nested call of the vector, until the
+  exception return comes back to that block. Slice boundaries are exactly the flat loop's: budget used up, code
+  written, a dispatch miss.
+- **One fiber per SDK thread:** each dispatch-loop step reads the SDK's current thread (`*(*0x0216FF34)` on AMCE).
+  If another thread is current, the host resumes that thread's fiber, or starts a new one. The first thread adopts
+  the boot fiber.
+- **Non-local exits** (context loads, a `SaveContext` resume) go to the innermost loop. A pc that matches an outer
+  loop's `(ret, sp)` unwinds to that loop, through T0 frames, which pass it on. Functions that do this have to stay
+  T0; a raised function is only ever left normally.
+- Code: `src/fibered.rs`, enabled with `MKDS_FIBERS=1` or `Session::enable_fibers`. The flat loop stays the default
+  until the fiber run is proven identical.
+- **Status (2026-10-27): proven identical over a full race.** On the Figure-8 acceptance race, `race_check` with
+  fibers and on `main` produce:
+  - the same 1,707,950,080 ARM9 instructions and 581,521 IRQs;
+  - a finish at frame 11,462 in 1st place;
+  - byte-identical telemetry for all 12,362 frames, identical inputs and all 40 screenshots.
+
+  Three details were needed for exactness:
+  - every slice start runs the residency-checking resolver at the resume point;
+  - a return into an unmapped (invalidated) overlay block ends the slice, as the flat loop's miss does;
+  - after a suspension, the CPU is read through the session pointer, never through a `&mut` held across it.
+
+  Diagnostics: `MKDS_SLICE_TRACE=<file>` (per-frame hash of every slice end), plus `MKDS_TRACE_FRAME=<n>`.
+  Not yet: `overlay_instructions` isn't counted in fiber mode, and thread switches are counted but not yet
+  exercised in a test of their own.
+- **Equivalence check:** `race_check` with and without fibers must give the same instruction and IRQ counts, the
+  same per-frame telemetry and the same screenshots. T1 code keeps charging the same per-block budget at the same
+  points, so the same check also proves raised functions, and can be bisected to single functions.
+
 ### 4B. Decompiler passes (T1), whole program
 In order. Each pass is separately switchable, so a failing function can be traced to the pass that broke it.
 1. **Flag liveness.** Drop every N/Z/C/V calculation that nothing reads. This is most of today's noise.
+   *Implemented (`src/raise.rs`, opt-in `MKDS_RAISE=1` in `mkds_gen`), not yet race-proven.* On the whole ROM it
+   removes 65% of `R::set_nz`, 76% of carry writes, and turns a third of `R::subs`/`R::adds` into plain
+   arithmetic.
 2. **SSA and register promotion.** Registers become `let` locals. Arguments and returns come from
    `recomp::signature` (already whole-program). The callee-saved discipline is checked per function. Functions
    that break the ARM calling convention (r12 uses, extra returns in r1-r3, reading flags across a call) are

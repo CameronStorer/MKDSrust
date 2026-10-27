@@ -20,6 +20,7 @@ pub mod machine;
 pub mod mem;
 pub mod native;
 pub mod peripherals;
+pub mod raise;
 pub mod raster;
 pub mod residency;
 pub mod rt;

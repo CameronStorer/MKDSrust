@@ -3,6 +3,9 @@ use super::{Flat, boot_shared_area};
 use crate::rt::Mem;
 use crate::{arm7::Arm7, dispatch::Dispatcher, ds_mem, machine::Machine, rt};
 
+#[path = "fibered.rs"]
+mod fibered;
+
 pub const FRAME_CYCLES: u64 = 263 * 2130;
 
 #[derive(Default, Debug, Clone, Copy)]
@@ -33,6 +36,13 @@ pub struct Session<'a> {
     overlay_windows: Vec<(u32, u64, &'static str)>,
     /// Native functions checked against their translations on every call ([`Session::enable_shadow`]).
     pub shadow: Option<crate::shadow::Shadow>,
+    /// Block 4A.2: the ARM9 runs in fibers with nested calls ([`Session::enable_fibers`],
+    /// or `MKDS_FIBERS=1` when the session is created).
+    fibers: Option<fibered::Fibers>,
+    fiber_error: Option<String>,
+    /// Diagnostics (`MKDS_SLICE_TRACE=<file>`): per frame, a hash of the CPU at every slice end;
+    /// `MKDS_TRACE_FRAME=<n>` also lists that frame's slices. Compares flat and fiber runs.
+    trace: Option<(std::io::BufWriter<std::fs::File>, u64, u64, u64)>,
 }
 
 impl<'a> Session<'a> {
@@ -111,6 +121,12 @@ impl<'a> Session<'a> {
             chain: true,
             overlay_windows: Vec::new(),
             shadow: None,
+            fibers: std::env::var_os("MKDS_FIBERS").map(|_| fibered::Fibers::new(entry)),
+            fiber_error: None,
+            trace: std::env::var_os("MKDS_SLICE_TRACE").map(|p| {
+                let detail = std::env::var("MKDS_TRACE_FRAME").ok().and_then(|v| v.parse().ok()).unwrap_or(u64::MAX);
+                (std::io::BufWriter::new(std::fs::File::create(p).expect("MKDS_SLICE_TRACE file")), 0xcbf2_9ce4_8422_2325, u64::MAX, detail)
+            }),
         })
     }
 
@@ -120,6 +136,17 @@ impl<'a> Session<'a> {
         self.dispatcher.set_natives(natives);
         let d = self.dispatcher;
         self.shadow = Some(crate::shadow::Shadow::new(natives, &|s, e| d.translation(s, e)));
+    }
+
+    /// Runs the ARM9 in fibers from now on (block 4A.2): calls nest, slices end in place, each SDK
+    /// thread has its own fiber. The session must not move afterwards.
+    pub fn enable_fibers(&mut self) {
+        self.fibers = Some(fibered::Fibers::new(self.pc));
+    }
+
+    /// Guest thread switches served by fibers (0 when fibers are off).
+    pub fn fiber_switches(&self) -> u64 {
+        self.fibers.as_ref().map_or(0, |f| f.switches)
     }
 
     pub fn configure_residency(
@@ -188,6 +215,9 @@ impl<'a> Session<'a> {
             return Ok(0);
         }
         self.update_residency();
+        if self.fibers.is_some() {
+            return self.step_fibered(limit);
+        }
         let hw = &mut self.machine.hw;
         if rt::irq_ready(
             &self.cpu,
@@ -273,6 +303,9 @@ impl<'a> Session<'a> {
         } else {
             self.stats.interpreted_instructions += used as u64;
         }
+        if self.trace.is_some() {
+            self.trace_slice(self.pc, used);
+        }
         // Preserve half bus cycles between slices instead of rounding every slice up.
         self.half_cycle += used as u64;
         self.machine.tick(self.half_cycle / 2);
@@ -290,6 +323,65 @@ impl<'a> Session<'a> {
             if a.s.undecodable {
                 let reason = a.s.unhandled.keys().find(|s| s.starts_with("undecodable ")).cloned().unwrap_or_default();
                 return Err(format!("ARM7 stopped: {reason}; ARM9 PC {:#010x}", self.pc));
+            }
+        }
+        Ok(used)
+    }
+
+    /// Diagnostics: records the slice that just ended at `pc` (see `trace`).
+    fn trace_slice(&mut self, pc: u32, used: u32) {
+        use std::io::Write;
+        let frame = self.frame_number();
+        let Some((w, h, last, detail)) = &mut self.trace else { return };
+        let c = &self.cpu;
+        if *last != frame {
+            if *last != u64::MAX {
+                let _ = writeln!(w, "frame {last} instr {} irqs {} hash {h:016x}", self.stats.instructions, self.stats.irqs);
+            }
+            *last = frame;
+        }
+        for v in c.r[..15].iter().copied().chain([pc, used, c.ctl, c.n as u32 | (c.z as u32) << 1 | (c.c as u32) << 2 | (c.v as u32) << 3]) {
+            *h = (*h ^ v as u64).wrapping_mul(0x100_0000_01b3);
+        }
+        if frame == *detail {
+            let why = self.fibers.as_ref().map_or("", |f| f.last_end.1);
+            let _ = writeln!(w, "  slice pc {pc:#010x} used {used} irqs {} r {:x?} epoch {}/{} {why}", self.stats.irqs, &c.r[..15], self.machine.hw.code_epoch, self.code_epoch);
+        }
+    }
+
+    /// [`Session::step`] in fiber mode: the guest takes its own IRQs and slice ends.
+    fn step_fibered(&mut self, limit: u32) -> Result<u32, String> {
+        self.cpu.budget = limit;
+        let called_interp = self.dispatcher.interpreted();
+        fibered::run_slice(self)?;
+        if let Some(e) = self.dispatcher.take_error() {
+            return Err(e);
+        }
+        let used = limit.checked_sub(self.cpu.budget).ok_or("Runtime instruction budget underflow")?;
+        if used == 0 {
+            let f = self.fibers.as_ref().unwrap();
+            return Err(format!("No execution progress in a fiber slice: ended at {:#010x} ({}), thread {:#010x}, {} switches", f.last_end.0, f.last_end.1, f.current, f.switches));
+        }
+        let inner = (self.dispatcher.interpreted() - called_interp).min(used as u64);
+        self.stats.instructions += used as u64;
+        self.stats.lifted_instructions += used as u64 - inner;
+        self.stats.interpreted_instructions += inner;
+        if self.trace.is_some() {
+            let pc = self.fibers.as_ref().unwrap().last_end.0;
+            self.trace_slice(pc, used);
+        }
+        self.half_cycle += used as u64;
+        self.machine.tick(self.half_cycle / 2);
+        self.half_cycle %= 2;
+        if let Some(a) = &self.machine.arm7 {
+            if let Some(reason) = &a.execution_error {
+                return Err(reason.clone());
+            }
+            if a.s.crash.is_some() {
+                return Err(format!("ARM7 left mapped memory at PC {:#010x}", a.pc));
+            }
+            if a.s.undecodable {
+                return Err("ARM7 stopped: undecodable instruction".into());
             }
         }
         Ok(used)

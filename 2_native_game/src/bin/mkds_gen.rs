@@ -22,6 +22,8 @@ mod build_support;
 mod ir;
 #[path = "../lift.rs"]
 mod lift;
+#[path = "../raise.rs"]
+mod raise;
 #[path = "../rt.rs"]
 mod rt;
 #[path = "../signature.rs"]
@@ -240,6 +242,11 @@ fn write_signatures(
     Ok(())
 }
 
+/// Block 4B passes in the generated code (experimental until proven by a race): `MKDS_RAISE=1`.
+fn raise() -> bool {
+    std::env::var_os("MKDS_RAISE").is_some()
+}
+
 fn sha_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -251,6 +258,7 @@ fn generator_id() -> String {
     for src in [
         include_bytes!("../lift.rs").as_slice(),
         include_bytes!("../ir.rs"),
+        include_bytes!("../raise.rs"),
         include_bytes!("../arm.rs"),
         include_bytes!("../thumb.rs"),
         include_bytes!("../rt.rs"),
@@ -566,7 +574,7 @@ fn run() -> Result<ExitCode, String> {
         if !p.extra.is_empty() {
             row.reason = format!("{} entry points added by cross-function discovery", p.extra.len());
         }
-        funcs.push(Lifted { arm7: false, segment: p.segment.clone(), entry: p.func.entry, code: lift::emit_with(&p.func, &id, Some(&img)), id });
+        funcs.push(Lifted { arm7: false, segment: p.segment.clone(), entry: p.func.entry, code: lift::emit_full(&p.func, &id, Some(&img), None, raise()), id });
     }
 
     if let Some(path) = &args.signatures {
@@ -582,13 +590,13 @@ fn run() -> Result<ExitCode, String> {
         let img = lift::Image::new(0xFFFF_0018, &stub9);
         let f = lift::discover(&img, 0xFFFF_0018, Some((0xFFFF_0018, 0xFFFF_0018 + stub9.len() as u32)), 100)?;
         extra.push(discovered_row("bios9", &f));
-        funcs.push(Lifted { arm7: false, segment: "bios9".into(), entry: f.entry, code: lift::emit_with(&f, "bios9_FFFF0018", Some(&img)), id: "bios9_FFFF0018".into() });
+        funcs.push(Lifted { arm7: false, segment: "bios9".into(), entry: f.entry, code: lift::emit_full(&f, "bios9_FFFF0018", Some(&img), None, raise()), id: "bios9_FFFF0018".into() });
     }
     for (&entry, f) in &gap_funcs {
         let seg = fixed_seg(entry).expect("gap function inside a fixed segment");
         let id = format!("{seg}_{entry:08X}");
         extra.push(discovered_row(&seg, f));
-        funcs.push(Lifted { arm7: false, segment: seg, entry, code: lift::emit_with(f, &id, Some(&img9)), id });
+        funcs.push(Lifted { arm7: false, segment: seg, entry, code: lift::emit_full(f, &id, Some(&img9), None, raise()), id });
     }
     for (ov, fs) in &ov_gap_funcs {
         let (base, data) = &images[ov];
@@ -596,7 +604,7 @@ fn run() -> Result<ExitCode, String> {
         for (&entry, f) in fs {
             let id = format!("{ov}_{entry:08X}");
             extra.push(discovered_row(ov, f));
-            funcs.push(Lifted { arm7: false, segment: ov.clone(), entry, code: lift::emit_with(f, &id, Some(&img)), id });
+            funcs.push(Lifted { arm7: false, segment: ov.clone(), entry, code: lift::emit_full(f, &id, Some(&img), None, raise()), id });
         }
     }
     let (arm7_entry, arm7_secs) = build_support::arm7_sections(&rom)?;
@@ -622,7 +630,7 @@ fn run() -> Result<ExitCode, String> {
         let hi = f.insts.iter().last().map(|(&a, d)| (a & !1) + d.size).unwrap_or(lo);
         spans7.entry(seg.clone()).or_default().push((lo, hi));
         extra.push(discovered_row(&seg, f));
-        funcs.push(Lifted { arm7: true, segment: seg, entry, code: lift::emit_cost(f, &id, Some(&img7), Some(&|d, jumped| rt::arm7_cycles(d, true, jumped))), id });
+        funcs.push(Lifted { arm7: true, segment: seg, entry, code: lift::emit_full(f, &id, Some(&img7), Some(&|d, jumped| rt::arm7_cycles(d, true, jumped)), raise()), id });
     }
 
     // output directory: only create/replace our own previous output

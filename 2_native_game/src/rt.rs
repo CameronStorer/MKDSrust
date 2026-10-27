@@ -140,6 +140,14 @@ pub trait Bus: Mem {
     fn mrc(&mut self, c: &mut Cpu, cp: u8, op1: u8, crn: u8, crm: u8, op2: u8) -> u32;
     /// MCR: ARM register to coprocessor register.
     fn mcr(&mut self, c: &mut Cpu, cp: u8, op1: u8, crn: u8, crm: u8, op2: u8, v: u32);
+    /// The block at `pc` could not pay its `cost` (the slice's budget is used up). `false` (the
+    /// default): lifted code stores `pc` in r15 and returns [`BUDGET_EXHAUSTED`] to its run loop.
+    /// A fiber runtime (block 4A.2) instead ends the slice in place, takes a pending interrupt,
+    /// charges `cost` from the next slice and returns `true`: the block then runs, and no Rust
+    /// frame is unwound.
+    fn slice_end(&mut self, _c: &mut Cpu, _pc: u32, _cost: u32) -> bool {
+        false
+    }
 }
 
 /// Takes an IRQ before the instruction at `pc` (bit 0 = Thumb): IRQ mode, lr = next + 4, SPSR = the

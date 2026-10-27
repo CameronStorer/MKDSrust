@@ -9,6 +9,9 @@ mod build_support;
 mod ir;
 #[path = "src/lift.rs"]
 mod lift;
+#[path = "src/raise.rs"]
+#[allow(dead_code)]
+mod raise;
 #[path = "src/rt.rs"]
 mod rt;
 #[path = "src/thumb.rs"]
