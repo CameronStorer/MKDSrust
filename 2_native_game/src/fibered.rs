@@ -196,10 +196,8 @@ impl Guest {
         pc
     }
 
-    /// Takes an IRQ before `pc` if one is ready (as the flat runtime does at a slice start), runs
-    /// the handler until it returns to `pc`, and returns `pc`.
-
-    /// [`Guest::irq`]; `true` if an IRQ was taken.
+    /// Takes an IRQ before `pc` if one is ready (as the flat runtime does at a slice start) and runs
+    /// the handler until it returns to `pc`. `true` if an IRQ was taken.
     fn irq_taken(&mut self, pc: u32) -> bool {
         let ready = {
             let s = self.s();

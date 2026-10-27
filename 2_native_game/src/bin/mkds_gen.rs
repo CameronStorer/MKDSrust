@@ -24,6 +24,8 @@ mod ir;
 mod lift;
 #[path = "../raise.rs"]
 mod raise;
+#[path = "../raise_emit.rs"]
+mod raise_emit;
 #[path = "../rt.rs"]
 mod rt;
 #[path = "../signature.rs"]
@@ -260,6 +262,7 @@ fn generator_id() -> String {
         include_bytes!("../lift.rs").as_slice(),
         include_bytes!("../ir.rs"),
         include_bytes!("../raise.rs"),
+        include_bytes!("../raise_emit.rs"),
         include_bytes!("../arm.rs"),
         include_bytes!("../thumb.rs"),
         include_bytes!("../rt.rs"),
@@ -315,6 +318,21 @@ struct Lifted {
     entry: u32,
     id: String,
     code: String,
+    /// The raised (T1) version, installed at the entry (block 4B), or why there is none.
+    t1: Result<String, &'static str>,
+}
+
+/// An ARM9 function: its translation and, when the exact passes are on, its raised version.
+fn lifted9(segment: String, f: &lift::Func, id: String, img: &lift::Image) -> Lifted {
+    let code = lift::emit_full(f, &id, Some(img), None, raise());
+    let t1 = if !raise() {
+        Err("exact generation (MKDS_EXACT)")
+    } else if std::env::var_os("MKDS_NO_T1").is_some() {
+        Err("T1 off (MKDS_NO_T1)")
+    } else {
+        raise_emit::emit_t1(f, &id, Some(img))
+    };
+    Lifted { arm7: false, segment, entry: f.entry, code, t1, id }
 }
 
 fn run() -> Result<ExitCode, String> {
@@ -575,7 +593,7 @@ fn run() -> Result<ExitCode, String> {
         if !p.extra.is_empty() {
             row.reason = format!("{} entry points added by cross-function discovery", p.extra.len());
         }
-        funcs.push(Lifted { arm7: false, segment: p.segment.clone(), entry: p.func.entry, code: lift::emit_full(&p.func, &id, Some(&img), None, raise()), id });
+        funcs.push(lifted9(p.segment.clone(), &p.func, id, &img));
     }
 
     if let Some(path) = &args.signatures {
@@ -591,13 +609,13 @@ fn run() -> Result<ExitCode, String> {
         let img = lift::Image::new(0xFFFF_0018, &stub9);
         let f = lift::discover(&img, 0xFFFF_0018, Some((0xFFFF_0018, 0xFFFF_0018 + stub9.len() as u32)), 100)?;
         extra.push(discovered_row("bios9", &f));
-        funcs.push(Lifted { arm7: false, segment: "bios9".into(), entry: f.entry, code: lift::emit_full(&f, "bios9_FFFF0018", Some(&img), None, raise()), id: "bios9_FFFF0018".into() });
+        funcs.push(lifted9("bios9".into(), &f, "bios9_FFFF0018".into(), &img));
     }
     for (&entry, f) in &gap_funcs {
         let seg = fixed_seg(entry).expect("gap function inside a fixed segment");
         let id = format!("{seg}_{entry:08X}");
         extra.push(discovered_row(&seg, f));
-        funcs.push(Lifted { arm7: false, segment: seg, entry, code: lift::emit_full(f, &id, Some(&img9), None, raise()), id });
+        funcs.push(lifted9(seg, f, id, &img9));
     }
     for (ov, fs) in &ov_gap_funcs {
         let (base, data) = &images[ov];
@@ -605,7 +623,7 @@ fn run() -> Result<ExitCode, String> {
         for (&entry, f) in fs {
             let id = format!("{ov}_{entry:08X}");
             extra.push(discovered_row(ov, f));
-            funcs.push(Lifted { arm7: false, segment: ov.clone(), entry, code: lift::emit_full(f, &id, Some(&img), None, raise()), id });
+            funcs.push(lifted9(ov.clone(), f, id, &img));
         }
     }
     let (arm7_entry, arm7_secs) = build_support::arm7_sections(&rom)?;
@@ -631,7 +649,7 @@ fn run() -> Result<ExitCode, String> {
         let hi = f.insts.iter().last().map(|(&a, d)| (a & !1) + d.size).unwrap_or(lo);
         spans7.entry(seg.clone()).or_default().push((lo, hi));
         extra.push(discovered_row(&seg, f));
-        funcs.push(Lifted { arm7: true, segment: seg, entry, code: lift::emit_full(f, &id, Some(&img7), Some(&|d, jumped| rt::arm7_cycles(d, true, jumped)), raise()), id });
+        funcs.push(Lifted { arm7: true, segment: seg, entry, code: lift::emit_full(f, &id, Some(&img7), Some(&|d, jumped| rt::arm7_cycles(d, true, jumped)), raise()), t1: Err("ARM7 (cycle-cost budget)"), id });
     }
 
     // output directory: only create/replace our own previous output
@@ -677,11 +695,12 @@ fn run() -> Result<ExitCode, String> {
     let mut parts: Vec<Vec<&Lifted>> = vec![Vec::new()];
     let mut cur = 0usize;
     for f in &funcs {
-        if cur > 0 && cur + f.code.len() > args.part_bytes {
+        let len = f.code.len() + f.t1.as_ref().map_or(0, |t| t.len());
+        if cur > 0 && cur + len > args.part_bytes {
             parts.push(Vec::new());
             cur = 0;
         }
-        cur += f.code.len();
+        cur += len;
         parts.last_mut().unwrap().push(f);
     }
     let gen_id = generator_id();
@@ -707,6 +726,12 @@ fn run() -> Result<ExitCode, String> {
         for f in chunk {
             src.push_str(&f.code);
             let t = if f.arm7 { &mut table7 } else { &mut table };
+            if let Ok(t1) = &f.t1 {
+                // listed first: the dispatcher maps a block to the first row that has it, so the
+                // raised version runs at the entry and the translation everywhere else
+                src.push_str(t1);
+                let _ = writeln!(t, "    recomp::mem::Lifted {{ segment: {:?}, entry: {:#X}, blocks: &[{:#X}], insts: {name}::INSTS_{id}, f: {name}::f_{id}_t1 }},", f.segment, f.entry, f.entry, id = f.id);
+            }
             let _ = writeln!(t, "    recomp::mem::Lifted {{ segment: {:?}, entry: {:#X}, blocks: {name}::BLOCKS_{id}, insts: {name}::INSTS_{id}, f: {name}::f_{id} }},", f.segment, f.entry, id = f.id);
         }
         bytes += src.len();
@@ -822,6 +847,17 @@ fn run() -> Result<ExitCode, String> {
     }
     let fallback_sites = fallback_sites + fallback_sites7;
     put(args.out.join("coverage.csv"), &csv_out)?;
+    // block 4B tiers: which functions run raised (T1) and why the others stay exact translations
+    let mut tiers = String::from("segment,entry,tier,reason
+");
+    let mut tier_counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for f in &funcs {
+        let (tier, reason) = match &f.t1 { Ok(_) => ("T1", ""), Err(r) => ("T0", *r) };
+        *tier_counts.entry(if f.t1.is_ok() { "T1" } else { reason }).or_default() += 1;
+        let _ = writeln!(tiers, "{},{:#010X},{tier},{reason}", f.segment, f.entry);
+    }
+    put(args.out.join("tiers.csv"), &tiers)?;
+    eprintln!("mkds_gen: tiers {tier_counts:?}");
     let lifted_n = counts.get("lifted").unwrap_or(&0) + counts.get("lifted_with_fallback").unwrap_or(&0);
     let unaccounted = rows.len() - lifted_n;
     let complete = unaccounted == 0;
@@ -839,6 +875,7 @@ fn run() -> Result<ExitCode, String> {
         "lifted_functions": lifted_n,
         "named_functions": named,
         "rejected_or_absent_entries": unaccounted,
+        "tiers": tier_counts,
         "undecoded_sites_left_to_interpreter": fallback_sites,
         "fallback_sites": fallback,
         "generated_source_bytes": bytes,
