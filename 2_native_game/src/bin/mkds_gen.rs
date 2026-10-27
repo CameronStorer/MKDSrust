@@ -320,6 +320,42 @@ struct Lifted {
     code: String,
     /// The raised (T1) version, installed at the entry (block 4B), or why there is none.
     t1: Result<String, &'static str>,
+    /// The raised version's Rust name (the dictionary name where there is one).
+    t1_name: String,
+}
+
+const RUST_KEYWORDS: &[&str] = &[
+    "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "false", "fn", "for",
+    "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "self", "static", "struct",
+    "super", "trait", "true", "type", "unsafe", "use", "where", "while", "abstract", "become", "box", "do", "final", "gen",
+    "macro", "override", "priv", "try", "typeof", "unsized", "virtual", "yield",
+];
+
+/// Gives every raised function its dictionary name (else `sub_<segment>_<address>`), unique across the
+/// generated code: a name used more than once gets the segment and address appended.
+fn name_t1(funcs: &mut [Lifted]) {
+    let ident = |f: &Lifted| -> Option<String> {
+        let n = CALL_NAMES.get()?.get(&(f.segment.clone(), f.entry & !1))?;
+        let n: String = n.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect();
+        let ok = n.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) && !RUST_KEYWORDS.contains(&n.as_str()) && !n.starts_with("f_") && !n.starts_with("sub_");
+        ok.then_some(n)
+    };
+    let mut count: HashMap<String, usize> = HashMap::new();
+    for f in funcs.iter().filter(|f| f.t1.is_ok()) {
+        if let Some(n) = ident(f) {
+            *count.entry(n).or_default() += 1;
+        }
+    }
+    for f in funcs.iter_mut() {
+        let Ok(code) = &f.t1 else { continue };
+        let name = match ident(f) {
+            Some(n) if count[&n] == 1 => n,
+            Some(n) => format!("{n}_{}", f.id.to_lowercase()),
+            None => format!("sub_{}", f.id.to_lowercase()),
+        };
+        f.t1 = Ok(code.replacen(&format!("pub fn f_{}_t1(", f.id), &format!("pub fn {name}("), 1));
+        f.t1_name = name;
+    }
 }
 
 /// Dictionary names by (segment, address without the Thumb bit), for call comments in T1 code.
@@ -343,7 +379,8 @@ fn lifted9(segment: String, f: &lift::Func, id: String, img: &lift::Image) -> Li
     } else {
         raise_emit::emit_t1_named(f, &id, Some(img), &|t| call_name(&segment, t))
     };
-    Lifted { arm7: false, segment, entry: f.entry, code, t1, id }
+    let t1_name = format!("f_{id}_t1");
+    Lifted { arm7: false, segment, entry: f.entry, code, t1, t1_name, id }
 }
 
 fn run() -> Result<ExitCode, String> {
@@ -669,7 +706,7 @@ fn run() -> Result<ExitCode, String> {
         let hi = f.insts.iter().last().map(|(&a, d)| (a & !1) + d.size).unwrap_or(lo);
         spans7.entry(seg.clone()).or_default().push((lo, hi));
         extra.push(discovered_row(&seg, f));
-        funcs.push(Lifted { arm7: true, segment: seg, entry, code: lift::emit_full(f, &id, Some(&img7), Some(&|d, jumped| rt::arm7_cycles(d, true, jumped)), raise()), t1: Err("ARM7 (cycle-cost budget)"), id });
+        funcs.push(Lifted { arm7: true, segment: seg, entry, code: lift::emit_full(f, &id, Some(&img7), Some(&|d, jumped| rt::arm7_cycles(d, true, jumped)), raise()), t1: Err("ARM7 (cycle-cost budget)"), t1_name: String::new(), id });
     }
 
     // output directory: only create/replace our own previous output
@@ -703,12 +740,17 @@ fn run() -> Result<ExitCode, String> {
         for f in funcs.iter_mut().filter(|f| !f.arm7) {
             if let Some(line) = names.get(&(f.segment.clone(), f.entry & !1)) {
                 f.code = format!("// {line}\n{}", f.code);
+                if let Ok(t1) = &f.t1 {
+                    f.t1 = Ok(format!("/// {line}\n{t1}"));
+                }
                 named += 1;
             }
         }
         let tables: Vec<String> = args.names.iter().map(|p| p.display().to_string()).collect();
         eprintln!("mkds_gen: {named} functions named from {}", tables.join(", "));
     }
+
+    name_t1(&mut funcs);
 
     // balanced parts by emitted source size
     let recomp_dep = format!("recomp = {{ path = {} }}", toml_path(&recomp_path));
@@ -750,7 +792,7 @@ fn run() -> Result<ExitCode, String> {
                 // listed first: the dispatcher maps a block to the first row that has it, so the
                 // raised version runs at the entry and the translation everywhere else
                 src.push_str(t1);
-                let _ = writeln!(t, "    recomp::mem::Lifted {{ segment: {:?}, entry: {:#X}, blocks: &[{:#X}], insts: {name}::INSTS_{id}, f: {name}::f_{id}_t1 }},", f.segment, f.entry, f.entry, id = f.id);
+                let _ = writeln!(t, "    recomp::mem::Lifted {{ segment: {:?}, entry: {:#X}, blocks: &[{:#X}], insts: {name}::INSTS_{id}, f: {name}::{t1} }},", f.segment, f.entry, f.entry, id = f.id, t1 = f.t1_name);
             }
             let _ = writeln!(t, "    recomp::mem::Lifted {{ segment: {:?}, entry: {:#X}, blocks: {name}::BLOCKS_{id}, insts: {name}::INSTS_{id}, f: {name}::f_{id} }},", f.segment, f.entry, id = f.id);
         }
