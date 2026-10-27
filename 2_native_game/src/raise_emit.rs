@@ -38,6 +38,7 @@ struct Ctx<'a> {
     header: BTreeSet<u32>,
     children: BTreeMap<u32, Vec<u32>>,
     names: &'a dyn Fn(u32) -> Option<String>,
+    notes: &'a Notes<'a>,
 }
 
 /// Needs the locals written to `c.r` first (and read back after): the helper uses `c.r` itself.
@@ -203,8 +204,65 @@ fn block_note(e: &E) -> String {
     String::new()
 }
 
+/// Comment sources for raised code: call target names, field names by offset (for this function)
+/// and global names by address.
+pub struct Notes<'a> {
+    pub call: &'a dyn Fn(u32) -> Option<String>,
+    pub field: &'a dyn Fn(u32) -> Option<String>,
+    pub global: &'a dyn Fn(u32) -> Option<String>,
+}
+
 /// [`emit_t1`]; `names(target)` gives a call target's name for a comment.
 pub fn emit_t1_named(f: &Func, id: &str, img: Option<&Image>, names: &dyn Fn(u32) -> Option<String>) -> Result<String, Reason> {
+    emit_t1_annotated(f, id, img, &Notes { call: names, field: &|_| None, global: &|_| None })
+}
+
+/// The comment for one statement: the field a memory access reaches (`base + offset` in a function
+/// known to use that field) or the global a constant names.
+fn stmt_note(n: &Notes, s: &S) -> Option<String> {
+    fn addr_of(e: &E) -> Option<&E> {
+        match e {
+            E::Load { addr, .. } => Some(addr),
+            E::Call(H::Ldr, a) => a.get(1),
+            E::Bin(_, a, b) | E::Cmp(_, _, a, b) => addr_of(a).or_else(|| addr_of(b)),
+            _ => None,
+        }
+    }
+    fn off(a: &E) -> Option<u32> {
+        match a {
+            E::Bin(ir::Bin::And, x, _) => off(x),
+            E::Bin(ir::Bin::Add, _, k) => match **k {
+                E::Const(v) => Some(v),
+                _ => None,
+            },
+            E::Reg(_) => Some(0),
+            _ => None,
+        }
+    }
+    let (access, value) = match s {
+        S::Store { addr, val, .. } => (Some(addr), Some(val)),
+        S::SetReg(_, e) | S::Let(_, e) => (addr_of(e), Some(e)),
+        _ => (None, None),
+    };
+    if let Some(a) = access {
+        if let E::Const(g) = a {
+            if let Some(g) = (n.global)(*g) {
+                return Some(g);
+            }
+        }
+        if let Some(f) = off(a).and_then(|o| (n.field)(o)) {
+            return Some(f);
+        }
+    }
+    if let Some(E::Const(v)) = value {
+        return (n.global)(*v).map(|g| format!("&{g}"));
+    }
+    None
+}
+
+/// [`emit_t1`] with comments from `notes`.
+pub fn emit_t1_annotated(f: &Func, id: &str, img: Option<&Image>, notes: &Notes) -> Result<String, Reason> {
+    let names = notes.call;
     let live = crate::raise::flag_liveness(f, img);
     // blocks reachable from the entry through internal edges
     let mut blocks: BTreeMap<u32, Block> = BTreeMap::new();
@@ -353,7 +411,7 @@ pub fn emit_t1_named(f: &Func, id: &str, img: Option<&Image>, names: &dyn Fn(u32
         }
     }
     let all: BTreeSet<u8> = used.union(&written).copied().filter(|&i| i < 15).collect();
-    let ctx = Ctx { blocks: &blocks, rpo, idom, merge, header, children, names };
+    let ctx = Ctx { blocks: &blocks, rpo, idom, merge, header, children, names, notes };
     let mut body = String::new();
     do_tree(&ctx, f.entry, 2, &mut body);
 
@@ -503,6 +561,9 @@ fn stmt_code(c: &Ctx, x: u32, s: &S, depth: usize, out: &mut String) {
         }
         S::Do(e) if syncs(e) => line(out, &format!("spill!(); {}; reload!();{}", ir::expr_locals(e), block_note(e))),
         S::SetReg(i, e) if syncs(e) => line(out, &format!("spill!(); let t = {}; reload!(); {} = t;", ir::expr_locals(e), ir::reg_name(*i))),
-        S::Store { w: Width::B32, .. } | _ => line(out, &ir::print_locals(std::slice::from_ref(s))),
+        S::Store { w: Width::B32, .. } | _ => {
+            let note = stmt_note(c.notes, s).map(|n| format!(" // {n}")).unwrap_or_default();
+            line(out, &format!("{}{note}", ir::print_locals(std::slice::from_ref(s))))
+        }
     }
 }

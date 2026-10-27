@@ -369,6 +369,59 @@ fn call_name(segment: &str, target: u32) -> Option<String> {
     names.get(&(segment.to_string(), a)).or_else(|| names.iter().find(|((s, e), _)| *e == a && !s.starts_with("ov")).map(|(_, n)| n)).cloned()
 }
 
+/// Research layout for comments in raised code: field names by (struct, offset), the fields each
+/// function uses (by entry, without the Thumb bit) and global names by address.
+#[derive(Default)]
+struct Layout {
+    fields: HashMap<(String, u32), String>,
+    uses: HashMap<u32, Vec<(String, u32)>>,
+    globals: HashMap<u32, String>,
+}
+static LAYOUT: std::sync::OnceLock<Layout> = std::sync::OnceLock::new();
+
+fn hex(s: &str) -> Option<u32> {
+    u32::from_str_radix(s.trim().trim_start_matches("0x").trim_start_matches("0X"), 16).ok()
+}
+
+/// Reads `fields.csv`, `field_uses.csv` and `globals.csv` from `dir` (any may be missing).
+fn load_layout(dir: &Path) -> Layout {
+    let mut l = Layout::default();
+    let rows = |name: &str| -> Vec<Vec<String>> {
+        std::fs::read_to_string(dir.join(name)).map(|t| csv_records(&t).into_iter().skip(1).collect()).unwrap_or_default()
+    };
+    for r in rows("fields.csv") {
+        if let (Some(st), Some(off), Some(n)) = (r.first(), r.get(1).and_then(|o| hex(o)), r.get(2)) {
+            l.fields.insert((st.clone(), off), n.clone());
+        }
+    }
+    for r in rows("field_uses.csv") {
+        if let (Some(f), Some(st), Some(off)) = (r.first().and_then(|f| hex(f)), r.get(1), r.get(2).and_then(|o| hex(o))) {
+            l.uses.entry(f & !1).or_default().push((st.clone(), off));
+        }
+    }
+    for r in rows("globals.csv") {
+        if let (Some(a), Some(n)) = (r.first().and_then(|a| hex(a)), r.get(1)) {
+            l.globals.insert(a, n.clone());
+        }
+    }
+    l
+}
+
+/// `Struct.field` if the function at `entry` is known to access exactly one named field at `off`.
+fn field_name(entry: u32, off: u32) -> Option<String> {
+    let l = LAYOUT.get()?;
+    let mut hits = l.uses.get(&(entry & !1))?.iter().filter(|(_, o)| *o == off);
+    let (st, o) = hits.next()?;
+    if hits.next().is_some() {
+        return None;
+    }
+    Some(format!("{st}.{}", l.fields.get(&(st.clone(), *o))?))
+}
+
+fn global_name(a: u32) -> Option<String> {
+    LAYOUT.get()?.globals.get(&a).cloned()
+}
+
 /// An ARM9 function: its translation and, when the exact passes are on, its raised version.
 fn lifted9(segment: String, f: &lift::Func, id: String, img: &lift::Image) -> Lifted {
     let code = lift::emit_full(f, &id, Some(img), None, raise());
@@ -377,7 +430,9 @@ fn lifted9(segment: String, f: &lift::Func, id: String, img: &lift::Image) -> Li
     } else if std::env::var_os("MKDS_NO_T1").is_some() {
         Err("T1 off (MKDS_NO_T1)")
     } else {
-        raise_emit::emit_t1_named(f, &id, Some(img), &|t| call_name(&segment, t))
+        let entry = f.entry;
+        let notes = raise_emit::Notes { call: &|t| call_name(&segment, t), field: &|off| field_name(entry, off), global: &global_name };
+        raise_emit::emit_t1_annotated(f, &id, Some(img), &notes)
     };
     let t1_name = format!("f_{id}_t1");
     Lifted { arm7: false, segment, entry: f.entry, code, t1, t1_name, id }
@@ -419,6 +474,10 @@ fn run() -> Result<ExitCode, String> {
             merge_names(&text, &mut merged)?;
         }
         let _ = CALL_NAMES.set(merged.into_iter().filter(|(_, e)| !e.name.is_empty()).map(|(k, e)| (k, e.name)).collect());
+        // layout tables live next to the name tables (the dictionary folder)
+        if let Some(dir) = args.names.first().and_then(|p| p.parent()) {
+            let _ = LAYOUT.set(load_layout(dir));
+        }
     }
     let mut funcs = Vec::new();
     let mut spans: BTreeMap<String, Vec<(u32, u32)>> = BTreeMap::new();

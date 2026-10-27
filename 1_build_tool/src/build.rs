@@ -892,7 +892,11 @@ fn dictionary_tables(source: &Path) -> Vec<PathBuf> {
         .into_iter()
         .flatten()
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|e| e == "csv") && *p != base && !p.ends_with("structs.csv"))
+        // name tables only: `sdk_*.csv` and `game_*.csv` (fields, field uses and globals are layout tables)
+        .filter(|p| {
+            let n = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            n.ends_with(".csv") && (n.starts_with("sdk_") || n.starts_with("game_"))
+        })
         .collect();
     refined.sort();
     let mut tables: Vec<PathBuf> = [base].into_iter().filter(|p| p.is_file()).chain(refined).collect();
@@ -916,7 +920,7 @@ mod tests {
         assert_eq!(dictionary_tables(d.path()), [d.path().join("4_docs/FUNCTION_TABLE.csv")]);
         let dict = d.path().join("dictionary");
         std::fs::create_dir(&dict).unwrap();
-        for f in ["sdk_functions.csv", "functions.csv", "game_karts.csv", "structs.csv", "export.py"] {
+        for f in ["sdk_functions.csv", "functions.csv", "game_karts.csv", "structs.csv", "fields.csv", "globals.csv", "export.py"] {
             std::fs::write(dict.join(f), "").unwrap();
         }
         let names: Vec<_> = dictionary_tables(d.path()).iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
