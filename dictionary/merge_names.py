@@ -19,7 +19,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 def read_csv(path):
-    with open(path, encoding="utf-8", newline="") as f:
+    with open(path, encoding="utf-8-sig", newline="") as f:
         return list(csv.DictReader(f))
 
 
