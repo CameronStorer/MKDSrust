@@ -385,6 +385,8 @@ struct Layout {
     parent: HashMap<String, String>,
     /// Global address -> the struct the pointer stored there points to.
     points_global: HashMap<u32, String>,
+    /// Global address -> the struct stored there itself (`Foo` or the first of `Foo[8]`).
+    is_global: HashMap<u32, String>,
     /// (struct, offset) -> the struct the pointer in that field points to.
     points_field: HashMap<(String, u32), String>,
     /// Offset -> the structs with a field there.
@@ -501,6 +503,13 @@ fn load_layout(dir: &Path) -> Layout {
         if let (Some(a), Some(n)) = (r.first().and_then(|a| hex(a)), r.get(1)) {
             if let Some(p) = r.get(2).and_then(|t| pointee(t)) {
                 l.points_global.entry(a).or_insert(p);
+            } else if let Some(t) = r.get(2) {
+                // a struct instance: `Foo` or an array `Foo[8]` (its first element)
+                let t = t.trim().trim_matches('"').trim();
+                let base = canon(t.split('[').next().unwrap_or(""));
+                if !base.is_empty() && known.contains(&base) {
+                    l.is_global.insert(a, base);
+                }
             }
             l.globals.insert(a, n.clone());
         }
@@ -715,8 +724,12 @@ fn with_notes9<T>(segment: &str, entry: u32, k: impl FnOnce(&raise_emit::Notes) 
         structs_with: &|off| LAYOUT.get().and_then(|l| l.by_offset.get(&off).cloned()).unwrap_or_default(),
         density: &|st| LAYOUT.get().and_then(|l| l.density.get(st).copied()).unwrap_or(1.0),
         global: &global_name,
+        global_is: &|a| LAYOUT.get()?.is_global.get(&a).cloned(),
     })
 }
+
+/// Layout facts from struct inference (`MKDS_TYPE_DUMP=<file>`), gathered over the final pass.
+static TYPE_DUMP: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 /// An ARM9 function: its translation and, when the exact passes are on, its raised version.
 fn lifted9(segment: String, f: &lift::Func, id: String, img: &lift::Image) -> Lifted {
@@ -726,7 +739,10 @@ fn lifted9(segment: String, f: &lift::Func, id: String, img: &lift::Image) -> Li
     } else if std::env::var_os("MKDS_NO_T1").is_some() {
         Err("T1 off (MKDS_NO_T1)")
     } else {
-        with_notes9(&segment, f.entry, |n| raise_emit::emit_t1_annotated(f, &id, Some(img), n))
+        let _ = raise_emit::take_dump();
+        let t = with_notes9(&segment, f.entry, |n| raise_emit::emit_t1_annotated(f, &id, Some(img), n));
+        TYPE_DUMP.lock().unwrap().extend(raise_emit::take_dump());
+        t
     };
     let fields = if t1.is_ok() { ir::take_field_uses() } else { Vec::new() };
     let t1_name = format!("f_{id}_t1");
@@ -1252,6 +1268,11 @@ fn run() -> Result<ExitCode, String> {
     for (seg, f, id, src) in &jobs {
         let img = image(src);
         funcs.push(lifted9(seg.clone(), f, id.clone(), &img));
+    }
+    if let Some(p) = std::env::var_os("MKDS_TYPE_DUMP") {
+        let mut t = TYPE_DUMP.lock().unwrap().join("\n");
+        t.push('\n');
+        std::fs::write(&p, t).map_err(|e| format!("cannot write {}: {e}", Path::new(&p).display()))?;
     }
     if std::env::var_os("MKDS_FOLD_STATS").is_some() {
         eprintln!("mkds_gen: compare folding [no run, guarded, live after, live beyond cond, no form, folded] = {:?}", raise_emit::fold_stats());

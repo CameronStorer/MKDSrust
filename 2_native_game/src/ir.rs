@@ -624,8 +624,9 @@ fn args(out: &mut String, a: &[E]) {
 thread_local! {
     /// Print registers as the T1 local variables (`r0`.., `sp`, `lr`) instead of `c.r[i]`.
     static LOCALS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    /// Named struct fields by offset for the function being printed (T1 accessors).
-    static FIELDS: std::cell::RefCell<std::collections::HashMap<(u8, u32), FieldRef>> = std::cell::RefCell::new(Default::default());
+    /// Named struct fields by offset for the function being printed (T1 accessors), each with the
+    /// bias of its base register (an interior pointer `kart + 0x200` prints `kart_200 - 0x200`).
+    static FIELDS: std::cell::RefCell<std::collections::HashMap<(u8, u32), (FieldRef, u32)>> = std::cell::RefCell::new(Default::default());
     /// Per-function local names replacing `r4` etc. (registers holding one struct pointer).
     static REG_NAMES: std::cell::RefCell<std::collections::HashMap<u8, String>> = std::cell::RefCell::new(Default::default());
     /// The accessors printed since the last [`take_field_uses`].
@@ -710,9 +711,10 @@ impl FieldRef {
     }
 }
 
-/// Sets the named fields (by base register and offset) for the statement about to be printed;
+/// Sets the named fields (by base register and offset) for the statement about to be printed,
+/// each with its base's bias (the base register holds the struct's address plus the bias);
 /// empty turns accessors off.
-pub fn set_fields(fields: std::collections::HashMap<(u8, u32), FieldRef>) {
+pub fn set_fields(fields: std::collections::HashMap<(u8, u32), (FieldRef, u32)>) {
     FIELDS.with(|f| *f.borrow_mut() = fields);
 }
 
@@ -737,9 +739,13 @@ fn field_access(out: &mut String, addr: &E, a: Access) -> bool {
         E::Reg(r) => (addr, *r, 0),
         _ => return false,
     };
-    let Some(f) = FIELDS.with(|m| m.borrow().get(&(r, off)).cloned()) else { return false };
+    let Some((f, bias)) = FIELDS.with(|m| m.borrow().get(&(r, off)).cloned()) else { return false };
     let _ = write!(out, "{}::{}(m, ", f.module, f.accessor(a));
     expr(out, base);
+    if bias != 0 {
+        // the struct's address: `p + bias - bias + off` is the same wrapping address
+        let _ = write!(out, ".wrapping_sub({bias:#X})");
+    }
     FIELD_USES.with(|u| u.borrow_mut().push((f, a)));
     true
 }
