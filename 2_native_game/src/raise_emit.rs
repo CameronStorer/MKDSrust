@@ -170,20 +170,79 @@ fn fold_compares(insts: &mut [ir::Ins], live: &BTreeMap<u32, u8>) {
         if j >= insts.len() {
             continue;
         }
-        let next = &insts[j];
-        if next.guard.is_some() || live[&next.addr] != 0 {
+        // the readers: a run of instructions with the same condition, evaluated once
+        let cc = insts[j].cond;
+        let Some(e) = cond_run(insts, j) else { continue };
+        if insts[j..=e].iter().any(|i| i.guard.is_some()) || live[&insts[e].addr] != 0 {
             continue;
         }
-        if next.stmts.iter().any(|s| crate::raise::stmt_flags(s).0 != 0 && !matches!(s, S::Goto(_) | S::Call { .. })) {
+        if live[&insts[k].addr] & !crate::raise::cond_reads(cc) != 0 {
             continue;
         }
-        if live[&insts[k].addr] & !crate::raise::cond_reads(next.cond) != 0 {
-            continue;
-        }
-        if let Some(g) = fold_cond(&insts[k].stmts, next.cond) {
+        if let Some(g) = fold_cond(&insts[k].stmts, cc) {
             insts[j].guard = Some(g);
             insts[k].stmts.clear();
+            join(insts, j, e);
         }
+    }
+}
+
+/// Ends a statement list's run of same-condition instructions: control leaves or the flags may
+/// change (a call, a CPU sync).
+fn ends_run(s: &S) -> bool {
+    matches!(s, S::Goto(_) | S::Call { .. } | S::IfSome(..) | S::ExcReturn(_)) || matches!(s, S::Do(e) | S::SetReg(_, e) if syncs(e))
+}
+
+/// The last instruction of the run starting at `j`: following instructions with the same
+/// condition while none reads a flag besides its condition, and none but the last writes flags or
+/// ends a run (control leaves, a call). `None` if an instruction reads flags itself.
+fn cond_run(insts: &[ir::Ins], j: usize) -> Option<usize> {
+    let cc = insts[j].cond;
+    let mut e = j;
+    loop {
+        let ins = &insts[e];
+        if ins.cond != cc {
+            return None;
+        }
+        let mut ends = false;
+        for s in &ins.stmts {
+            let (r, w) = crate::raise::stmt_flags(s);
+            let exit = matches!(s, S::Goto(_) | S::Call { .. });
+            if r != 0 && !exit {
+                return None;
+            }
+            // a flag write ends the run: later instructions would read the new flags
+            ends |= ends_run(s) || w != 0;
+        }
+        if ends || e + 1 >= insts.len() || insts[e + 1].cond != cc || insts[e + 1].guard.is_some() {
+            return Some(e);
+        }
+        e += 1;
+    }
+}
+
+/// Moves the statements of instructions `j+1..=e` into instruction `j` (one `if`).
+fn join(insts: &mut [ir::Ins], j: usize, e: usize) {
+    for i in j + 1..=e {
+        let moved = std::mem::take(&mut insts[i].stmts);
+        insts[j].stmts.extend(moved);
+        insts[i].cond = 14;
+    }
+}
+
+/// Joins the remaining runs of conditional instructions (same condition, see [`cond_run`]) into
+/// one `if` each.
+fn join_runs(insts: &mut [ir::Ins]) {
+    let mut j = 0;
+    while j < insts.len() {
+        if insts[j].cond != 14 && insts[j].guard.is_none() {
+            if let Some(e) = cond_run(insts, j) {
+                join(insts, j, e);
+                j = e + 1;
+                continue;
+            }
+        }
+        j += 1;
     }
 }
 
@@ -218,12 +277,16 @@ pub struct Notes<'a> {
     pub fields_of: &'a dyn Fn(u32) -> Vec<String>,
     /// A struct's field at an offset.
     pub field_in: &'a dyn Fn(&str, u32) -> Option<ir::FieldRef>,
+    /// A struct's Rust module name (for local names: `kart`).
+    pub module_of: &'a dyn Fn(&str) -> Option<String>,
+    /// The struct an argument register (r0..r3) points to, as the callers pass it (votes).
+    pub arg_hint: &'a dyn Fn(u8) -> Option<String>,
     pub global: &'a dyn Fn(u32) -> Option<String>,
 }
 
 impl Notes<'static> {
     /// No comments, no field names.
-    pub const NONE: Notes<'static> = Notes { call: &|_| None, field: &|_| None, fields_of: &|_| Vec::new(), field_in: &|_, _| None, global: &|_| None };
+    pub const NONE: Notes<'static> = Notes { call: &|_| None, field: &|_| None, fields_of: &|_| Vec::new(), field_in: &|_, _| None, module_of: &|_| None, arg_hint: &|_| None, global: &|_| None };
 }
 
 /// [`emit_t1`]; `names(target)` gives a call target's name for a comment.
@@ -357,7 +420,30 @@ fn defs_s(s: &S) -> Vec<(u8, Option<u8>)> {
 /// Each access in a group votes for the structs this function is known to use at that offset;
 /// a unique winner names every access of the group that is one of its fields. Accesses without a
 /// winner keep the per-offset rule (`notes.field`).
-fn infer_fields(blocks: &BTreeMap<u32, Block>, order: &[u32], preds: &BTreeMap<u32, Vec<u32>>, entry: u32, notes: &Notes) -> FieldMap {
+/// What struct inference found: the named accesses, the registers that hold one struct pointer
+/// wherever they are read (register -> struct), and the arguments known to point to a struct.
+struct Typed {
+    fields: FieldMap,
+    regs: BTreeMap<u8, String>,
+    args: BTreeMap<u8, String>,
+    /// Struct-typed arguments at calls: (target, register, struct).
+    calls: Vec<(u32, u8, String)>,
+}
+
+/// The types the last [`emit_t1_full`] found: its struct-typed arguments (register -> struct) and
+/// the struct-typed arguments it passes (target, register, struct), for whole-program propagation.
+pub type Types = (BTreeMap<u8, String>, Vec<(u32, u8, String)>);
+
+thread_local! {
+    static LAST_TYPES: std::cell::RefCell<Types> = std::cell::RefCell::new(Default::default());
+}
+
+/// Takes the types found by the last emission (empty if none).
+pub fn take_types() -> Types {
+    LAST_TYPES.with(|t| std::mem::take(&mut *t.borrow_mut()))
+}
+
+fn infer_fields(blocks: &BTreeMap<u32, Block>, order: &[u32], preds: &BTreeMap<u32, Vec<u32>>, entry: u32, notes: &Notes) -> Typed {
     type St = Vec<BTreeSet<usize>>;
     let mut ids: HashMap<(u32, usize, usize, u8), usize> = HashMap::new();
     let mut id = |k: (u32, usize, usize, u8)| -> usize {
@@ -419,6 +505,22 @@ fn infer_fields(blocks: &BTreeMap<u32, Block>, order: &[u32], preds: &BTreeMap<u
         }
     };
     let mut uses: Vec<((u32, u32, usize), u8, u32, usize)> = Vec::new();
+    // argument registers at calls with a known target: (target, register, a reaching definition)
+    let mut call_args: Vec<(u32, u8, usize)> = Vec::new();
+    // every register read: (register, a reaching definition); its reaching definitions are united
+    let mut reads_all: Vec<(u8, usize)> = Vec::new();
+    let read_regs = |e: &[&E], st: &St, parent: &mut Vec<usize>, reads_all: &mut Vec<(u8, usize)>| {
+        let mut used = BTreeSet::new();
+        e.iter().for_each(|x| regs_e(x, &mut used));
+        for r in used.into_iter().filter(|&r| r < 13) {
+            let defs = &st[r as usize];
+            let Some(&first) = defs.iter().next() else { continue };
+            for &d in defs {
+                union(parent, first, d);
+            }
+            reads_all.push((r, first));
+        }
+    };
     for &b in order {
         let Some(mut st) = ins_state.get(&b).cloned() else { continue };
         for (ii, ins) in blocks[&b].insts.iter().enumerate() {
@@ -437,11 +539,25 @@ fn infer_fields(blocks: &BTreeMap<u32, Block>, order: &[u32], preds: &BTreeMap<u
                 let mut acc = Vec::new();
                 accesses_e(g, &mut acc);
                 reads((b, ins.addr, usize::MAX), acc, &st, &mut parent);
+                read_regs(&[g], &st, &mut parent, &mut reads_all);
             }
             for (si, s) in ins.stmts.iter().enumerate() {
                 let mut acc = Vec::new();
                 accesses_s(s, &mut acc);
                 reads((b, ins.addr, si), acc, &st, &mut parent);
+                if let S::Call { target: E::Const(t), .. } = s {
+                    for r in 0..4u8 {
+                        if let Some(&d) = st[r as usize].iter().next() {
+                            if st[r as usize].len() == 1 {
+                                call_args.push((*t, r, d));
+                            }
+                        }
+                    }
+                }
+                let (mut used, mut _w) = (BTreeSet::new(), BTreeSet::new());
+                regs_s(s, &mut used, &mut _w);
+                let regs: Vec<E> = used.into_iter().map(E::Reg).collect();
+                read_regs(&regs.iter().collect::<Vec<_>>(), &st, &mut parent, &mut reads_all);
                 for (r, src) in defs_s(s) {
                     let d = ids[&(b, ii, si, r)];
                     if let Some(j) = src {
@@ -464,20 +580,55 @@ fn infer_fields(blocks: &BTreeMap<u32, Block>, order: &[u32], preds: &BTreeMap<u
         let g = find(&mut parent, u.3);
         offs.entry(g).or_default().insert(u.2);
     }
-    let mut winner: HashMap<usize, String> = HashMap::new();
+    let mut votes: HashMap<usize, BTreeMap<String, usize>> = HashMap::new();
     for (g, ks) in &offs {
-        let mut score: BTreeMap<String, usize> = BTreeMap::new();
+        let score = votes.entry(*g).or_default();
         for &k in ks {
             for st in (notes.fields_of)(k) {
                 *score.entry(st).or_default() += 1;
             }
         }
+    }
+    // what the callers pass counts double
+    for r in 0..4u8 {
+        if let Some(st) = (notes.arg_hint)(r) {
+            let g = find(&mut parent, r as usize);
+            *votes.entry(g).or_default().entry(st).or_default() += 2;
+        }
+    }
+    let mut winner: HashMap<usize, String> = HashMap::new();
+    for (g, score) in &votes {
         let best = score.values().copied().max().unwrap_or(0);
         let mut top = score.iter().filter(|(_, v)| **v == best && best > 0);
         if let (Some((st, _)), None) = (top.next(), top.next()) {
             winner.insert(*g, st.clone());
         }
     }
+    // a register read only where it holds one struct-typed value takes the struct's name
+    let mut seen: BTreeMap<u8, Option<usize>> = BTreeMap::new();
+    for &(r, d) in &reads_all {
+        let g = find(&mut parent, d);
+        let e = seen.entry(r).or_insert(Some(g));
+        if *e != Some(g) {
+            *e = None;
+        }
+    }
+    let regs: BTreeMap<u8, String> = seen.iter().filter_map(|(&r, g)| Some((r, winner.get(&(*g)?)?.clone()))).collect();
+    // arguments: entry values the function reads
+    let mut entry_read = BTreeSet::new();
+    for &(r, d) in &reads_all {
+        if r < 4 && find(&mut parent, d) == find(&mut parent, r as usize) {
+            entry_read.insert(r);
+        }
+    }
+    let args: BTreeMap<u8, String> = entry_read.into_iter().filter_map(|r| {
+        let g = find(&mut parent, r as usize);
+        Some((r, winner.get(&g)?.clone()))
+    }).collect();
+    let calls: Vec<(u32, u8, String)> = call_args.into_iter().filter_map(|(t, r, d)| {
+        let g = find(&mut parent, d);
+        Some((t, r, winner.get(&g)?.clone()))
+    }).collect();
     let mut map = FieldMap::new();
     for (key, r, off, d) in uses {
         let g = find(&mut parent, d);
@@ -489,7 +640,27 @@ fn infer_fields(blocks: &BTreeMap<u32, Block>, order: &[u32], preds: &BTreeMap<u
             map.entry(key).or_default().insert((r, off), f);
         }
     }
-    map
+    Typed { fields: map, regs, args, calls }
+}
+
+/// Local names for the struct-typed registers: the struct's module name (`kart`), numbered when
+/// several registers hold the same struct (`kart`, `kart_2`); never a name the code already uses.
+fn typed_names(regs: &BTreeMap<u8, String>, module: &dyn Fn(&str) -> Option<String>) -> HashMap<u8, String> {
+    const TAKEN: &[&str] = &["c", "m", "pc", "t", "x", "v", "th", "sc", "res", "ea", "ax", "v0", "v1", "l", "h", "target", "old", "iw", "sp", "lr", "R"];
+    let mut used: BTreeSet<String> = TAKEN.iter().map(|s| s.to_string()).collect();
+    let mut out = HashMap::new();
+    for (&r, st) in regs {
+        let Some(base) = module(st) else { continue };
+        let base = if base.starts_with('r') && base[1..].chars().all(|c| c.is_ascii_digit()) { format!("{base}_") } else { base };
+        let mut n = base.clone();
+        let mut k = 2;
+        while !used.insert(n.clone()) {
+            n = format!("{base}_{k}");
+            k += 1;
+        }
+        out.insert(r, n);
+    }
+    out
 }
 
 /// [`emit_t1`] with comments from `notes`.
@@ -525,6 +696,7 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
             ir::fold_temps(&mut ins.stmts);
         }
         fold_compares(&mut insts, &live);
+        join_runs(&mut insts);
         for ins in &mut insts {
             for s in &ins.stmts {
                 let unconditional = ins.cond == 14;
@@ -672,14 +844,24 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
     }
     let all: BTreeSet<u8> = used.union(&written).copied().filter(|&i| i < 15).collect();
     // named struct fields at the accesses (printed as accessors)
-    let fields = infer_fields(&blocks, &order, &preds, f.entry, notes);
-    let ctx = Ctx { blocks: &blocks, rpo, idom, merge, header, children, names, notes, switches: &switches, fields };
+    let typed = infer_fields(&blocks, &order, &preds, f.entry, notes);
+    let reg_names = typed_names(&typed.regs, notes.module_of);
+    let args_doc: Vec<String> = typed.args.iter().map(|(r, st)| match reg_names.get(r) {
+        Some(n) => format!("r{r} = `{n}` (a `{st}`)"),
+        None => format!("r{r} points to a `{st}`"),
+    }).collect();
+    let ctx = Ctx { blocks: &blocks, rpo, idom, merge, header, children, names, notes, switches: &switches, fields: typed.fields };
+    ir::set_reg_names(reg_names);
+    LAST_TYPES.with(|t| *t.borrow_mut() = (typed.args.clone(), typed.calls.clone()));
     ir::take_field_uses();
     let mut body = String::new();
     do_tree(&ctx, f.entry, 2, &mut body);
     ir::set_fields(Default::default());
 
     let mut s = String::new();
+    if !args_doc.is_empty() {
+        let _ = writeln!(s, "/// Arguments: {}.", args_doc.join(", "));
+    }
     let _ = writeln!(s, "#[allow(non_snake_case, unused_variables, unused_assignments, unused_mut, unreachable_code, unused_parens, unused_braces, unused_macros, unused_labels, clippy::all)]");
     let _ = writeln!(s, "pub fn f_{id}_t1(c: &mut recomp::rt::Cpu, m: &mut dyn recomp::rt::Bus, pc: u32) -> u32 {{");
     let _ = writeln!(s, "    #[allow(unused_imports)] use recomp::rt as R;\n    #[allow(unused_imports)] use recomp::arm::interwork as iw;\n    #[allow(unused_imports)] use recomp::rt::Mem as _;");
@@ -701,6 +883,7 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
     let _ = writeln!(s, "    macro_rules! budget {{ ($pc:expr, $n:expr) => {{ if !R::spend(c, $n) {{ spill!(); if !m.slice_end(c, $pc, $n) {{ c.r[15] = $pc; return R::BUDGET_EXHAUSTED; }} reload!(); }} }} }}");
     s.push_str(&body);
     s.push_str("}\n");
+    ir::set_reg_names(Default::default());
     Ok(s)
 }
 

@@ -611,6 +611,8 @@ thread_local! {
     static LOCALS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Named struct fields by offset for the function being printed (T1 accessors).
     static FIELDS: std::cell::RefCell<std::collections::HashMap<(u8, u32), FieldRef>> = std::cell::RefCell::new(Default::default());
+    /// Per-function local names replacing `r4` etc. (registers holding one struct pointer).
+    static REG_NAMES: std::cell::RefCell<std::collections::HashMap<u8, String>> = std::cell::RefCell::new(Default::default());
     /// The accessors printed since the last [`take_field_uses`].
     static FIELD_USES: std::cell::RefCell<Vec<(FieldRef, Access)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -699,6 +701,11 @@ pub fn set_fields(fields: std::collections::HashMap<(u8, u32), FieldRef>) {
     FIELDS.with(|f| *f.borrow_mut() = fields);
 }
 
+/// Sets the local names of renamed registers for the function being printed (empty: `r0`..).
+pub fn set_reg_names(names: std::collections::HashMap<u8, String>) {
+    REG_NAMES.with(|r| *r.borrow_mut() = names);
+}
+
 /// The accessors printed since the last call.
 pub fn take_field_uses() -> Vec<(FieldRef, Access)> {
     FIELD_USES.with(|u| std::mem::take(&mut *u.borrow_mut()))
@@ -724,6 +731,9 @@ fn field_access(out: &mut String, addr: &E, a: Access) -> bool {
 
 /// The T1 local variable holding register `i`.
 pub fn reg_name(i: u8) -> String {
+    if let Some(n) = REG_NAMES.with(|r| r.borrow().get(&i).cloned()) {
+        return n;
+    }
     match i {
         13 => "sp".into(),
         14 => "lr".into(),

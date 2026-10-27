@@ -608,6 +608,29 @@ fn global_name(a: u32) -> Option<String> {
     LAYOUT.get()?.globals.get(&a).cloned()
 }
 
+/// Rounds of whole-program type propagation (each passes argument types one call level further).
+const TYPE_ROUNDS: usize = 3;
+
+/// Argument types from the callers: (function entry without the Thumb bit, register) -> struct.
+static ARG_HINTS: std::sync::RwLock<Option<HashMap<(u32, u8), String>>> = std::sync::RwLock::new(None);
+
+fn arg_hint(entry: u32, r: u8) -> Option<String> {
+    ARG_HINTS.read().unwrap().as_ref()?.get(&(entry & !1, r)).cloned()
+}
+
+/// Runs `k` with the comment and type sources for the raised version of the ARM9 function at `entry`.
+fn with_notes9<T>(segment: &str, entry: u32, k: impl FnOnce(&raise_emit::Notes) -> T) -> T {
+    k(&raise_emit::Notes {
+        call: &|t| call_name(segment, t),
+        field: &|off| field_name(entry, off),
+        fields_of: &|off| structs_at(entry, off),
+        field_in: &field_in,
+        module_of: &|st| LAYOUT.get()?.modules.get(st).cloned(),
+        arg_hint: &|r| arg_hint(entry, r),
+        global: &global_name,
+    })
+}
+
 /// An ARM9 function: its translation and, when the exact passes are on, its raised version.
 fn lifted9(segment: String, f: &lift::Func, id: String, img: &lift::Image) -> Lifted {
     let code = lift::emit_full(f, &id, Some(img), None, raise());
@@ -616,15 +639,7 @@ fn lifted9(segment: String, f: &lift::Func, id: String, img: &lift::Image) -> Li
     } else if std::env::var_os("MKDS_NO_T1").is_some() {
         Err("T1 off (MKDS_NO_T1)")
     } else {
-        let entry = f.entry;
-        let notes = raise_emit::Notes {
-            call: &|t| call_name(&segment, t),
-            field: &|off| field_name(entry, off),
-            fields_of: &|off| structs_at(entry, off),
-            field_in: &field_in,
-            global: &global_name,
-        };
-        raise_emit::emit_t1_annotated(f, &id, Some(img), &notes)
+        with_notes9(&segment, f.entry, |n| raise_emit::emit_t1_annotated(f, &id, Some(img), n))
     };
     let fields = if t1.is_ok() { ir::take_field_uses() } else { Vec::new() };
     let t1_name = format!("f_{id}_t1");
@@ -891,9 +906,9 @@ fn run() -> Result<ExitCode, String> {
         }
         eprintln!("mkds_gen: ARM9 discovery round {round}: {} functions gained entry points, {} gap functions, {ov_now} overlay gap functions", changed.len(), gap_funcs.len());
     }
+    // ARM9 functions to raise: (segment, function, id, image segment; None = the fixed sections)
+    let mut jobs: Vec<(String, &lift::Func, String, Option<String>)> = Vec::new();
     for p in &pending {
-        let (base, data) = &images[&p.segment];
-        let img = lift::Image::new(*base, data);
         let id = format!("{}_{:08X}", p.segment, p.func.entry);
         let row = &mut rows[p.row];
         row.insts = p.func.insts.len();
@@ -902,7 +917,7 @@ fn run() -> Result<ExitCode, String> {
         if !p.extra.is_empty() {
             row.reason = format!("{} entry points added by cross-function discovery", p.extra.len());
         }
-        funcs.push(lifted9(p.segment.clone(), &p.func, id, &img));
+        jobs.push((p.segment.clone(), &p.func, id, Some(p.segment.clone())));
     }
 
     if let Some(path) = &args.signatures {
@@ -914,26 +929,56 @@ fn run() -> Result<ExitCode, String> {
     let mut extra: Vec<Row> = Vec::new();
     let stub9: Vec<u8> = rt::ARM9_IRQ_STUB.iter().flat_map(|w| w.to_le_bytes()).collect();
     let stub7: Vec<u8> = rt::ARM7_IRQ_STUB.iter().flat_map(|w| w.to_le_bytes()).collect();
-    {
-        let img = lift::Image::new(0xFFFF_0018, &stub9);
-        let f = lift::discover(&img, 0xFFFF_0018, Some((0xFFFF_0018, 0xFFFF_0018 + stub9.len() as u32)), 100)?;
-        extra.push(discovered_row("bios9", &f));
-        funcs.push(lifted9("bios9".into(), &f, "bios9_FFFF0018".into(), &img));
-    }
+    let stub9_img = lift::Image::new(0xFFFF_0018, &stub9);
+    let stub9_f = lift::discover(&stub9_img, 0xFFFF_0018, Some((0xFFFF_0018, 0xFFFF_0018 + stub9.len() as u32)), 100)?;
+    extra.push(discovered_row("bios9", &stub9_f));
+    jobs.push(("bios9".into(), &stub9_f, "bios9_FFFF0018".into(), Some("bios9".into())));
     for (&entry, f) in &gap_funcs {
         let seg = fixed_seg(entry).expect("gap function inside a fixed segment");
         let id = format!("{seg}_{entry:08X}");
         extra.push(discovered_row(&seg, f));
-        funcs.push(lifted9(seg, f, id, &img9));
+        jobs.push((seg, f, id, None));
     }
     for (ov, fs) in &ov_gap_funcs {
-        let (base, data) = &images[ov];
-        let img = lift::Image::new(*base, data);
         for (&entry, f) in fs {
             let id = format!("{ov}_{entry:08X}");
             extra.push(discovered_row(ov, f));
-            funcs.push(lifted9(ov.clone(), f, id, &img));
+            jobs.push((ov.clone(), f, id, Some(ov.clone())));
         }
+    }
+    // whole-program struct types: rounds of inference pass argument types from callers to
+    // callees; the last round's hints go into the generated code
+    let image = |seg: &Option<String>| -> lift::Image {
+        match seg.as_deref() {
+            None => lift::Image { segs: img9.segs.clone() },
+            Some("bios9") => lift::Image::new(0xFFFF_0018, &stub9),
+            Some(k) => lift::Image::new(images[k].0, &images[k].1),
+        }
+    };
+    if raise() && std::env::var_os("MKDS_NO_T1").is_none() && LAYOUT.get().is_some() {
+        for round in 0..TYPE_ROUNDS {
+            let mut seen: BTreeMap<(u32, u8), BTreeSet<String>> = BTreeMap::new();
+            for (seg, f, id, src) in &jobs {
+                let img = image(src);
+                let _ = with_notes9(seg, f.entry, |n| raise_emit::emit_t1_annotated(f, id, Some(&img), n));
+                let _ = ir::take_field_uses();
+                let (args, calls) = raise_emit::take_types();
+                for (r, st) in args {
+                    seen.entry((f.entry & !1, r)).or_default().insert(st);
+                }
+                for (t, r, st) in calls {
+                    seen.entry((t & !1, r)).or_default().insert(st);
+                }
+            }
+            // a hint only where every caller (and the function itself) agrees
+            let hints: HashMap<(u32, u8), String> = seen.into_iter().filter(|(_, v)| v.len() == 1).map(|(k, v)| (k, v.into_iter().next().unwrap())).collect();
+            eprintln!("mkds_gen: type round {round}: {} typed arguments", hints.len());
+            *ARG_HINTS.write().unwrap() = Some(hints);
+        }
+    }
+    for (seg, f, id, src) in &jobs {
+        let img = image(src);
+        funcs.push(lifted9(seg.clone(), f, id.clone(), &img));
     }
     let (arm7_entry, arm7_secs) = build_support::arm7_sections(&rom)?;
     let mut arm7_ranges: Vec<(String, u32, u32)> = vec![("bios7".into(), 0x18, 0x18 + stub7.len() as u32)];
