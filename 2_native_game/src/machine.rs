@@ -77,6 +77,9 @@ pub struct Machine<'a> {
     /// wait for an interrupt (SWI 4/5/6; 0x100 for the CP15 wait), and with [`ORACLE_VBLANK_IRQ`] when the
     /// ARM9 takes an IRQ with V-blank pending (the start of a logical frame). `None` by default.
     pub wait_hook: Option<Box<dyn FnMut(&mut Machine<'a>, u32) + 'a>>,
+    /// Block 5.3 (`MKDS_HW_TIME=native`): IRQs are delivered only at safe points ([`crate::os_hle::IrqGate`]).
+    /// `None` (the default): at every slice start, as the hardware model always did.
+    pub os_gate: Option<crate::os_hle::IrqGate>,
 }
 
 /// Longest stretch (in 1000-cycle steps) a wait-for-interrupt may fast-forward before giving up.
@@ -112,6 +115,7 @@ impl<'a> Machine<'a> {
             input_observer: None,
             host_quit: false,
             wait_hook: None,
+            os_gate: None,
         }
     }
 
@@ -408,6 +412,9 @@ impl Machine<'_> {
     }
 
     fn wait_for_interrupt(&mut self) {
+        if let Some(g) = self.os_gate.as_mut() {
+            g.wait(); // a safe point: what wakes this wait is delivered at once
+        }
         let mut n = 0;
         while !self.hw.irq_pending() {
             if let Some(action) = self.idle_poll.as_mut().and_then(|poll| poll()) {
@@ -418,6 +425,13 @@ impl Machine<'_> {
             }
             if self.host_quit {
                 return;
+            }
+            // Native OS time: an alarm or tick overflow due in this frame happens now, without running
+            // the hardware; otherwise this is the frame end and the hardware runs to the V-blank (or to an
+            // event of the ARM7 model).
+            if let Some(bits) = self.hw.vtime.as_mut().and_then(|v| v.jump()) {
+                self.hw.raise(bits);
+                continue;
             }
             self.tick(1000);
             n += 1;

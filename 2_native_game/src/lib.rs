@@ -20,6 +20,8 @@ pub mod lift;
 pub mod machine;
 pub mod mem;
 pub mod native;
+/// Block 5.3: OS time and interrupts on the host (`MKDS_HW_TIME=native`).
+pub mod os_hle;
 pub mod peripherals;
 pub mod raise;
 pub mod raise_emit;
