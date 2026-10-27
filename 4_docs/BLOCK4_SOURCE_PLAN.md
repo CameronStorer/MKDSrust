@@ -27,6 +27,24 @@ pub fn kart_update_speed(g: &mut Game, kart: Ptr<Kart>, input: u32) {
 
 The code is still generated on the user's machine from their own ROM, and it still behaves exactly like the game.
 
+## Status (2026-10-27)
+| Package | State |
+|---|---|
+| 4A IR | Done. Prints today's code identically for all 12,736 functions |
+| 4A.2 Fibers | Done, **default** (`MKDS_FLAT=1` turns it off). Race identical to `main`; 401,332 SDK thread switches served |
+| 4B pass 1, dead flags | Done, **default** (`MKDS_EXACT=1` turns it off). Race identical |
+| 4B T1 raised functions | Done for **all 11,627 ARM9 functions** (0 rejected; ARM7 stays T0). Locals, folded temporaries, structured `if`/`loop`/`break`, folded compares (`if r6 == 0`), memory helpers (`R::st32`, `R::ld16s`), push/pop notes. Race identical (fibers and flat). `tests/t1_differential.rs` compares T1 with T0 on synthetic cases and on 300 ROM functions from 48 random states each. `MKDS_T1=off/all/<file>` for bisecting |
+| Names | Raised functions are named from the dictionary (`pub fn FS_GetPathName`), else `sub_<segment>_<address>`. `dictionary/game_names.csv`: 4,707 names from the mapping research and from notes; Codex is naming the rest from our notes (`dictionary/merge_names.py` checks every name for ROM text) |
+| Comments | Calls carry the callee's name; memory accesses carry the struct field the research found the function using (`// Kart.racer_index`, 2,712 sites); constants carry global names. Layout tables: `dictionary/fields.csv`, `field_uses.csv`, `globals.csv` (`export_layout.py`) |
+| 4C types (T2) | Not started: typed views (`kart.racer_index(m)`), typed arguments, `match` for switch tables |
+| ARM7 | T0 only (its budget is charged in cycles; T1 needs that cost model) |
+
+How exactness holds:
+- T1 pays the same budget at every original block start, and spills its locals before anything that reads `c.r`.
+- Any transfer that isn't to a fixed block of its own (a computed jump, a call that came back somewhere else, an
+  exception return) continues in the function's T0 translation. T0 stays registered for every block.
+- Dead flags may differ in saved thread contexts. They're never read, and the races are identical.
+
 ## Decision: stay with Rust
 C would be simpler in one way: C has `goto`, so any control flow can be written without first turning it into
 loops and `if`s. That isn't worth switching for:
