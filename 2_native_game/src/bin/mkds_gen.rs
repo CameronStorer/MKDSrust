@@ -1056,11 +1056,14 @@ fn run() -> Result<ExitCode, String> {
         // address-taken functions: an aligned word anywhere in the ARM9 program's images, or a
         // constant in its code, equal to the entry (Thumb bit either way)
         let mut taken: HashSet<u32> = HashSet::new();
+        // the values as stored (with the Thumb bit): which instruction set a pointer selects
+        let mut taken_exact: HashSet<u32> = HashSet::new();
         let mut words = |data: &[u8]| {
             for w in data.chunks_exact(4) {
-                let v = u32::from_le_bytes([w[0], w[1], w[2], w[3]]) & !1;
-                if entries.contains(&v) {
-                    taken.insert(v);
+                let v = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
+                if entries.contains(&(v & !1)) {
+                    taken.insert(v & !1);
+                    taken_exact.insert(v);
                 }
             }
         };
@@ -1072,11 +1075,12 @@ fn run() -> Result<ExitCode, String> {
             for v in raise::code_constants(f, Some(&img)) {
                 if entries.contains(&(v & !1)) {
                     taken.insert(v & !1);
+                    taken_exact.insert(v);
                 }
             }
         }
         let zero = || raise::FlagContext {
-            entry: owner.keys().map(|&b| (b, 0)).collect(),
+            entry: jobs.iter().flat_map(|j| j.1.blocks.iter().copied()).map(|b| (b, 0)).collect(),
             ret: entries.iter().map(|&e| (e, 0)).collect(),
             taken: taken.clone(),
             any_entry: 0,
@@ -1116,6 +1120,31 @@ fn run() -> Result<ExitCode, String> {
         }
         let kills = ctx.kills.clone();
         eprintln!("mkds_gen: {} of {} functions write all four flags before returning", kills.values().filter(|&&k| k == raise::NZCV).count(), kills.len());
+        // address-taken "functions" whose first instruction is conditional are data or code
+        // fragments read as functions (zero words decode as `andeq`): compiled code never starts a
+        // function by testing its caller's flags, and no computed call reaches them
+        let fragments: HashSet<u32> = jobs
+            .iter()
+            .filter(|(_, f, _, src)| {
+                // the ARM9 can't fetch instructions from DTCM
+                if (0x027E_0000..0x0280_0000).contains(&(f.entry & !1)) {
+                    return true;
+                }
+                let img = image(src);
+                // zero words (padding) decode as `andeq r0, r0, r0` / `movs r0, r0`
+                let a = f.entry & !1;
+                let zero = if f.entry & 1 != 0 { img.read16(a) == Some(0) } else { img.read32(a) == Some(0) };
+                zero || ir::lower_block(f, f.entry, Some(&img)).first().is_some_and(|i| i.cond != 14)
+            })
+            .map(|(_, f, _, _)| f.entry)
+            .collect();
+        // an entry a computed call can reach: address-taken, not a fragment, and in the
+        // instruction set a stored pointer selects when both decodes of the address are entries
+        let exact_entries: HashSet<u32> = jobs.iter().map(|j| j.1.entry).collect();
+        let callable = |e: u32| {
+            exact_entries.contains(&e) && taken.contains(&(e & !1)) && !fragments.contains(&e) && (!exact_entries.contains(&(e ^ 1)) || taken_exact.contains(&e))
+        };
+        eprintln!("mkds_gen: {} functions are data, padding or fragments (start with a conditional instruction or a zero word): not call targets", fragments.len());
         let mut rounds = 0;
         loop {
             raise::set_flag_context(Some(ctx.clone()));
@@ -1127,8 +1156,10 @@ fn run() -> Result<ExitCode, String> {
                 let (starts, calls, tails, restored) = raise::flag_facts(f, Some(&img));
                 next.restored |= restored;
                 let me = f.entry & !1;
+                // keyed by the exact address: a stray decode of the same bytes in the other
+                // instruction set is another block
                 for (b, v) in starts {
-                    *next.entry.get_mut(&(b & !1)).unwrap() |= v;
+                    *next.entry.entry(b).or_insert(0) |= v;
                 }
                 // returns of the code a call or jump reaches must keep `live`
                 // (a fixed address outside all known code can't return through our functions)
@@ -1137,6 +1168,14 @@ fn run() -> Result<ExitCode, String> {
                     None => next.any_ret |= live,
                 };
                 for (t, live) in calls {
+                    if let Some(tt) = t {
+                        if live != 0 && std::env::var_os("MKDS_RET_DEBUG").is_some() && ctx.any_ret == 0 && ctx.ret.values().all(|v| *v == 0) {
+                            eprintln!("ret_seed: round {rounds} {:#X} calls {tt:#X} leaving {live:#X} live", f.entry);
+                        }
+                    }
+                    if t.is_none() && live != 0 && ctx.any_ret == 0 && std::env::var_os("MKDS_ANYRET_DEBUG").is_some() {
+                        eprintln!("any_ret: round {rounds} {:#X} computed call leaves {live:#X} live (ret {:#X} restored {:#X} any_entry {:#X})", f.entry, ctx.ret[&me], ctx.restored, ctx.any_entry);
+                    }
                     needs(t, live, &mut next);
                 }
                 // a tail jump returns to this function's callers
@@ -1145,14 +1184,21 @@ fn run() -> Result<ExitCode, String> {
                     needs(Some(t), mine, &mut next);
                 }
             }
-            next.any_entry = next.entry.iter().filter(|(e, _)| taken.contains(e)).fold(ctx.any_entry, |a, (_, b)| a | b);
+            next.any_entry = next.entry.iter().filter(|(e, _)| callable(**e)).fold(ctx.any_entry, |a, (_, b)| a | b);
             next.any_ret |= ctx.any_ret;
             next.restored |= ctx.restored;
             for (k, v) in next.entry.iter_mut() {
-                *v |= ctx.entry[k];
+                *v |= ctx.entry.get(k).copied().unwrap_or(0);
             }
             for (k, v) in next.ret.iter_mut() {
                 *v |= ctx.ret[k];
+            }
+            if std::env::var_os("MKDS_ANYRET_DEBUG").is_some() {
+                for (e, v) in &next.entry {
+                    if *v != 0 && callable(*e) && ctx.entry.get(e).copied().unwrap_or(0) == 0 {
+                        eprintln!("entry_reads: round {rounds} {e:#X} {v:#X}");
+                    }
+                }
             }
             rounds += 1;
             if next == ctx {
@@ -1163,6 +1209,24 @@ fn run() -> Result<ExitCode, String> {
         raise::set_flag_context(Some(ctx.clone()));
         let free = ctx.ret.iter().filter(|(e, v)| (**v | if taken.contains(*e) { ctx.any_ret } else { 0 }) == 0).count();
         eprintln!("mkds_gen: flag facts in {rounds} rounds: {free}/{} functions return without live flags ({} address-taken; after computed calls {:#X}, after CPSR restores {:#X})", ctx.ret.len(), taken.len(), ctx.any_ret, ctx.restored);
+        if let Ok(a) = std::env::var("MKDS_FN_DEBUG") {
+            let a = u32::from_str_radix(a.trim_start_matches("0x"), 16).unwrap();
+            raise::set_flag_context(Some(ctx.clone()));
+            for &b in jobs.iter().filter(|j| j.1.entry & !1 == a).flat_map(|j| j.1.blocks.iter()) { eprintln!("entry fact {b:#X} = {:#X}", ctx.entry.get(&b).copied().unwrap_or(99)); }
+            for (_, f, _, src) in jobs.iter().filter(|j| j.1.entry & !1 == a) {
+                let img = image(src);
+                let sf = raise::flag_effects(f, Some(&img));
+                for &b in &f.blocks {
+                    for ins in ir::lower_block(f, b, Some(&img)) {
+                        eprintln!("{:#X} cond {}", ins.addr, ins.cond);
+                        for s in &ins.stmts {
+                            eprintln!("    {:?} -> {:?}", s, sf(s, ins.addr));
+                            if let ir::S::Call { target: ir::E::Const(t), .. } = s { eprintln!("      callee entry fact {:#X}", ctx.entry.get(t).copied().unwrap_or(99)); }
+                        }
+                    }
+                }
+            }
+        }
     }
     if raise() && std::env::var_os("MKDS_NO_T1").is_none() && LAYOUT.get().is_some() {
         for round in 0..TYPE_ROUNDS {
@@ -1191,6 +1255,7 @@ fn run() -> Result<ExitCode, String> {
     }
     if std::env::var_os("MKDS_FOLD_STATS").is_some() {
         eprintln!("mkds_gen: compare folding [no run, guarded, live after, live beyond cond, no form, folded] = {:?}", raise_emit::fold_stats());
+        eprintln!("mkds_gen: flags as locals [compares, made locals, folded away] = {:?}", raise_emit::flag_stats());
     }
     // the ARM7 program keeps the per-function rule
     raise::set_flag_context(None);

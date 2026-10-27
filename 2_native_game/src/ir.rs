@@ -27,6 +27,18 @@ pub enum Tmp {
     H,
     Target,
     Old,
+    /// T1 flag locals (function-wide, assigned rather than bound): a compare's operands, and a
+    /// flag-setting result.
+    Fa,
+    Fb,
+    Fz,
+}
+
+impl Tmp {
+    /// Assigned to a function-wide local (`fa = ...`) instead of bound with `let`.
+    pub fn is_local(self) -> bool {
+        matches!(self, Tmp::Fa | Tmp::Fb | Tmp::Fz)
+    }
 }
 
 impl Tmp {
@@ -44,6 +56,9 @@ impl Tmp {
             Tmp::H => "h",
             Tmp::Target => "target",
             Tmp::Old => "old",
+            Tmp::Fa => "fa",
+            Tmp::Fb => "fb",
+            Tmp::Fz => "fz",
         }
     }
 }
@@ -969,7 +984,7 @@ fn expr(out: &mut String, e: &E) {
 fn stmt(out: &mut String, s: &S) {
     match s {
         S::Let(t, e) => {
-            let _ = write!(out, "let {} = ", t.name());
+            let _ = write!(out, "{}{} = ", if t.is_local() { "" } else { "let " }, t.name());
             expr(out, e);
             out.push(';');
         }

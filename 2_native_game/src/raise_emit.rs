@@ -43,6 +43,8 @@ struct Ctx<'a> {
     notes: &'a Notes<'a>,
     /// Block -> the cases of the compiled switch ending it.
     switches: &'a BTreeMap<u32, Vec<u32>>,
+    /// Block start -> the flag writes a slice end there needs (flags held in locals).
+    budget_flags: BTreeMap<u32, Vec<S>>,
 }
 
 /// Needs the locals written to `c.r` first (and read back after): the helper uses `c.r` itself.
@@ -296,6 +298,451 @@ fn join_runs(insts: &mut [ir::Ins]) {
         }
         j += 1;
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Flags as locals.
+//
+// A compare (`R::subs(c, a, b)`, `R::adds(c, a, b)`, `R::set_nz(c, v)`) whose flags are only read
+// by conditions it fits becomes an assignment to function-wide locals (`fa = a; fb = b;` or
+// `fz = v;`), and its readers become expressions (`if fa == fb`, or `if r0 == 0x13` when the
+// compare is in the same block and its operands are unchanged). Exactness: wherever code outside
+// the raised function could see the CPU flags while such a compare is the current flag value (a
+// slice end at a block start, a call, an exit, a helper reading flags), the flags are written to
+// `c` from the locals first. A compare whose flags can meet a flag value written another way is
+// left as it is; the analysis drops those compares and repeats until it is consistent.
+// ---------------------------------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum FKind {
+    Sub,
+    Add,
+    Nz,
+}
+
+const UNK: usize = usize::MAX;
+const FLAGS: [u8; 4] = [crate::raise::N, crate::raise::Z, crate::raise::C, crate::raise::V];
+type Reach = [BTreeSet<usize>; 4];
+
+struct FDef {
+    b: u32,
+    i: usize,
+    s: usize,
+    kind: FKind,
+    ops: Vec<E>,
+}
+
+fn fdef_kind(s: &S) -> Option<(FKind, Vec<E>)> {
+    match s {
+        S::Do(E::Call(H::Subs, a)) if a.len() == 3 => Some((FKind::Sub, vec![a[1].clone(), a[2].clone()])),
+        S::Do(E::Call(H::Adds, a)) if a.len() == 3 => Some((FKind::Add, vec![a[1].clone(), a[2].clone()])),
+        S::SetNz(v) => Some((FKind::Nz, vec![v.clone()])),
+        _ => None,
+    }
+}
+
+fn fkind_mask(k: FKind) -> u8 {
+    match k {
+        FKind::Nz => crate::raise::N | crate::raise::Z,
+        _ => crate::raise::NZCV,
+    }
+}
+
+fn ftmp(t: ir::Tmp) -> E {
+    E::Tmp(t)
+}
+
+/// The compare a kind of def stands for, over the given operands.
+fn fcompare(k: FKind, ops: &[E]) -> S {
+    match k {
+        FKind::Sub => S::Do(E::Call(H::Subs, vec![E::CpuArg, ops[0].clone(), ops[1].clone()])),
+        FKind::Add => S::Do(E::Call(H::Adds, vec![E::CpuArg, ops[0].clone(), ops[1].clone()])),
+        FKind::Nz => S::SetNz(ops[0].clone()),
+    }
+}
+
+fn flocals(k: FKind) -> Vec<E> {
+    match k {
+        FKind::Nz => vec![ftmp(ir::Tmp::Fz)],
+        _ => vec![ftmp(ir::Tmp::Fa), ftmp(ir::Tmp::Fb)],
+    }
+}
+
+fn has_tmp(e: &E) -> bool {
+    match e {
+        E::Tmp(_) => true,
+        E::Bin(_, a, b) | E::Cmp(_, _, a, b) => has_tmp(a) || has_tmp(b),
+        E::Not(a) | E::Shl(a, _) | E::Lsr(a, _) | E::Asr(a, _) | E::Ror(a, _) | E::Rrx(a) | E::Bit(a, _) | E::Msb(a) | E::Lsb(a) | E::BoolU32(a) | E::Clz(a) | E::Iw(a) => has_tmp(a),
+        E::Load { addr, .. } => has_tmp(addr),
+        E::Call(_, a) => a.iter().any(has_tmp),
+        _ => false,
+    }
+}
+
+/// Changes registers in ways [`regs_s`] doesn't list (helpers that write `c.r`).
+fn clobbers_regs(s: &S) -> bool {
+    matches!(s, S::Call { .. } | S::IfSome(..)) || matches!(s, S::Do(e) | S::SetReg(_, e) if syncs(e))
+}
+
+/// Leaves the raised code or hands the CPU state to other code (which may read `c`'s flags).
+fn fpoint(s: &S, internal: &dyn Fn(u32) -> bool) -> bool {
+    match s {
+        S::Goto(E::Const(t)) => !internal(*t),
+        S::Goto(_) | S::Call { .. } | S::IfSome(..) | S::ExcReturn(_) => true,
+        _ => false,
+    }
+}
+
+/// Function-wide flag locals. Returns, per block start, the flag writes its slice end needs, and
+/// whether `fa`/`fb` and `fz` are used.
+fn flags_to_locals(
+    blocks: &mut BTreeMap<u32, Block>,
+    entry: u32,
+    live_after: &BTreeMap<u32, u8>,
+    live_in0: &BTreeMap<u32, u8>,
+    sf: &dyn Fn(&S, u32) -> (u8, u8),
+) -> (BTreeMap<u32, Vec<S>>, bool, bool) {
+    let thumb = entry & 1;
+    let keys: Vec<u32> = blocks.keys().copied().collect();
+    let internal = |t: u32| blocks.contains_key(&((t & !1) | thumb));
+    // candidate compares
+    let mut defs: Vec<FDef> = Vec::new();
+    let mut at: HashMap<(u32, usize, usize), usize> = HashMap::new();
+    for (&b, blk) in blocks.iter() {
+        for (i, ins) in blk.insts.iter().enumerate() {
+            for (si, s) in ins.stmts.iter().enumerate() {
+                if let Some((kind, ops)) = fdef_kind(s) {
+                    at.insert((b, i, si), defs.len());
+                    defs.push(FDef { b, i, s: si, kind, ops });
+                }
+            }
+        }
+    }
+    if defs.is_empty() {
+        return Default::default();
+    }
+    // flags live before each statement (and before each instruction's condition)
+    let mut live_stmt: HashMap<(u32, usize), Vec<u8>> = HashMap::new();
+    let mut live_ins: HashMap<(u32, usize), u8> = HashMap::new();
+    let mut live_start: BTreeMap<u32, u8> = BTreeMap::new();
+    for (&b, blk) in blocks.iter() {
+        let last = blk.insts.last().map(|i| i.addr).unwrap_or(b);
+        let mut live = live_after.get(&last).copied().unwrap_or(crate::raise::NZCV);
+        for (i, ins) in blk.insts.iter().enumerate().rev() {
+            let after = live;
+            let mut v = vec![0u8; ins.stmts.len()];
+            let mut inner = live;
+            let mut sc_dead = true;
+            for (si, s) in ins.stmts.iter().enumerate().rev() {
+                inner = crate::raise::live_step(s, inner, sf(s, ins.addr), &mut sc_dead);
+                v[si] = inner;
+            }
+            live = if ins.cond == 14 && ins.guard.is_none() {
+                inner
+            } else if ins.guard.is_some() {
+                inner | after
+            } else {
+                inner | after | crate::raise::cond_reads(ins.cond)
+            };
+            live_stmt.insert((b, i), v);
+            live_ins.insert((b, i), live);
+        }
+        live_start.insert(b, live | live_in0.get(&b).copied().unwrap_or(crate::raise::NZCV));
+    }
+    let end_live = |b: u32| -> u8 {
+        let blk = &blocks[&b];
+        let last = blk.insts.last().map(|i| i.addr).unwrap_or(b);
+        live_after.get(&last).copied().unwrap_or(crate::raise::NZCV)
+    };
+    let mut preds: BTreeMap<u32, Vec<u32>> = keys.iter().map(|&b| (b, Vec::new())).collect();
+    for (&b, blk) in blocks.iter() {
+        for s in &blk.succ {
+            if let Some(p) = preds.get_mut(s) {
+                p.push(b);
+            }
+        }
+    }
+    let may_write = |s: &S, a: u32| -> u8 {
+        if matches!(s, S::Call { .. } | S::IfSome(..) | S::ExcReturn(_)) {
+            crate::raise::NZCV
+        } else {
+            sf(s, a).1
+        }
+    };
+    let mut conv: BTreeSet<usize> = (0..defs.len()).collect();
+    loop {
+        // reaching flag values (forward)
+        let step = |st: &mut Reach, b: u32, i: usize, si: usize, s: &S, addr: u32, conv: &BTreeSet<usize>| {
+            if let Some(&d) = at.get(&(b, i, si)) {
+                if conv.contains(&d) {
+                    let m = fkind_mask(defs[d].kind);
+                    for (k, &f) in FLAGS.iter().enumerate() {
+                        if m & f != 0 {
+                            st[k] = BTreeSet::from([d]);
+                        }
+                    }
+                    return;
+                }
+            }
+            let w = may_write(s, addr);
+            for (k, &f) in FLAGS.iter().enumerate() {
+                if w & f != 0 {
+                    st[k] = BTreeSet::from([UNK]);
+                }
+            }
+        };
+        let ins_out = |st_in: &Reach, b: u32, i: usize, ins: &ir::Ins, conv: &BTreeSet<usize>| -> Reach {
+            let mut st = st_in.clone();
+            for (si, s) in ins.stmts.iter().enumerate() {
+                step(&mut st, b, i, si, s, ins.addr, conv);
+            }
+            if ins.cond != 14 || ins.guard.is_some() {
+                for k in 0..4 {
+                    st[k].extend(st_in[k].iter().copied());
+                }
+            }
+            st
+        };
+        let mut inn: BTreeMap<u32, Reach> = keys.iter().map(|&b| (b, Default::default())).collect();
+        inn.insert(entry, std::array::from_fn(|_| BTreeSet::from([UNK])));
+        let mut outs: BTreeMap<u32, Reach> = BTreeMap::new();
+        loop {
+            let mut changed = false;
+            for &b in &keys {
+                let mut st: Reach = if b == entry { std::array::from_fn(|_| BTreeSet::from([UNK])) } else { Default::default() };
+                for p in &preds[&b] {
+                    if let Some(o) = outs.get(p) {
+                        for k in 0..4 {
+                            st[k].extend(o[k].iter().copied());
+                        }
+                    }
+                }
+                inn.insert(b, st.clone());
+                for (i, ins) in blocks[&b].insts.iter().enumerate() {
+                    st = ins_out(&st, b, i, ins, &conv);
+                }
+                if outs.get(&b) != Some(&st) {
+                    outs.insert(b, st);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        // check every reader and every point where `c` must hold the flags
+        let mut demote: BTreeSet<usize> = BTreeSet::new();
+        let mut readers: Vec<(u32, usize, Vec<usize>)> = Vec::new();
+        let mut mats: Vec<(u32, usize, usize, Vec<S>, Vec<usize>)> = Vec::new(); // block, ins (usize::MAX = start, len = end), stmt
+        let point = |st: &Reach, live: u8, demote: &mut BTreeSet<usize>| -> Option<(Vec<S>, Vec<usize>)> {
+            let mut big: BTreeSet<FKind> = BTreeSet::new();
+            let (mut nz, mut unk) = (false, false);
+            let mut used = Vec::new();
+            let mut bad = false;
+            for (k, &f) in FLAGS.iter().enumerate() {
+                if live & f == 0 {
+                    continue;
+                }
+                let set = &st[k];
+                let cs: Vec<usize> = set.iter().copied().filter(|&d| d != UNK).collect();
+                if cs.is_empty() {
+                    unk = true;
+                    continue;
+                }
+                if set.contains(&UNK) {
+                    bad = true;
+                }
+                let kinds: BTreeSet<FKind> = cs.iter().map(|&d| defs[d].kind).collect();
+                if kinds.len() > 1 {
+                    bad = true;
+                }
+                for kd in kinds {
+                    if kd == FKind::Nz {
+                        nz = true;
+                    } else {
+                        big.insert(kd);
+                    }
+                }
+                used.extend(cs);
+            }
+            if big.len() > 1 || (!big.is_empty() && unk) {
+                bad = true;
+            }
+            if bad {
+                demote.extend(used);
+                return None;
+            }
+            if used.is_empty() {
+                return None;
+            }
+            let mut out = Vec::new();
+            if let Some(&kd) = big.iter().next() {
+                out.push(fcompare(kd, &flocals(kd)));
+            }
+            if nz {
+                out.push(fcompare(FKind::Nz, &flocals(FKind::Nz)));
+            }
+            Some((out, used))
+        };
+        for &b in &keys {
+            let mut st = inn[&b].clone();
+            if let Some((m, used)) = point(&st, live_start[&b], &mut demote) {
+                mats.push((b, usize::MAX, 0, m, used));
+            }
+            let n = blocks[&b].insts.len();
+            for i in 0..n {
+                let ins = &blocks[&b].insts[i];
+                let st_in = st.clone();
+                if ins.cond != 14 && ins.guard.is_none() {
+                    let rd = crate::raise::cond_reads(ins.cond);
+                    let mut set = BTreeSet::new();
+                    for (k, &f) in FLAGS.iter().enumerate() {
+                        if rd & f != 0 {
+                            set.extend(st[k].iter().copied());
+                        }
+                    }
+                    let cs: Vec<usize> = set.iter().copied().filter(|&d| d != UNK).collect();
+                    if !cs.is_empty() {
+                        let kinds: BTreeSet<FKind> = cs.iter().map(|&d| defs[d].kind).collect();
+                        let ok = !set.contains(&UNK)
+                            && kinds.len() == 1
+                            && fold_cond(&[fcompare(defs[cs[0]].kind, &flocals(defs[cs[0]].kind))], ins.cond).is_some();
+                        if ok {
+                            readers.push((b, i, cs));
+                        } else {
+                            demote.extend(cs);
+                        }
+                    }
+                }
+                let lv = &live_stmt[&(b, i)];
+                for (si, s) in ins.stmts.iter().enumerate() {
+                    let (r, _) = sf(s, ins.addr);
+                    if r != 0 || fpoint(s, &internal) {
+                        if let Some((m, used)) = point(&st, lv[si], &mut demote) {
+                            mats.push((b, i, si, m, used));
+                        }
+                    }
+                    step(&mut st, b, i, si, s, ins.addr, &conv);
+                }
+                if ins.cond != 14 || ins.guard.is_some() {
+                    for k in 0..4 {
+                        st[k].extend(st_in[k].iter().copied());
+                    }
+                }
+            }
+            if let Some(t) = blocks[&b].falls_to {
+                if !internal(t) {
+                    if let Some((m, used)) = point(&st, end_live(b), &mut demote) {
+                        mats.push((b, n, 0, m, used));
+                    }
+                }
+            }
+        }
+        let demote: BTreeSet<usize> = demote.intersection(&conv).copied().collect();
+        if !demote.is_empty() {
+            conv = conv.difference(&demote).copied().collect();
+            continue;
+        }
+        // consistent: rewrite. Readers first (they may read the original operands)
+        let mut needed: BTreeSet<usize> = BTreeSet::new();
+        for (_, _, _, _, used) in &mats {
+            needed.extend(used.iter().copied());
+        }
+        let mut guards: Vec<(u32, usize, E)> = Vec::new();
+        for (b, i, cs) in &readers {
+            let cc = blocks[b].insts[*i].cond;
+            let d = &defs[cs[0]];
+            // the operands themselves, when this is the only compare reaching and nothing in
+            // between changes them
+            let mut direct = None;
+            if cs.len() == 1 && d.b == *b && d.i < *i && d.ops.iter().all(|e| ir::is_pure(e) && !has_tmp(e)) {
+                let mut read = BTreeSet::new();
+                d.ops.iter().for_each(|e| regs_e(e, &mut read));
+                let insts = &blocks[b].insts;
+                let mut clean = true;
+                for (k, ins) in insts.iter().enumerate().take(*i).skip(d.i) {
+                    let from = if k == d.i { d.s + 1 } else { 0 };
+                    for s in &ins.stmts[from..] {
+                        let (mut r, mut w) = (BTreeSet::new(), BTreeSet::new());
+                        regs_s(s, &mut r, &mut w);
+                        if clobbers_regs(s) || w.iter().any(|x| read.contains(x)) {
+                            clean = false;
+                        }
+                    }
+                }
+                if clean {
+                    direct = fold_cond(&[fcompare(d.kind, &d.ops)], cc);
+                }
+            }
+            let g = match direct {
+                Some(g) => g,
+                None => {
+                    needed.extend(cs.iter().copied());
+                    fold_cond(&[fcompare(d.kind, &flocals(d.kind))], cc).unwrap()
+                }
+            };
+            guards.push((*b, *i, g));
+        }
+        for (b, i, g) in guards {
+            blocks.get_mut(&b).unwrap().insts[i].guard = Some(g);
+        }
+        // statement inserts and replacements, from the back of each instruction
+        let mut edits: BTreeMap<(u32, usize), Vec<(usize, Vec<S>, bool)>> = BTreeMap::new(); // stmt index, new stmts, replaces
+        for &d in &conv {
+            let df = &defs[d];
+            let new = if needed.contains(&d) {
+                let locs = flocals(df.kind);
+                locs.iter().zip(&df.ops).map(|(l, e)| match l {
+                    E::Tmp(t) => S::Let(*t, e.clone()),
+                    _ => unreachable!(),
+                }).collect()
+            } else {
+                // its value is never used: keep only what the operands do
+                df.ops.iter().filter(|e| !ir::is_pure(e)).map(|e| S::Do(e.clone())).collect()
+            };
+            edits.entry((df.b, df.i)).or_default().push((df.s, new, true));
+        }
+        let mut budget: BTreeMap<u32, Vec<S>> = BTreeMap::new();
+        let mut tails: Vec<(u32, Vec<S>)> = Vec::new();
+        for (b, i, si, m, _) in mats {
+            if i == usize::MAX {
+                budget.insert(b, m);
+            } else if i == blocks[&b].insts.len() {
+                tails.push((b, m));
+            } else {
+                edits.entry((b, i)).or_default().push((si, m, false));
+            }
+        }
+        for ((b, i), mut list) in edits {
+            // replacements after inserts at the same index; highest index first
+            list.sort_by(|x, y| y.0.cmp(&x.0).then(y.2.cmp(&x.2)));
+            let stmts = &mut blocks.get_mut(&b).unwrap().insts[i].stmts;
+            for (si, new, replaces) in list {
+                if replaces {
+                    stmts.splice(si..si + 1, new);
+                } else {
+                    stmts.splice(si..si, new);
+                }
+            }
+        }
+        for (b, m) in tails {
+            let blk = blocks.get_mut(&b).unwrap();
+            let addr = blk.insts.last().map(|i| i.addr).unwrap_or(b);
+            blk.insts.push(ir::Ins { addr, cond: 14, stmts: m, guard: None });
+        }
+        let ab = conv.iter().any(|&d| needed.contains(&d) && defs[d].kind != FKind::Nz);
+        let z = conv.iter().any(|&d| needed.contains(&d) && defs[d].kind == FKind::Nz);
+        FLAG_STATS[0].fetch_add(defs.len(), std::sync::atomic::Ordering::Relaxed);
+        FLAG_STATS[1].fetch_add(conv.len(), std::sync::atomic::Ordering::Relaxed);
+        FLAG_STATS[2].fetch_add(conv.iter().filter(|d| !needed.contains(d)).count(), std::sync::atomic::Ordering::Relaxed);
+        return (budget, ab, z);
+    }
+}
+
+static FLAG_STATS: [std::sync::atomic::AtomicUsize; 3] = [const { std::sync::atomic::AtomicUsize::new(0) }; 3];
+/// Flags-as-locals so far: compares seen, made locals, folded away entirely.
+pub fn flag_stats() -> [usize; 3] {
+    std::array::from_fn(|i| FLAG_STATS[i].load(std::sync::atomic::Ordering::Relaxed))
 }
 
 /// `{r4, r5, lr}` for a register list.
@@ -801,7 +1248,7 @@ pub type Cost<'a> = Option<&'a dyn Fn(&crate::arm::Decoded, bool) -> u32>;
 /// [`emit_t1_annotated`] with the translation's budget cost model.
 pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost: Cost) -> Result<String, Reason> {
     let names = notes.call;
-    let live = crate::raise::flag_liveness(f, img);
+    let (live, live_in0) = crate::raise::flag_liveness_blocks(f, img);
     // blocks reachable from the entry through internal edges
     let mut blocks: BTreeMap<u32, Block> = BTreeMap::new();
     let mut switches: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
@@ -868,6 +1315,12 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
         };
         blocks.insert(b, Block { start: b, insts, succ, falls_to, charge });
     }
+    let sf = crate::raise::flag_effects(f, img);
+    let (budget_flags, use_fab, use_fz) = if std::env::var_os("MKDS_FLAG_LOCALS_OFF").is_some() {
+        Default::default()
+    } else {
+        flags_to_locals(&mut blocks, f.entry, &live, &live_in0, &sf)
+    };
     // reverse postorder
     let mut order = Vec::new();
     let mut seen = BTreeSet::new();
@@ -976,7 +1429,7 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
         Some(n) => format!("r{r} = `{n}` (a `{st}`)"),
         None => format!("r{r} points to a `{st}`"),
     }).collect();
-    let ctx = Ctx { blocks: &blocks, rpo, idom, merge, header, children, names, notes, switches: &switches, fields: typed.fields };
+    let ctx = Ctx { blocks: &blocks, rpo, idom, merge, header, children, names, notes, switches: &switches, fields: typed.fields, budget_flags };
     ir::set_reg_names(reg_names);
     LAST_TYPES.with(|t| *t.borrow_mut() = (typed.args.clone(), typed.calls.clone()));
     ir::take_field_uses();
@@ -997,6 +1450,17 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
         let loads: Vec<String> = all.iter().map(|&i| format!("c.r[{i}]")).collect();
         let _ = writeln!(s, "    let ({}) = ({});", names.iter().map(|n| format!("mut {n}")).collect::<Vec<_>>().join(", "), loads.join(", "));
     }
+    if use_fab || use_fz {
+        let mut v = Vec::new();
+        if use_fab {
+            v.push(("fa", "0u32"));
+            v.push(("fb", "0u32"));
+        }
+        if use_fz {
+            v.push(("fz", "0u32"));
+        }
+        let _ = writeln!(s, "    let ({}) = ({});", v.iter().map(|x| format!("mut {}", x.0)).collect::<Vec<_>>().join(", "), v.iter().map(|x| x.1).collect::<Vec<_>>().join(", "));
+    }
     let spill: String = written.iter().filter(|&&i| i < 15).map(|&i| format!("c.r[{i}] = {}; ", ir::reg_name(i))).collect();
     let reload: String = all.iter().map(|&i| format!("{} = c.r[{i}]; ", ir::reg_name(i))).collect();
     let _ = writeln!(s, "    macro_rules! spill {{ () => {{ {spill}}} }}");
@@ -1006,7 +1470,7 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
     let _ = writeln!(s, "    macro_rules! exit {{ ($e:expr) => {{{{ let t: u32 = $e; spill!(); return f_{id}(c, m, t); }}}} }}");
     // the same when `c.r` is already newer than the locals (after a call, a block load or a mode switch)
     let _ = writeln!(s, "    macro_rules! leave {{ ($e:expr) => {{{{ let t: u32 = $e; return f_{id}(c, m, t); }}}} }}");
-    let _ = writeln!(s, "    macro_rules! budget {{ ($pc:expr, $n:expr) => {{ if !R::spend(c, $n) {{ spill!(); if !m.slice_end(c, $pc, $n) {{ c.r[15] = $pc; return R::BUDGET_EXHAUSTED; }} reload!(); }} }} }}");
+    let _ = writeln!(s, "    macro_rules! budget {{ ($pc:expr, $n:expr) => {{ if !R::spend(c, $n) {{ spill!(); if !m.slice_end(c, $pc, $n) {{ c.r[15] = $pc; return R::BUDGET_EXHAUSTED; }} reload!(); }} }}; ($pc:expr, $n:expr, $f:block) => {{ if !R::spend(c, $n) {{ spill!(); $f if !m.slice_end(c, $pc, $n) {{ c.r[15] = $pc; return R::BUDGET_EXHAUSTED; }} reload!(); }} }} }}");
     s.push_str(&body);
     s.push_str("}\n");
     ir::set_reg_names(Default::default());
@@ -1066,7 +1530,14 @@ fn branch(c: &Ctx, x: u32, y: u32, depth: usize, out: &mut String) {
 fn block_code(c: &Ctx, x: u32, depth: usize, out: &mut String) {
     let b = &c.blocks[&x];
     indent(out, depth);
-    let _ = writeln!(out, "budget!({:#X}, {}); // {:#X}", b.start, b.charge, b.start & !1);
+    match c.budget_flags.get(&x) {
+        Some(fl) => {
+            let _ = writeln!(out, "budget!({:#X}, {}, {{ {} }}); // {:#X}", b.start, b.charge, ir::print_locals(fl).replace(char::from(10), " "), b.start & !1);
+        }
+        None => {
+            let _ = writeln!(out, "budget!({:#X}, {}); // {:#X}", b.start, b.charge, b.start & !1);
+        }
+    }
     for ins in &b.insts {
         let mut text = String::new();
         let inner = if ins.cond == 14 && ins.guard.is_none() { depth } else { depth + 1 };

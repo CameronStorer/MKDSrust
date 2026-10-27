@@ -97,7 +97,8 @@ pub fn stmt_flags(s: &S) -> (u8, u8) {
 /// come from analysing every function, so those keep their flags.
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct FlagContext {
-    /// Flags read before written from each block start of each function (without the Thumb bit).
+    /// Flags read before written from each block start of each function (exact address: Thumb
+    /// blocks have bit 0 set).
     pub entry: HashMap<u32, u8>,
     /// Flags code after some call to the function reads (its returns must keep them).
     pub ret: HashMap<u32, u8>,
@@ -146,7 +147,7 @@ impl Exits {
     }
     /// Flags read on entering code at `t` (another function's entry, else all).
     fn entry(&self, t: u32) -> u8 {
-        self.ctx.entry.get(&(t & !1)).copied().unwrap_or(NZCV)
+        self.ctx.entry.get(&t).copied().unwrap_or(NZCV)
     }
 }
 
@@ -183,15 +184,43 @@ fn stmt_flags_in(s: &S, x: Option<&Exits>, f: &Func, img: Option<&Image>, addr: 
     }
 }
 
+/// `(flags read, flags written)` of a statement of `f` under the current whole-program facts (the
+/// rule [`flag_liveness`] uses).
+pub fn flag_effects<'a>(f: &'a Func, img: Option<&'a Image>) -> impl Fn(&S, u32) -> (u8, u8) + 'a {
+    let x = Exits::new(f);
+    move |s, a| stmt_flags_in(s, x.as_ref(), f, img, a)
+}
+
+/// One backward liveness step over `s` (whose effects are `rw`): flags live before it. A flag
+/// write nothing reads is dropped ([`drop_dead_flags`]), so it neither writes nor reads; a
+/// register-specified shift reads the carry only to pass it to its own carry-out, so when that
+/// write is dropped (`sc_dead`) the shift doesn't read it either.
+pub fn live_step(s: &S, live: u8, rw: (u8, u8), sc_dead: &mut bool) -> u8 {
+    let (mut r, w) = rw;
+    match s {
+        S::SetFlag(f, e) if live & bit(*f) == 0 => {
+            let _ = e;
+            return live;
+        }
+        S::SetFlag(Flag::C, E::Tmp(ir::Tmp::Sc)) => *sc_dead = false,
+        S::SetNz(_) if live & (N | Z) == 0 => return live,
+        S::Let2(_, ir::Tmp::Sc, E::Call(H::ShiftReg, a)) if *sc_dead && a.last() == Some(&E::Flag(Flag::C)) => {
+            r &= !C | a[..a.len() - 1].iter().map(expr_reads).fold(0, |x, y| x | y);
+        }
+        _ => {}
+    }
+    (live & !w) | r
+}
+
 /// Flags live after each statement of a block's instructions, given the flags live at its end.
 /// Returns the flags live at the block's start.
 fn block_live_in(insts: &[Ins], live_out: u8, sf: &dyn Fn(&S, u32) -> (u8, u8)) -> u8 {
     let mut live = live_out;
     for ins in insts.iter().rev() {
         let mut inner = live;
+        let mut sc_dead = true;
         for s in ins.stmts.iter().rev() {
-            let (r, w) = sf(s, ins.addr);
-            inner = (inner & !w) | r;
+            inner = live_step(s, inner, sf(s, ins.addr), &mut sc_dead);
         }
         // a conditional instruction may not run: what was live after it stays live
         live = if ins.cond == 14 { inner } else { inner | live | cond_reads(ins.cond) };
@@ -304,9 +333,9 @@ pub fn flag_liveness_blocks(f: &Func, img: Option<&Image>) -> (BTreeMap<u32, u8>
         for ins in insts.iter().rev() {
             after.insert(ins.addr, live);
             let mut inner = live;
+            let mut sc_dead = true;
             for s in ins.stmts.iter().rev() {
-                let (r, w) = sf(s, ins.addr);
-                inner = (inner & !w) | r;
+                inner = live_step(s, inner, sf(s, ins.addr), &mut sc_dead);
             }
             live = if ins.cond == 14 { inner } else { inner | live | cond_reads(ins.cond) };
         }
@@ -499,7 +528,18 @@ pub fn drop_dead_flags(stmts: &mut Vec<S>, live_after: u8) {
     // walk backwards keeping the flags live between statements
     let mut live = live_after;
     let mut out: Vec<S> = Vec::with_capacity(stmts.len());
+    let mut sc_dead = true;
     for mut s in stmts.drain(..).rev() {
+        if let S::SetFlag(Flag::C, E::Tmp(ir::Tmp::Sc)) = &s {
+            if live & C != 0 {
+                sc_dead = false;
+            }
+        }
+        if let S::Let2(_, ir::Tmp::Sc, E::Call(H::ShiftReg, a)) = &mut s {
+            if sc_dead && a.last() == Some(&E::Flag(Flag::C)) {
+                *a.last_mut().unwrap() = E::Bool(false);
+            }
+        }
         let keep = match &mut s {
             S::SetNz(_) => live & (N | Z) != 0,
             S::SetFlag(f, _) => live & bit(*f) != 0,
