@@ -488,11 +488,11 @@ address,segment,name,kind,args,returns,status,confidence,notes
 0x0200FB28,arm9_main,OS_InitAlarm,sdk,,void,typed,likely,API-shaped signature; entry identity remains provisional.
 0x0200FB80,arm9_main,OSi_ArmAlarmTimer,sdk,,,named,likely,Library entry; identity and signature still need review.
 0x0200FC1C,arm9_main,os_initvalarm_0200fc1c,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x0200FC8C,arm9_main,OS_EnableIrq,sdk,,OSIntrMode,typed,likely,API-shaped signature; entry identity remains provisional.
-0x0200FCA0,arm9_main,OS_DisableIrq,sdk,,OSIntrMode,typed,verified,API-shaped signature; entry identity remains provisional.
-0x0200FCB4,arm9_main,OS_RestoreIrq,sdk,mode:OSIntrMode,OSIntrMode,typed,verified,API-shaped signature; entry identity remains provisional.
-0x0200FCCC,arm9_main,OS_DisableInterrupts,sdk,,OSIntrMode,typed,likely,API-shaped signature; entry identity remains provisional.
-0x0200FCE0,arm9_main,OS_RestoreInterrupts,sdk,mode:OSIntrMode,OSIntrMode,typed,likely,API-shaped signature; entry identity remains provisional.
+0x0200FC8C,arm9_main,OS_EnableInterrupts,sdk,,OSIntrMode,typed,likely,API-shaped signature; entry identity remains provisional.
+0x0200FCA0,arm9_main,OS_DisableInterrupts,sdk,,OSIntrMode,typed,verified,API-shaped signature; entry identity remains provisional.
+0x0200FCB4,arm9_main,OS_RestoreInterrupts,sdk,mode:OSIntrMode,OSIntrMode,typed,verified,API-shaped signature; entry identity remains provisional.
+0x0200FCCC,arm9_main,OS_DisableInterrupts_IrqAndFiq,sdk,,OSIntrMode,typed,likely,API-shaped signature; entry identity remains provisional.
+0x0200FCE0,arm9_main,OS_RestoreInterrupts_IrqAndFiq,sdk,mode:OSIntrMode,OSIntrMode,typed,likely,API-shaped signature; entry identity remains provisional.
 0x0200FCF8,arm9_main,OS_GetProcMode,sdk,,u32,typed,likely,API-shaped signature; entry identity remains provisional.
 0x0200FD04,arm9_main,OS_WaitForInterrupt,sdk,,void,typed,likely,API-shaped signature; entry identity remains provisional.
 0x0200FD10,arm9_main,mod4_helper_0200fd10,sdk,,,named,guess,Library entry; identity and signature still need review.
