@@ -1082,12 +1082,46 @@ fn run() -> Result<ExitCode, String> {
             any_entry: 0,
             any_ret: 0,
             restored: 0,
+            kills: HashMap::new(),
+            entered: HashSet::new(),
         };
         let mut ctx = zero();
+        // code other functions call or jump into below a function entry
+        raise::set_flag_context(Some(ctx.clone()));
+        for (_, f, _, src) in &jobs {
+            let img = image(src);
+            let (_, calls, tails, _) = raise::flag_facts(f, Some(&img));
+            for t in calls.into_iter().filter_map(|c| c.0).chain(tails) {
+                let t = t & !1;
+                if !entries.contains(&t) && owner.contains_key(&t) {
+                    ctx.entered.insert(t);
+                }
+            }
+        }
+        // what each function writes before every return: greatest fixed point from "all four"
+        ctx.kills = entries.iter().map(|&e| (e, raise::NZCV)).collect();
+        for _ in 0..32 {
+            raise::set_flag_context(Some(ctx.clone()));
+            let mut next = ctx.kills.clone();
+            for (_, f, _, src) in &jobs {
+                let img = image(src);
+                let k = raise::flag_kills(f, Some(&img));
+                let e = next.get_mut(&(f.entry & !1)).unwrap();
+                *e &= k;
+            }
+            if next == ctx.kills {
+                break;
+            }
+            ctx.kills = next;
+        }
+        let kills = ctx.kills.clone();
+        eprintln!("mkds_gen: {} of {} functions write all four flags before returning", kills.values().filter(|&&k| k == raise::NZCV).count(), kills.len());
         let mut rounds = 0;
         loop {
             raise::set_flag_context(Some(ctx.clone()));
             let mut next = zero();
+            next.kills = kills.clone();
+            next.entered = ctx.entered.clone();
             for (_, f, _, src) in &jobs {
                 let img = image(src);
                 let (starts, calls, tails, restored) = raise::flag_facts(f, Some(&img));
@@ -1154,6 +1188,9 @@ fn run() -> Result<ExitCode, String> {
     for (seg, f, id, src) in &jobs {
         let img = image(src);
         funcs.push(lifted9(seg.clone(), f, id.clone(), &img));
+    }
+    if std::env::var_os("MKDS_FOLD_STATS").is_some() {
+        eprintln!("mkds_gen: compare folding [no run, guarded, live after, live beyond cond, no form, folded] = {:?}", raise_emit::fold_stats());
     }
     // the ARM7 program keeps the per-function rule
     raise::set_flag_context(None);

@@ -112,6 +112,11 @@ pub struct FlagContext {
     /// Flags read after some MSR writes the CPSR flags from a register (restoring a value an
     /// MRS saved): every MRS keeps them.
     pub restored: u8,
+    /// Flags each function writes on every path before it returns (by entry): a call to it
+    /// leaves the caller's earlier flags dead.
+    pub kills: HashMap<u32, u8>,
+    /// Block starts other functions call or jump into (not at a function entry).
+    pub entered: std::collections::HashSet<u32>,
 }
 
 static CONTEXT: std::sync::RwLock<Option<std::sync::Arc<FlagContext>>> = std::sync::RwLock::new(None);
@@ -152,7 +157,7 @@ fn stmt_flags_in(s: &S, x: Option<&Exits>, f: &Func, img: Option<&Image>, addr: 
     let Some(x) = x else { return stmt_flags(s) };
     let block = |e: &E| matches!(e, E::Call(H::Block, _));
     match s {
-        S::Call { target: E::Const(t), .. } => (x.entry(*t), 0),
+        S::Call { target: E::Const(t), .. } => (x.entry(*t), x.ctx.kills.get(&(*t & !1)).copied().unwrap_or(0)),
         S::Call { .. } => (x.ctx.any_entry, 0),
         S::Goto(e @ E::Const(_)) => (expr_reads(e), 0),
         S::Goto(e) => {
@@ -372,6 +377,105 @@ pub fn flag_facts(f: &Func, img: Option<&Image>) -> (BTreeMap<u32, u8>, Vec<(Opt
         }
     }
     (live_in, calls, tails, restored)
+}
+
+/// The flags `f` writes on every path from its entry to a return, under the current
+/// [`FlagContext`] (callees' `kills` included). One step of the whole-program greatest fixed point:
+/// start every function at all four flags and repeat until nothing shrinks. Paths that leave
+/// other than by returning (exception returns, tail jumps, running off the end) count as writing
+/// nothing, except a tail jump to a known function, which adds what that one writes.
+pub fn flag_kills(f: &Func, img: Option<&Image>) -> u8 {
+    let Some(x) = Exits::new(f) else { return 0 };
+    let blocks: BTreeMap<u32, Vec<Ins>> = f.blocks.iter().map(|&b| (b, ir::lower_block(f, b, img))).collect();
+    // flags written on every path to each block start (must: intersection; unknown = all)
+    // (code entered from elsewhere starts with nothing written)
+    let mut at: BTreeMap<u32, u8> = blocks.keys().map(|&b| (b, if x.ctx.entered.contains(&(b & !1)) { 0 } else { NZCV })).collect();
+    at.insert(f.entry, 0);
+    let mut exits = NZCV;
+    for _ in 0..64 {
+        let mut changed = false;
+        exits = NZCV;
+        for (&b, insts) in &blocks {
+            let mut w = at[&b];
+            let mut falls = true;
+            for ins in insts {
+                let cond = ins.cond != 14 || ins.guard.is_some();
+                let before = w;
+                let mut wi = w;
+                for s in &ins.stmts {
+                    match s {
+                        S::Goto(E::Const(t)) => {
+                            let t = *t | (b & 1);
+                            if blocks.contains_key(&t) {
+                                let v = at[&t] & wi;
+                                if v != at[&t] {
+                                    at.insert(t, v);
+                                    changed = true;
+                                }
+                            } else {
+                                // a tail jump: what the target writes counts
+                                exits &= wi | x.ctx.kills.get(&(t & !1)).copied().unwrap_or(0);
+                            }
+                            if !cond {
+                                falls = false;
+                            }
+                        }
+                        S::Goto(_) => {
+                            let cases = img.map(|img| crate::lift::computed_targets(f, img, ins.addr)).unwrap_or_default();
+                            if cases.is_empty() {
+                                exits &= wi; // a return (or a computed jump away)
+                            }
+                            for c in cases {
+                                if let Some(&v0) = at.get(&c) {
+                                    if v0 & wi != v0 {
+                                        at.insert(c, v0 & wi);
+                                        changed = true;
+                                    }
+                                }
+                            }
+                            if !cond {
+                                falls = false;
+                            }
+                        }
+                        S::IfSome(..) => {
+                            exits &= wi;
+                            if !cond {
+                                falls = false;
+                            }
+                        }
+                        S::ExcReturn(_) => {
+                            exits = 0;
+                            if !cond {
+                                falls = false;
+                            }
+                        }
+                        _ => wi |= stmt_flags_in(s, Some(&x), f, img, ins.addr).1,
+                    }
+                }
+                // a conditional instruction may not run: only what was written before counts
+                w = if cond { before } else { wi };
+            }
+            if falls {
+                let last = insts.last().map(|i| i.addr).unwrap_or(b);
+                if let Some(d) = f.insts.get(&last) {
+                    let end = Func::next(last, d);
+                    match at.get(&end) {
+                        Some(&v0) => {
+                            if v0 & w != v0 {
+                                at.insert(end, v0 & w);
+                                changed = true;
+                            }
+                        }
+                        None => exits = 0,
+                    }
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    exits
 }
 
 /// The constants the function's code puts in registers (candidate code addresses).

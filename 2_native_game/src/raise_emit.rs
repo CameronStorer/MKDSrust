@@ -172,19 +172,71 @@ fn fold_compares(insts: &mut [ir::Ins], live: &BTreeMap<u32, u8>) {
         }
         // the readers: a run of instructions with the same condition, evaluated once
         let cc = insts[j].cond;
-        let Some(e) = cond_run(insts, j) else { continue };
-        if insts[j..=e].iter().any(|i| i.guard.is_some()) || live[&insts[e].addr] != 0 {
+        let Some(e) = cond_run(insts, j) else {
+            fold_stat(0);
+            continue;
+        };
+        if insts[j..=e].iter().any(|i| i.guard.is_some()) {
+            fold_stat(1);
+            continue;
+        }
+        // the opposite condition right after (`moveq` / `movne`): its own folded guard, when the
+        // first run can't change what the condition reads
+        let mut other = None;
+        if live[&insts[e].addr] != 0 && e + 1 < insts.len() && insts[e + 1].cond == (cc ^ 1) && insts[e + 1].guard.is_none() {
+            let calm = insts[j..=e].iter().all(|i| {
+                i.stmts.iter().all(|s| {
+                    let (mut r, mut w) = (BTreeSet::new(), BTreeSet::new());
+                    regs_s(s, &mut r, &mut w);
+                    crate::raise::stmt_flags(s).1 == 0 && !ends_run(s) && w.iter().all(|x| !read.contains(x))
+                })
+            });
+            if calm {
+                if let Some(e2) = cond_run(insts, e + 1) {
+                    if live[&insts[e2].addr] == 0 {
+                        other = Some(e2);
+                    }
+                }
+            }
+        }
+        if live[&insts[e].addr] != 0 && other.is_none() {
+            fold_stat(2);
             continue;
         }
         if live[&insts[k].addr] & !crate::raise::cond_reads(cc) != 0 {
+            fold_stat(3);
             continue;
         }
+        if fold_cond(&insts[k].stmts, cc).is_none() {
+            fold_stat(4);
+        } else {
+            fold_stat(5);
+        }
         if let Some(g) = fold_cond(&insts[k].stmts, cc) {
+            if let Some(e2) = other {
+                match fold_cond(&insts[k].stmts, cc ^ 1) {
+                    Some(g2) if ir::is_pure(&g) => {
+                        insts[e + 1].guard = Some(g2);
+                        join(insts, e + 1, e2);
+                    }
+                    _ => continue,
+                }
+            }
             insts[j].guard = Some(g);
             insts[k].stmts.clear();
             join(insts, j, e);
         }
     }
+}
+
+static FOLD_STATS: [std::sync::atomic::AtomicUsize; 6] = [const { std::sync::atomic::AtomicUsize::new(0) }; 6];
+fn fold_stat(i: usize) {
+    FOLD_STATS[i].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+/// Compare folding outcomes so far: no run, guarded, flags live after, flags live beyond the
+/// condition, no plain form, folded.
+pub fn fold_stats() -> [usize; 6] {
+    std::array::from_fn(|i| FOLD_STATS[i].load(std::sync::atomic::Ordering::Relaxed))
 }
 
 /// Ends a statement list's run of same-condition instructions: control leaves or the flags may
