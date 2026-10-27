@@ -39,6 +39,8 @@ struct Ctx<'a> {
     children: BTreeMap<u32, Vec<u32>>,
     names: &'a dyn Fn(u32) -> Option<String>,
     notes: &'a Notes<'a>,
+    /// Block -> the cases of the compiled switch ending it.
+    switches: &'a BTreeMap<u32, Vec<u32>>,
 }
 
 /// Needs the locals written to `c.r` first (and read back after): the helper uses `c.r` itself.
@@ -275,6 +277,7 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
     let live = crate::raise::flag_liveness(f, img);
     // blocks reachable from the entry through internal edges
     let mut blocks: BTreeMap<u32, Block> = BTreeMap::new();
+    let mut switches: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
     let mut work = vec![f.entry];
     while let Some(b) = work.pop() {
         if blocks.contains_key(&b) || !f.blocks.contains(&b) {
@@ -303,7 +306,18 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
                         }
                         falls &= !unconditional;
                     }
-                    S::Goto(_) | S::ExcReturn(_) => falls &= !unconditional,
+                    S::Goto(_) => {
+                        // a compiled switch: its table's cases become successors (`match`)
+                        if let Some(img) = img {
+                            let t = crate::lift::computed_targets(f, img, ins.addr);
+                            if !t.is_empty() {
+                                succ.extend(t.iter().copied());
+                                switches.insert(b, t);
+                            }
+                        }
+                        falls &= !unconditional;
+                    }
+                    S::ExcReturn(_) => falls &= !unconditional,
                     _ => {}
                 }
             }
@@ -314,7 +328,8 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
         if falls && f.blocks.contains(&next) {
             succ.push(next);
         }
-        succ.dedup();
+        let mut seen_s = BTreeSet::new();
+        succ.retain(|x| seen_s.insert(*x));
         work.extend(succ.iter().copied());
         let charge = match cost {
             None => insts.len() as u32,
@@ -426,7 +441,7 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
         }
     }
     let all: BTreeSet<u8> = used.union(&written).copied().filter(|&i| i < 15).collect();
-    let ctx = Ctx { blocks: &blocks, rpo, idom, merge, header, children, names, notes };
+    let ctx = Ctx { blocks: &blocks, rpo, idom, merge, header, children, names, notes, switches: &switches };
     let mut body = String::new();
     do_tree(&ctx, f.entry, 2, &mut body);
 
@@ -554,6 +569,18 @@ fn stmt_code(c: &Ctx, x: u32, s: &S, depth: usize, out: &mut String) {
     };
     match s {
         S::Goto(E::Const(t)) if c.rpo.contains_key(&((*t & !1) | thumb)) => branch(c, x, (*t & !1) | thumb, depth, out),
+        S::Goto(e) if c.switches.contains_key(&x) => {
+            line(out, &format!("match {} {{", ir::expr_locals(e)));
+            for &t in &c.switches[&x] {
+                indent(out, depth + 1);
+                let _ = writeln!(out, "{t:#X} => {{");
+                branch(c, x, t, depth + 2, out);
+                indent(out, depth + 1);
+                out.push_str("}\n");
+            }
+            line(out, "    t => exit!(t),");
+            line(out, "}");
+        }
         S::Goto(e) => line(out, &format!("exit!({});", ir::expr_locals(e))),
         S::ExcReturn(e) => {
             let v = ir::expr_locals(e);

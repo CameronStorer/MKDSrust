@@ -293,6 +293,33 @@ pub fn discover_seeded(img: &Image, entry: u32, extra: &[u32], inside: &dyn Fn(u
     Ok(Func { entry, insts, blocks: leaders, undecoded })
 }
 
+/// The known targets of the computed jump at `pc` in `f` (a compiled `switch`): the ARM branch
+/// table after `add pc, pc, rX, lsl #n`, or the Thumb halfword table of `ldrh` .. `bx`. Only
+/// block starts of `f` are returned; an empty list means the targets are not known.
+pub fn computed_targets(f: &Func, img: &Image, pc: u32) -> Vec<u32> {
+    let Some(d) = f.insts.get(&pc) else { return Vec::new() };
+    let mut out = Vec::new();
+    if is_switch_add(d) {
+        let mut q = pc.wrapping_add(8);
+        while let Some(e) = f.insts.get(&q) {
+            if e.cond == 14 && matches!(e.inst, Inst::B { .. }) && f.blocks.contains(&q) {
+                out.push(q);
+                q = q.wrapping_add(4);
+            } else {
+                break;
+            }
+        }
+        if out.is_empty() {
+            out = jump_run(img, pc.wrapping_add(8)).into_iter().take_while(|t| f.insts.contains_key(t)).collect();
+        }
+    } else if d.thumb && matches!(d.inst, Inst::Bx { link: false, .. }) {
+        out = thumb_switch_targets(img, &f.insts, pc);
+    }
+    let mut seen = BTreeSet::new();
+    out.retain(|t| f.blocks.contains(t) && seen.insert(*t));
+    out
+}
+
 /// Code addresses a function refers to (bit 0 = Thumb): direct call targets, branches that leave
 /// it (tail calls), and code pointers it materialises (literal-pool words and `adr`). Pointers are
 /// only candidates: [`discover_program`] keeps one when `is_code` accepts it and it lifts cleanly.
