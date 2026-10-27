@@ -48,6 +48,9 @@ pub fn ret(c: &Cpu) -> u32 {
 /// (`tests/native_sdk.rs`).
 mod sdk;
 
+/// Block 5.1: ROM-archive file reads from the in-memory ROM (`MKDS_HW_FS=native`).
+pub mod fs;
+
 /// Every native function (on trial until it passes the shadow checker), in no particular order.
 pub static NATIVE: &[Native] = &[
     Native { segment: "arm9_main", entry: 0x0200_fe74, name: "MATH_CountLeadingZeros", f: sdk::count_leading_zeros_block },
@@ -85,11 +88,21 @@ pub static VERIFIED: &[Native] = &[
 /// What a game or tool installs: [`VERIFIED`], or for diagnostics per `MKDS_NATIVES`: `off` = none (the
 /// exact translation everywhere), `all` = every [`NATIVE`] including those on trial.
 pub fn selected() -> &'static [Native] {
-    match std::env::var("MKDS_NATIVES").as_deref() {
+    let base = match std::env::var("MKDS_NATIVES").as_deref() {
         Ok("off") => &[],
         Ok("all") => NATIVE,
         _ => VERIFIED,
+    };
+    if !fs::enabled() {
+        return base;
     }
+    // Block 5 hardware services (`MKDS_HW_<UNIT>=native`) come on top of the selection.
+    let all: Vec<Native> = base
+        .iter()
+        .chain(fs::NATIVES)
+        .map(|n| Native { segment: n.segment, entry: n.entry, name: n.name, f: n.f })
+        .collect();
+    Box::leak(all.into_boxed_slice())
 }
 
 #[cfg(test)]

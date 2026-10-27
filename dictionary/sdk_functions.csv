@@ -55,7 +55,7 @@ address,segment,name,kind,args,returns,status,confidence,notes
 0x020009E0,arm9_main,crt0_autoload_copy_mi_autoload_init_020009e0,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02000A5C,arm9_main,cp15_setup_osi_initcp15_crt0_part_02000a5c,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02003000,arm9_main,fs_main_entry_0x02003000_calls__02003000,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x02003024,arm9_main,fs_fsi_archive_command_executor_runs_an_02003024,sdk,,,named,guess,Library entry; identity and signature still need review.
+0x02003024,arm9_main,FSi_TranslateCommand,sdk,,,named,likely,"Runs one FS command: the archive proc when its mask has the command, else (result 7) the default command table; a result other than 6 (async) completes the command in place."
 0x020031A0,arm9_main,FSi_ReturnResult,sdk,,,named,likely,Library entry; identity and signature still need review.
 0x02003204,arm9_main,fs_fs_default_archive_callback_stub_returns_02003204,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0200320C,arm9_main,fs_fs_directory_iterator_resets_current_position_0200320c,sdk,,,named,guess,Library entry; identity and signature still need review.
@@ -64,8 +64,8 @@ address,segment,name,kind,args,returns,status,confidence,notes
 0x02003670,arm9_main,fs_fs_path_resolver_walks_a_path_02003670,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0200388C,arm9_main,fs_fs_reads_one_fnt_entry_name_0200388c,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0200399C,arm9_main,fs_fs_reads_one_8_byte_fat_0200399c,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x02003A34,arm9_main,fs_fs_archive_write_callback_dispatch_vtable_02003a34,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x02003A6C,arm9_main,fs_fs_archive_read_callback_dispatch_vtable_02003a6c,sdk,,,named,guess,Library entry; identity and signature still need review.
+0x02003A34,arm9_main,FSi_WriteFileCommand,sdk,,,named,likely,"Default WRITEFILE command: advances the file position, then calls the archive write callback (archive +0x4C)."
+0x02003A6C,arm9_main,FSi_ReadFileCommand,sdk,,,named,likely,"Default READFILE command: advances the file position (FSFile +0x2C) by the length, then calls the archive read callback (archive +0x48) with (archive, dst, old position, length)."
 0x02003AA4,arm9_main,fs_fs_seek_to_directory_marks_the_02003aa4,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02003AD8,arm9_main,FS_ReadFNTData,sdk,,,named,likely,Library entry; identity and signature still need review.
 0x02003B7C,arm9_main,fs_case_insensitive_memory_compare_fs_name_02003b7c,sdk,,,named,guess,Library entry; identity and signature still need review.
@@ -85,9 +85,9 @@ address,segment,name,kind,args,returns,status,confidence,notes
 0x0200442C,arm9_main,FSi_ExecuteSyncCommand,sdk,,,named,likely,Library entry; identity and signature still need review.
 0x02004474,arm9_main,FSi_NextCommand,sdk,,,named,likely,Library entry; identity and signature still need review.
 0x02004518,arm9_main,FSi_PopCommand,sdk,,,named,likely,Library entry; identity and signature still need review.
-0x02004710,arm9_main,fs_fs_memory_archive_read_copies_a4_02004710,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x02004734,arm9_main,fs_fs_rom_archive_read_callback_copies_02004734,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x02004760,arm9_main,fs_fs_write_callback_copies_bytes_from_02004760,sdk,,,named,guess,Library entry; identity and signature still need review.
+0x02004710,arm9_main,FSi_ReadMemoryCore,sdk,,,named,guess,Memory-table read: copies bytes from a memory address (tables loaded by FS_LoadArchiveTables).
+0x02004734,arm9_main,FSi_ReadMemCallback,sdk,,,named,likely,Default archive read callback: copies from archive base + offset; returns 0 (synchronous).
+0x02004760,arm9_main,FSi_WriteMemCallback,sdk,,,named,likely,Default archive write callback: copies into archive base + offset; returns 0.
 0x02004788,arm9_main,fs_packs_up_to_3_characters_of_02004788,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x020047EC,arm9_main,FS_SetCurrentDirectory,sdk,path:*const char,BOOL,typed,likely,API-shaped signature; entry identity remains provisional.
 0x02004840,arm9_main,FS_SeekFile,sdk,"file:*FSFile, offset:i32, origin:FSSeekFileMode",BOOL,typed,likely,API-shaped signature; entry identity remains provisional.
@@ -107,12 +107,12 @@ address,segment,name,kind,args,returns,status,confidence,notes
 0x02004DC0,arm9_main,FS_Init,sdk,dma:u32,void,typed,likely,API-shaped signature; entry identity remains provisional.
 0x02004DFC,arm9_main,FS_LoadTables,sdk,,,named,likely,Library entry; identity and signature still need review.
 0x02004E1C,arm9_main,fs_init_2_02004e1c,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x02004FBC,arm9_main,fs_rom_archive_callback_returns_constant_4_02004fbc,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x02004FC4,arm9_main,fs_rom_archive_callback_returns_constant_1_02004fc4,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x02004FCC,arm9_main,fs_rom_archive_command_handler_command_1_02004fcc,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x0200505C,arm9_main,fs_rom_archive_callback_returns_constant_1_2_0200505c,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x02005064,arm9_main,fs_rom_archive_read_callback_starts_a_02005064,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x020050B0,arm9_main,fs_returnresult_2_020050b0,sdk,,,named,guess,Library entry; identity and signature still need review.
+0x02004FBC,arm9_main,FSi_EmptyArchiveProc,sdk,,,named,likely,Proc of the ROM archive when no card DMA is configured: returns 4 (unsupported).
+0x02004FC4,arm9_main,FSi_ReadDummyCallback,sdk,,,named,likely,Read callback of the empty ROM archive: returns 1 (failure).
+0x02004FCC,arm9_main,FSi_RomArchiveProc,sdk,,,named,likely,"ROM archive proc: WRITEFILE (1) unsupported, ACTIVATE (9) CARD_LockRom, IDLE (10) CARD_UnlockRom, others 8 (use the default command)."
+0x0200505C,arm9_main,FSi_WriteDummyCallback,sdk,,,named,likely,"Write callback of the ROM archive: returns 1 (failure, the card is read-only)."
+0x02005064,arm9_main,FSi_ReadRomCallback,sdk,"archive:*FSArchive, dst:*void, src:u32, bytes:u32",FSResult,typed,likely,"ROM archive read callback: CARDi_ReadRom(default FS DMA, src, dst, bytes, FSi_OnRomReadDone, archive, async) and returns 6 (async). Block 5.1 boundary: native in src/native/fs.rs (MKDS_HW_FS=native)."
+0x020050B0,arm9_main,FSi_OnRomReadDone,sdk,arg:*FSArchive,void,typed,likely,"Card read completion of the ROM archive: FS_NotifyArchiveAsyncEnd(archive, 0) (sub_2003BE0)."
 0x020050C0,arm9_main,FS_RegisterOverlayTable,sdk,,,named,likely,Library entry; identity and signature still need review.
 0x02005144,arm9_main,FS_LoadOverlay,sdk,"processor:MIProcessor, id:u32",BOOL,typed,likely,API-shaped signature; entry identity remains provisional.
 0x02005198,arm9_main,FS_LoadOverlayImage,sdk,info:*FSOverlayInfo,BOOL,typed,likely,API-shaped signature; entry identity remains provisional.
@@ -839,8 +839,8 @@ address,segment,name,kind,args,returns,status,confidence,notes
 0x02145708,arm9_main,nitrosdk_dc_related_unnamed_02145708,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0214578C,arm9_main,nitrosdk_unnamed_0214578c,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0214579C,arm9_main,nitrosdk_unnamed_0214579c,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x021457AC,arm9_main,nitrosdk_os_related_unnamed_021457ac,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x021457CC,arm9_main,nitrosdk_unnamed_021457cc,sdk,,,named,guess,Library entry; identity and signature still need review.
+0x021457AC,arm9_main,CARD_UnlockRom,sdk,lock_id:u16,void,typed,likely,Releases the card bus lock (called by FSi_RomArchiveProc on IDLE).
+0x021457CC,arm9_main,CARD_LockRom,sdk,lock_id:u16,void,typed,likely,Takes the card bus lock (called by FSi_RomArchiveProc on ACTIVATE).
 0x021457EC,arm9_main,nitrosdk_unnamed_021457ec,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02145800,arm9_main,nitrosdk_unnamed_02145800,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0214581C,arm9_main,nitrosdk_os_related_unnamed_0214581c,sdk,,,named,guess,Library entry; identity and signature still need review.
@@ -860,7 +860,7 @@ address,segment,name,kind,args,returns,status,confidence,notes
 0x02145F80,arm9_main,nitrosdk_os_related_unnamed_02145f80,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02146148,arm9_main,nitrosdk_unnamed_02146148,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02146154,arm9_main,nitrosdk_fs_related_unnamed_02146154,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x021461D8,arm9_main,nitrosdk_os_related_unnamed_021461d8,sdk,,,named,guess,Library entry; identity and signature still need review.
+0x021461D8,arm9_main,CARDi_ReadRom,sdk,"dma:u32, src:*const void, dst:*void, bytes:u32, callback:MIDmaCallback, arg:*void, is_async:BOOL",void,typed,likely,Card ROM read entry (CARD_ReadRom/CARD_ReadRomAsync): 4th-7th arguments on the stack.
 0x02146300,arm9_main,nitrosdk_os_related_unnamed_02146300,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x021463A4,arm9_main,nitrosdk_card_related_unnamed_021463a4,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x021464A4,arm9_main,nitrosdk_os_related_unnamed_021464a4,sdk,,,named,guess,Library entry; identity and signature still need review.
