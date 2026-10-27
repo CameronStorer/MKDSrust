@@ -42,6 +42,9 @@ pub struct Machine<'a> {
     pub hook_hits: HashMap<u32, u32>,
     /// The game's own ARM7 (crate::arm7), run alongside as hardware time passes.
     pub arm7: Option<crate::arm7::Arm7>,
+    /// Native ARM7 services (`MKDS_HW_ARM7=native`, Block 5.2a): the PXI router answers the tags it claims;
+    /// the ARM7 CPU keeps the rest (sound).
+    pub hle7: Option<crate::hle7::Router>,
     /// Audio produced so far (stereo, at the configured SPU rate) and not yet taken by the host; see [`Machine::take_audio`].
     audio: Vec<[i16; 2]>,
     /// Diagnostics over the whole run: frames rendered, non-silent frames, peak amplitude.
@@ -80,7 +83,8 @@ pub struct Machine<'a> {
 const WFI_LIMIT: u32 = 2_000_000;
 
 impl<'a> Machine<'a> {
-    pub fn new(hw: ds_mem::Bus, disp: &'a Dispatcher) -> Self {
+    pub fn new(mut hw: ds_mem::Bus, disp: &'a Dispatcher) -> Self {
+        let hle7 = crate::hle7::Router::from_env(&mut hw);
         Machine {
             hw,
             disp,
@@ -89,6 +93,7 @@ impl<'a> Machine<'a> {
             unhandled: HashMap::new(),
             hook_hits: HashMap::new(),
             arm7: None,
+            hle7,
             audio: Vec::new(),
             audio_stats: (0, 0, 0),
             keep_all_audio: false,
@@ -280,6 +285,9 @@ impl Machine<'_> {
     }
 
     fn run_arm7(&mut self, cycles: u64) {
+        if let Some(r) = self.hle7.as_mut() {
+            r.advance(&mut self.hw, self.arm7.as_mut().map(|a| &mut a.s.periph));
+        }
         if let Some(a) = self.arm7.as_mut() {
             a.run(&mut self.hw, cycles as u32);
             // ARM7::run owns the sound clock. Drain its output; rendering again

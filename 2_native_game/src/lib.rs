@@ -9,6 +9,7 @@ pub mod dispatch;
 pub mod ds_mem;
 pub mod gfx2d;
 pub mod gx;
+pub mod hle7;
 /// Reference interpreter: tests, differential checks and diagnostics only; never in a shipped game.
 #[cfg(feature = "interpreter")]
 pub mod interp;
