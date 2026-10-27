@@ -199,12 +199,8 @@ impl Guest {
     /// Takes an IRQ before `pc` if one is ready (as the flat runtime does at a slice start) and runs
     /// the handler until it returns to `pc`. `true` if an IRQ was taken.
     fn irq_taken(&mut self, pc: u32) -> bool {
-        let ready = {
-            let s = self.s();
-            let hw = &mut s.machine.hw;
-            rt::irq_ready(&s.cpu, hw.r32(0x0400_0208), hw.r32(0x0400_0210), hw.r32(0x0400_0214))
-        };
-        if !ready {
+        // with native OS time (`MKDS_HW_TIME=native`) only at a safe point (`os_hle::IrqGate`)
+        if !self.s().irq_allowed(pc) {
             return false;
         }
         if self.s().machine.hw.probe.is_some() {
@@ -274,6 +270,10 @@ impl Guest {
                 let why = if s.cpu.budget == 0 { "budget" } else if s.machine.hw.code_epoch != s.code_epoch { "code written" } else { "miss" };
                 pc = self.end_slice(pc, why);
                 continue;
+            }
+            // the flat loop's place too: after the slice-end checks, before the block runs
+            if let Some(g) = s.machine.os_gate.as_mut() {
+                g.entry(pc, s.cpu.r[0]);
             }
             let Some(f) = (if std::mem::take(&mut self.fresh) { self.resolve(pc) } else { d.get(pc) }) else {
                 let e = format!("No lifted ARM9 code at PC {pc:#010x}: {}", d.describe(pc));

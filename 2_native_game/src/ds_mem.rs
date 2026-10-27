@@ -322,6 +322,9 @@ pub struct Bus {
     /// Block 5.0 oracle (`acceptance --record`): read-only observation of PXI, SPU writes, polled I/O and
     /// IRQs. `None` (the default) costs one branch on those paths and changes nothing.
     pub probe: Option<Box<Probe>>,
+    /// Block 5.3 (`MKDS_HW_TIME=native`): timers 0 and 1 run on virtual OS time ([`crate::os_hle`]).
+    /// `None` (the default): every timer follows the bus cycles.
+    pub vtime: Option<Box<crate::os_hle::VirtualTime>>,
 }
 
 /// SDK V-blank counter (`OS_GetVBlankCount`, HW_VBLANK_COUNT_BUF): the ARM7's V-blank handler increments it.
@@ -473,6 +476,7 @@ impl Bus {
             watched_main_code: None,
             code_epoch: 0,
             probe: None,
+            vtime: None,
             card: None,
             bios9: {
                 let mut b = vec![0u8; 0x8000];
@@ -794,6 +798,13 @@ impl Bus {
         if (0x100..0x110).contains(&off) && off % 4 < 2 {
             let t = self.timers[(off - 0x100) / 4];
             let mut v = t.counter as u32;
+            if off < 0x108 {
+                if let Some(vt) = self.vtime.as_mut() {
+                    let (c, bits) = vt.read_counter((off - 0x100) / 4);
+                    self.raise(bits);
+                    v = c as u32;
+                }
+            }
             if off & !3 == 0x100 {
                 if let Some(p) = &self.probe {
                     v = (v as u16).wrapping_add(p.tm0_bias) as u32;
@@ -975,9 +986,15 @@ impl Bus {
             let base = 0x100 + 4 * t;
             if hits(base, base + 2) {
                 self.timers[t].reload = self.io_get(base, 2) as u16;
+                if let Some(vt) = self.vtime.as_mut().filter(|_| t < 2) {
+                    vt.write_reload(t, self.timers[t].reload);
+                }
             }
             if hits(base + 2, base + 4) {
                 let ctrl = self.io_get(base + 2, 2) as u16;
+                if let Some(vt) = self.vtime.as_mut().filter(|_| t < 2) {
+                    vt.write_control(t, ctrl);
+                }
                 let was = self.timers[t].ctrl & 0x80 != 0;
                 self.timers[t].ctrl = ctrl;
                 if ctrl & 0x80 != 0 && !was {
@@ -1172,6 +1189,10 @@ impl Bus {
                     self.io_set(0x064, 4, d);
                 }
                 if self.line == VISIBLE_LINES {
+                    if let Some(vt) = self.vtime.as_mut() {
+                        let bits = vt.frame();
+                        self.raise(bits);
+                    }
                     s |= 1;
                     if s & 0x8 != 0 {
                         self.raise(irq::VBLANK);
@@ -1209,7 +1230,7 @@ impl Bus {
         let mut overflow_prev = 0u64;
         for t in 0..4 {
             let tm = self.timers[t];
-            if tm.ctrl & 0x80 == 0 {
+            if tm.ctrl & 0x80 == 0 || (t < 2 && self.vtime.is_some()) {
                 overflow_prev = 0;
                 continue;
             }

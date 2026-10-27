@@ -104,6 +104,11 @@ impl<'a> Session<'a> {
         let arm7 = Arm7::from_rom(rom, &mut hw).ok_or("Cannot load ARM7")?;
         let mut machine = Machine::new(hw, dispatcher);
         machine.arm7 = Some(arm7);
+        if crate::os_hle::enabled() {
+            // Block 5.3: OS time on the host; IRQs at safe points
+            machine.hw.vtime = Some(Box::default());
+            machine.os_gate = Some(crate::os_hle::IrqGate::from_env());
+        }
         let mut cpu = rt::Cpu::default();
         cpu.r[13] = 0x0380_ff00;
         Ok(Self {
@@ -218,13 +223,8 @@ impl<'a> Session<'a> {
         if self.fibers.is_some() {
             return self.step_fibered(limit);
         }
-        let hw = &mut self.machine.hw;
-        if rt::irq_ready(
-            &self.cpu,
-            hw.r32(0x0400_0208),
-            hw.r32(0x0400_0210),
-            hw.r32(0x0400_0214),
-        ) {
+        if self.irq_allowed(self.pc) {
+            let hw = &mut self.machine.hw;
             if hw.probe.is_some() {
                 let pending = hw.r32(0x0400_0210) & hw.r32(0x0400_0214);
                 hw.probe.as_mut().unwrap().irq(pending);
@@ -244,6 +244,9 @@ impl<'a> Session<'a> {
         if found.is_some() && self.dispatcher.resident_len() != self.resident_overlays.len() {
             // the miss path just verified a freshly loaded overlay
             self.resident_overlays = self.dispatcher.resident();
+        }
+        if let Some(g) = self.machine.os_gate.as_mut() {
+            g.entry(self.pc, self.cpu.r[0]);
         }
         let overlay = in_overlay(&self.overlay_windows, &self.resident_overlays, self.pc);
         let mut bus = Flat {
@@ -279,6 +282,9 @@ impl<'a> Session<'a> {
                 match self.dispatcher.get(self.pc) {
                     Some(g) => f = g,
                     None => break,
+                }
+                if let Some(g) = bus.m.os_gate.as_mut() {
+                    g.entry(self.pc, self.cpu.r[0]);
                 }
                 overlay = in_overlay(&self.overlay_windows, &self.resident_overlays, self.pc);
                 bus.pc = self.pc;
@@ -336,6 +342,18 @@ impl<'a> Session<'a> {
             }
         }
         Ok(used)
+    }
+
+    /// At a slice start at `pc`: is an IRQ ready (IME, IE & IF, CPSR I clear) and, with native OS time
+    /// (`MKDS_HW_TIME=native`), is this a safe point for it ([`crate::os_hle::IrqGate`])?
+    pub(crate) fn irq_allowed(&mut self, pc: u32) -> bool {
+        let hw = &mut self.machine.hw;
+        let (ime, ie, iflag) = (hw.r32(0x0400_0208), hw.r32(0x0400_0210), hw.r32(0x0400_0214));
+        let ready = rt::irq_ready(&self.cpu, ime, ie, iflag);
+        match self.machine.os_gate.as_mut() {
+            None => ready,
+            Some(g) => g.allow(pc, ready, ie & iflag != 0, self.stats.instructions),
+        }
     }
 
     /// Diagnostics: records the slice that just ended at `pc` (see `trace`).
@@ -455,6 +473,15 @@ impl<'a> Session<'a> {
         self.render_snapshot().screens()
     }
 
+}
+
+impl Drop for Session<'_> {
+    /// `MKDS_HW_TIME=native`: one summary line of the OS time / IRQ gate (nothing otherwise).
+    fn drop(&mut self) {
+        if let (Some(g), Some(v)) = (&self.machine.os_gate, &self.machine.hw.vtime) {
+            eprintln!("MKDS_HW_TIME=native: {g}; {v}");
+        }
+    }
 }
 
 /// Is `pc` inside a resident overlay's address window?
