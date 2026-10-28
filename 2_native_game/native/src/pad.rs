@@ -4,6 +4,7 @@ use gilrs::{Axis, Button, Gilrs};
 use mkds_builder::controls::PAD;
 
 /// How far the left stick must be pushed to count as a direction.
+#[cfg(test)]
 const STICK: f32 = 0.5;
 
 pub struct Pads {
@@ -32,7 +33,7 @@ impl Pads {
         Pads { gilrs: None }
     }
 
-    /// Brings the button states up to date; call once before a round of [`Pads::any_down`].
+    /// Brings the button states up to date; call once before a round of [`Pads::any_down_at`].
     pub fn poll(&mut self) {
         if let Some(g) = self.gilrs.as_mut() {
             while g.next_event().is_some() {}
@@ -40,17 +41,28 @@ impl Pads {
     }
 
     /// Whether any connected controller holds any of `buttons` (`controls::PAD` indexes).
-    pub fn any_down(&self, buttons: &[usize]) -> bool {
+    pub fn any_down_at(&self, buttons: &[usize], deadzone: f32) -> bool {
         let Some(g) = self.gilrs.as_ref() else { return false };
         if buttons.is_empty() {
             return false;
         }
-        g.gamepads().any(|(_, pad)| buttons.iter().any(|&b| held(PAD[b], |x| pad.is_pressed(x), |a| pad.value(a))))
+        g.gamepads().any(|(_, pad)| buttons.iter().any(|&b| held_at(PAD[b], |x| pad.is_pressed(x), |a| pad.value(a), deadzone)))
+    }
+    pub fn names(&self) -> Vec<String> {
+        self.gilrs.as_ref().map(|g| g.gamepads().map(|(_,p)| p.name().to_owned()).collect()).unwrap_or_default()
+    }
+    pub fn pressed(&self, deadzone: f32) -> Vec<usize> {
+        (0..PAD.len()).filter(|&i| self.any_down_at(&[i], deadzone)).collect()
     }
 }
 
 /// Whether the controller button `name` is held, given the pad's button and axis readers.
+#[cfg(test)]
 fn held(name: &str, pressed: impl Fn(Button) -> bool, axis: impl Fn(Axis) -> f32) -> bool {
+    held_at(name, pressed, axis, STICK)
+}
+
+fn held_at(name: &str, pressed: impl Fn(Button) -> bool, axis: impl Fn(Axis) -> f32, deadzone: f32) -> bool {
     match name {
         "South" => pressed(Button::South),
         "East" => pressed(Button::East),
@@ -66,10 +78,10 @@ fn held(name: &str, pressed: impl Fn(Button) -> bool, axis: impl Fn(Axis) -> f32
         "DPadDown" => pressed(Button::DPadDown),
         "DPadLeft" => pressed(Button::DPadLeft),
         "DPadRight" => pressed(Button::DPadRight),
-        "StickUp" => axis(Axis::LeftStickY) > STICK,
-        "StickDown" => axis(Axis::LeftStickY) < -STICK,
-        "StickLeft" => axis(Axis::LeftStickX) < -STICK,
-        "StickRight" => axis(Axis::LeftStickX) > STICK,
+        "StickUp" => axis(Axis::LeftStickY) > deadzone,
+        "StickDown" => axis(Axis::LeftStickY) < -deadzone,
+        "StickLeft" => axis(Axis::LeftStickX) < -deadzone,
+        "StickRight" => axis(Axis::LeftStickX) > deadzone,
         "LeftStick" => pressed(Button::LeftThumb),
         "RightStick" => pressed(Button::RightThumb),
         "Guide" => pressed(Button::Mode),
@@ -80,6 +92,15 @@ fn held(name: &str, pressed: impl Fn(Button) -> bool, axis: impl Fn(Axis) -> f32
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_deadzone_applies_without_changing_digital_buttons() {
+        let off = |_: Button| false;
+        let axis = |_: Axis| 0.3;
+        assert!(held_at("StickUp",off,axis,0.2));
+        assert!(!held_at("StickUp",off,axis,0.5));
+        assert!(held_at("South",|b| b == Button::South,axis,0.95));
+    }
 
     #[test]
     fn every_controls_name_reads_a_button_or_the_stick() {
