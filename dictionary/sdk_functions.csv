@@ -754,18 +754,18 @@ address,segment,name,kind,args,returns,status,confidence,notes
 0x02141F14,arm9_main,libc_uint64_to_decimal_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x021420C0,arm9_main,libc_decimal_round,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0214214C,arm9_main,libc_decimal_increment,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x02142218,arm9_main,libc_decimal_increment_return_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
+0x02142218,arm9_main,libc_decimal_epilogue_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02142224,arm9_main,libc_decimal_round_direction,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x021422A0,arm9_main,libc_count_trailing_zeros,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02142368,arm9_main,libc_runtime_dispatch_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x021423E4,arm9_main,libc_console_write_char,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x021423F8,arm9_main,libc_console_read_char,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0214240C,arm9_main,libc_console_exit,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x0214241C,arm9_main,libc_io_success_stub_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
+0x0214241C,arm9_main,libc_return_zero_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02142424,arm9_main,libc_console_write,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0214245C,arm9_main,libc_console_read_line,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x021424E8,arm9_main,libc_run_destructors_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x02142540,arm9_main,libc_run_static_initializers_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
+0x021424E8,arm9_main,libc_run_destructors,sdk,,,named,guess,Library entry; identity and signature still need review.
+0x02142540,arm9_main,libc_run_static_initializers,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02142578,arm9_main,libc_get_runtime_state_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02142584,arm9_main,libc_get_runtime_state_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02142590,arm9_main,libc_console_exit_wrapper,sdk,,,named,guess,Library entry; identity and signature still need review.
@@ -842,8 +842,8 @@ address,segment,name,kind,args,returns,status,confidence,notes
 0x021457AC,arm9_main,CARD_UnlockRom,sdk,lock_id:u16,void,typed,likely,Releases the card bus lock (called by FSi_RomArchiveProc on IDLE).
 0x021457CC,arm9_main,CARD_LockRom,sdk,lock_id:u16,void,typed,likely,Takes the card bus lock (called by FSi_RomArchiveProc on ACTIVATE).
 0x021457EC,arm9_main,CARD_GetResultCode,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x02145800,arm9_main,card_try_wait_async_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x0214581C,arm9_main,card_wait_async_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
+0x02145800,arm9_main,card_try_wait_async,sdk,,,named,guess,Library entry; identity and signature still need review.
+0x0214581C,arm9_main,card_wait_async,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02145878,arm9_main,card_set_enabled,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02145888,arm9_main,card_check_enabled,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x021458A8,arm9_main,card_check_enabled_return,sdk,,,named,guess,Library entry; identity and signature still need review.
@@ -858,7 +858,7 @@ address,segment,name,kind,args,returns,status,confidence,notes
 0x02145D44,arm9_main,card_identify_backup_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02145E8C,arm9_main,card_request_backup_transfer_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02145F80,arm9_main,card_backup_transfer_task_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x02146148,arm9_main,card_wait_rom_async_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
+0x02146148,arm9_main,CARD_WaitRomAsync,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02146154,arm9_main,CARD_Init,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x021461D8,arm9_main,CARDi_ReadRom,sdk,"dma:u32, src:*const void, dst:*void, bytes:u32, callback:MIDmaCallback, arg:*void, is_async:BOOL",void,typed,likely,Card ROM read entry (CARD_ReadRom/CARD_ReadRomAsync): 4th-7th arguments on the stack.
 0x02146300,arm9_main,card_rom_read_task_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
@@ -1101,7 +1101,7 @@ address,segment,name,kind,args,returns,status,confidence,notes
 0x0214E17C,arm9_main,rtc_send_command_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0214E1B0,arm9_main,rtc_request_status_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0214E1C0,arm9_main,rtc_request_datetime_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x0214E1D0,arm9_main,rtc_request_date_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
+0x0214E1D0,arm9_main,rtc_request_time_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0214E1E0,arm9_main,RTC_ConvertDateTimeToSecond,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0214E258,arm9_main,RTC_ConvertTimeToSecond,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0214E274,arm9_main,RTC_ConvertDateToDay,sdk,,,named,guess,Library entry; identity and signature still need review.
@@ -1145,8 +1145,8 @@ address,segment,name,kind,args,returns,status,confidence,notes
 0x0214F83C,arm9_main,PM_GoSleepMode,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0214FA7C,arm9_main,pm_send_pxi_command,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0214FAAC,arm9_main,PM_GetBackLight,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x0214FB24,arm9_main,pm_set_led_pattern_three_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x0214FB3C,arm9_main,pm_set_led_pattern_two_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
+0x0214FB24,arm9_main,pm_write_register_three,sdk,,,named,guess,Library entry; identity and signature still need review.
+0x0214FB3C,arm9_main,pm_write_register_two,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0214FB54,arm9_main,PM_ForceToPowerOff,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0214FB90,arm9_main,PM_ForceToPowerOffAsync,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0214FBA8,arm9_main,PM_SetBackLight,sdk,,,named,guess,Library entry; identity and signature still need review.
@@ -1215,7 +1215,7 @@ address,segment,name,kind,args,returns,status,confidence,notes
 0x02152324,arm9_main,wifi_resolve_pair_values_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02152340,arm9_main,wifi_resolve_value_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02152390,arm9_main,wifi_values_equal_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x02152458,arm9_main,wifi_get_value_data_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
+0x02152458,arm9_main,wifi_format_stored_value_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02152468,arm9_main,wifi_init_reference_value_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02152490,arm9_main,wifi_copy_resolved_value_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x021524D8,arm9_main,os_id_init_block_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
@@ -1223,7 +1223,7 @@ address,segment,name,kind,args,returns,status,confidence,notes
 0x02152520,arm9_main,os_id_validate_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02152584,arm9_main,os_id_check_state_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x021525A8,arm9_main,os_id_update_checksum,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x021525E0,arm9_main,os_id_is_flag0_set_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
+0x021525E0,arm9_main,os_id_is_flag0_set,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x021525F0,arm9_main,os_id_store_with_checksum_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02152638,arm9_main,os_id_compare_stored_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02152690,arm9_main,os_id_thunk_a_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
@@ -1239,10 +1239,10 @@ address,segment,name,kind,args,returns,status,confidence,notes
 0x02152934,arm9_main,os_id_check_crc8_masked_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02152950,arm9_main,os_id_check_crc8,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02152988,arm9_main,os_id_crc8_of_value,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x021529BC,arm9_main,os_id_set_flag_if_state3_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x021529E0,arm9_main,os_id_set_state_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
+0x021529BC,arm9_main,os_id_set_flag_if_state3,sdk,,,named,guess,Library entry; identity and signature still need review.
+0x021529E0,arm9_main,os_id_set_state,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02152A04,arm9_main,os_id_set_field_bits,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x02152A1C,arm9_main,os_id_thunk_get_state_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
+0x02152A1C,arm9_main,os_id_get_state_thunk,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02152A24,arm9_main,os_id_is_state_flag_set_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02152A58,arm9_main,os_id_get_state,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02152A6C,arm9_main,os_id_get_field,sdk,,,named,guess,Library entry; identity and signature still need review.

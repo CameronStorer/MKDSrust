@@ -48,6 +48,525 @@ struct Ctx<'a> {
     /// Block 5.4 (`--timing native`, ARM9 only): blocks pay no budget except poll points (loop headers and
     /// [`crate::lift::polls`]), which use `poll!` (the budget's slice-end check).
     native_timing: bool,
+    /// Block 5.5: no-spill emission (see [`DirectSig`]).
+    nospill: bool,
+    /// Emitting a closed function's direct variant: exits return, nothing may spill.
+    selfn: bool,
+}
+
+// ---------------------------------------------------------------------------------------------
+// Block 5.5: fewer `spill!/reload!` (`--timing native` ARM9 builds only; `MKDS_SPILL=keep` turns it off).
+//
+// Without an instruction budget, IRQs and thread switches happen only at safe points (waits, poll
+// points, interrupt-enable calls), and only code outside the raised function (the dispatch loop, an IRQ
+// handler, a native, the BIOS) reads `c.r`. So:
+// - block transfers (`push`/`pop`/`ldm`/`stm`) work on the locals directly (no `c.r` involved);
+// - `msr` syncs only the banked registers (r8-r14) around the mode switch;
+// - a call to a *closed* function (one that can reach no safe point and never leaves raised code: no
+//   loops (they poll), no SWI, no coprocessor access, no computed call or tail jump, no exception return,
+//   and calls only closed functions) is a direct Rust call of its direct variant (`direct::name`), which
+//   takes the registers it reads before writing them as arguments and returns the pc it returns to plus
+//   every register it writes. Nothing can observe `c.r` while it runs, so nothing is spilled.
+// The whole-program part (which functions are closed, their arguments and results) is computed by
+// `mkds_gen` from the [`Facts`] each emission records, and handed back with [`set_direct`].
+// ---------------------------------------------------------------------------------------------
+
+/// A closed function's direct variant: register masks (bit n = rn) of its arguments and results, and its
+/// Rust name in the `direct` crate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirectSig {
+    pub params: u16,
+    pub rets: u16,
+    pub name: String,
+}
+
+/// What an emission found (no-spill mode): why the function is not closed (`None`: it may be), the
+/// functions it calls by constant address, and its register facts given the current [`set_direct`]
+/// table: registers live at its entry and registers it writes (results of direct calls included).
+#[derive(Clone, Debug, Default)]
+pub struct Facts {
+    pub escape: Option<&'static str>,
+    pub calls: Vec<u32>,
+    pub live_in: u16,
+    pub written: u16,
+}
+
+thread_local! {
+    /// Direct-callable functions: entry (exact, with the Thumb bit) -> (segment, signature) rows.
+    static DIRECT: std::cell::RefCell<HashMap<u32, Vec<(String, DirectSig)>>> = std::cell::RefCell::new(HashMap::new());
+    /// The segment of the function being emitted, and its own signature when it is closed (its direct
+    /// variant is emitted, and its T1 entry becomes a wrapper).
+    static CURRENT: std::cell::RefCell<(String, Option<DirectSig>)> = std::cell::RefCell::new((String::new(), None));
+    static LAST_FACTS: std::cell::RefCell<Option<Facts>> = const { std::cell::RefCell::new(None) };
+    static LAST_DIRECT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Whether no-spill emission is on: `--timing native` and not `MKDS_SPILL=keep`.
+pub fn nospill_enabled() -> bool {
+    crate::lift::timing_native() && std::env::var("MKDS_SPILL").map_or(true, |v| v != "keep")
+}
+
+/// Sets the direct-callable functions (see [`DirectSig`]).
+pub fn set_direct(map: HashMap<u32, Vec<(String, DirectSig)>>) {
+    DIRECT.with(|d| *d.borrow_mut() = map);
+}
+
+/// Sets the segment of the next function emitted, and its signature if it is closed.
+pub fn set_current(segment: &str, own: Option<DirectSig>) {
+    CURRENT.with(|c| *c.borrow_mut() = (segment.to_string(), own));
+}
+
+/// The facts of the last emission (no-spill mode only).
+pub fn take_facts() -> Option<Facts> {
+    LAST_FACTS.with(|f| f.borrow_mut().take())
+}
+
+/// The direct variant the last emission produced (a closed function), for the `direct` crate.
+pub fn take_direct() -> Option<String> {
+    LAST_DIRECT.with(|f| f.borrow_mut().take())
+}
+
+/// The direct variant a call from the current function reaches at `target`: the caller's own segment, or
+/// a segment that is always resident (not an overlay).
+fn direct_for(target: u32) -> Option<DirectSig> {
+    let seg = CURRENT.with(|c| c.borrow().0.clone());
+    DIRECT.with(|d| {
+        let d = d.borrow();
+        let rows = d.get(&target)?;
+        rows.iter().find(|(s, _)| *s == seg).or_else(|| rows.iter().find(|(s, _)| !s.starts_with("ov9_"))).map(|r| r.1.clone())
+    })
+}
+
+fn mask_regs(m: u16) -> impl Iterator<Item = u8> {
+    (0..15u8).filter(move |i| m >> i & 1 != 0)
+}
+
+/// A plain block transfer (`push`, `pop`, `ldm`, `stm`; not the user-bank form): (load, pre, up, wb, rn, list).
+fn plain_block(e: &E) -> Option<(bool, bool, bool, bool, u8, u16)> {
+    if let E::Call(H::Block, a) = e {
+        if let [_, _, E::Bool(load), E::Bool(pre), E::Bool(up), E::Bool(wb), E::Lit(rn), E::Hex(list), _] = a.as_slice() {
+            return Some((*load, *pre, *up, *wb, *rn as u8, *list as u16));
+        }
+    }
+    None
+}
+
+/// The statement is `pop {.., pc}`-like: a plain block load whose loaded pc is jumped to.
+fn block_return(s: &S) -> Option<&E> {
+    match s {
+        S::IfSome(e, body) if plain_block(e).is_some() && matches!(body.as_slice(), [S::Goto(E::Iw(v))] if **v == E::Tmp(ir::Tmp::V)) => Some(e),
+        _ => None,
+    }
+}
+
+fn has_helper(e: &E, p: &dyn Fn(H) -> bool) -> bool {
+    match e {
+        E::Call(h, a) => p(*h) || a.iter().any(|x| has_helper(x, p)),
+        E::Bin(_, a, b) | E::Cmp(_, _, a, b) => has_helper(a, p) || has_helper(b, p),
+        E::Not(a) | E::Shl(a, _) | E::Lsr(a, _) | E::Asr(a, _) | E::Ror(a, _) | E::Rrx(a) | E::Bit(a, _) | E::Msb(a) | E::Lsb(a) | E::BoolU32(a) | E::Clz(a) | E::Iw(a) => has_helper(a, p),
+        E::Load { addr, .. } => has_helper(addr, p),
+        _ => false,
+    }
+}
+
+const BANKED: u16 = 0x7F00; // r8-r14
+
+/// [`regs_s`] for no-spill emission: block transfers name their registers, direct calls read their
+/// arguments and write their results, and `msr` reads and writes the banked registers in `all`.
+fn regs_ext(s: &S, all: u16, used: &mut BTreeSet<u8>, written: &mut BTreeSet<u8>) {
+    let blk = match s {
+        S::Do(e) => plain_block(e),
+        S::IfSome(e, _) if block_return(s).is_some() => plain_block(e),
+        _ => None,
+    };
+    if let Some((load, _, _, wb, rn, list)) = blk {
+        used.insert(rn);
+        if wb {
+            written.insert(rn);
+        }
+        for i in mask_regs(list) {
+            if load { written.insert(i) } else { used.insert(i) };
+        }
+        return;
+    }
+    if let S::Call { target: E::Const(t), .. } = s {
+        if let Some(d) = direct_for(*t) {
+            used.extend(mask_regs(d.params));
+            written.extend(mask_regs(d.rets));
+            return;
+        }
+    }
+    if let S::Do(e) = s {
+        if matches!(e, E::Call(H::Msr, _)) {
+            used.extend(mask_regs(all & BANKED));
+            written.extend(mask_regs(all & BANKED));
+        }
+    }
+    regs_s(s, used, written);
+}
+
+fn to_mask(s: &BTreeSet<u8>) -> u16 {
+    s.iter().filter(|&&i| i < 15).fold(0, |m, &i| m | 1 << i)
+}
+
+/// Inline code for a plain block transfer on the locals (as `R::block` does on `c.r`). For a load of the
+/// pc, binds it to `v`.
+fn inline_block(e: &E) -> String {
+    let (load, pre, up, wb, rn, list) = plain_block(e).unwrap();
+    let E::Call(_, a) = e else { unreachable!() };
+    let n = list.count_ones();
+    let start: i64 = match (up, pre) {
+        (true, false) => 0,
+        (true, true) => 4,
+        (false, false) => -4 * (n as i64 - 1),
+        (false, true) => -4 * n as i64,
+    };
+    let off = |k: i64| -> String {
+        match k {
+            0 => "ea".into(),
+            k if k > 0 => format!("ea.wrapping_add({k:#X})"),
+            k => format!("ea.wrapping_sub({:#X})", -k),
+        }
+    };
+    let mut s = format!("{{ let ea = {}; ", ir::reg_name(rn));
+    let mut k = start;
+    for i in 0..16u8 {
+        if list >> i & 1 == 0 {
+            continue;
+        }
+        let at = off(k);
+        if load {
+            let to = if i == 15 { "v".to_string() } else { ir::reg_name(i) };
+            let _ = write!(s, "{to} = m.r32({at} & !3); ");
+        } else {
+            let v = if i == 15 { ir::expr_locals(&a[8]) } else { ir::reg_name(i) };
+            let _ = write!(s, "m.w32({at} & !3, {v}); ");
+        }
+        k += 4;
+    }
+    if wb {
+        let _ = write!(s, "{} = {}; ", ir::reg_name(rn), off(if up { 4 * n as i64 } else { -4 * n as i64 }));
+    }
+    s.push('}');
+    if load && list & 0x8000 != 0 {
+        s = format!("let v: u32; {s}");
+    }
+    s
+}
+
+/// A register's value in [`preserved_regs`]: its value at the entry, the entry sp plus an offset, unknown.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Sym {
+    Entry(u8),
+    /// The entry value, unless an `msr` in between switched the register bank.
+    Banked(u8),
+    Sp(i64),
+    Unk,
+}
+
+#[derive(Clone, PartialEq)]
+struct SymState {
+    regs: [Sym; 15],
+    slots: BTreeMap<i64, Sym>,
+}
+
+impl SymState {
+    fn join(&mut self, o: &SymState) {
+        for i in 0..15 {
+            if self.regs[i] != o.regs[i] {
+                self.regs[i] = Sym::Unk;
+            }
+        }
+        self.slots.retain(|k, v| o.slots.get(k) == Some(v));
+    }
+    fn eval(&self, e: &E) -> Sym {
+        match e {
+            E::Reg(i) if *i < 15 => self.regs[*i as usize],
+            E::Bin(op @ (ir::Bin::Add | ir::Bin::Sub), a, b) => match (self.eval(a), &**b) {
+                (Sym::Sp(k), E::Const(c)) => Sym::Sp(if *op == ir::Bin::Add { k + *c as i32 as i64 } else { k - *c as i32 as i64 }),
+                _ => Sym::Unk,
+            },
+            E::Bin(ir::Bin::And, a, k) if matches!(**k, E::Not(_)) => self.eval(a),
+            _ => Sym::Unk,
+        }
+    }
+}
+
+/// Block 5.5, the T1 calling-convention check: the registers of r4-r11 and sp a closed function gives back
+/// unchanged on every return (saved by a push and restored by the matching pop, or never written), so its
+/// direct variant does not return them. Values are followed through the function's own stack slots
+/// (offsets from the entry sp); stores through other pointers are assumed not to hit those slots (the
+/// calling convention: nothing else writes a frame's saved registers). `kept(target)`: the registers a
+/// direct callee keeps. Closed functions have no loops, so one pass in reverse postorder suffices.
+fn preserved_regs(blocks: &BTreeMap<u32, Block>, order: &[u32], entry: u32, all: u16, switches: &BTreeMap<u32, Vec<u32>>, kept: &dyn Fn(u32) -> Option<u16>) -> (u16, bool) {
+    let thumb = entry & 1;
+    let internal = |t: u32| blocks.contains_key(&((t & !1) | thumb));
+    let mut start = SymState { regs: std::array::from_fn(|i| Sym::Entry(i as u8)), slots: BTreeMap::new() };
+    start.regs[13] = Sym::Sp(0);
+    let mut ins_state: BTreeMap<u32, SymState> = BTreeMap::new();
+    ins_state.insert(entry, start);
+    let mut keep: u16 = 0x2FF0; // r4-r11, sp
+    // every return goes to the link register's entry value
+    let mut ret_ok = true;
+    let check = |st: &SymState, keep: &mut u16| {
+        for r in 4..12u8 {
+            if st.regs[r as usize] != Sym::Entry(r) {
+                *keep &= !(1 << r);
+            }
+        }
+        if st.regs[13] != Sym::Sp(0) {
+            *keep &= !(1 << 13);
+        }
+    };
+    // one statement on one path's state; `None` once the path has left (a jump or a return)
+    let dball = std::env::var("MKDS_NOSPILL_DEBUG").as_deref() == Ok("all");
+    let dbg = std::env::var("MKDS_NOSPILL_DEBUG").ok().and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok()) == Some(entry & !1);
+    let step = |st: &mut Option<SymState>, s: &S, b: u32, ins_state: &mut BTreeMap<u32, SymState>, keep: &mut u16, ret_ok: &mut bool| {
+        let Some(x) = st.as_mut() else { return };
+        // the pc a block load returns to, read before the load changes the state
+        if let Some(e) = block_return(s) {
+            let (_, pre, up, _, rn, list) = plain_block(e).unwrap();
+            let n = list.count_ones() as i64;
+            let first = match (up, pre) {
+                (true, false) => 0,
+                (true, true) => 4,
+                (false, false) => -4 * (n - 1),
+                (false, true) => -4 * n,
+            };
+            let v = match x.regs[rn as usize] {
+                Sym::Sp(o) => x.slots.get(&(o + first + 4 * (n - 1))).copied().unwrap_or(Sym::Unk),
+                _ => Sym::Unk,
+            };
+            *ret_ok &= matches!(v, Sym::Entry(14) | Sym::Banked(14));
+            if !matches!(v, Sym::Entry(14) | Sym::Banked(14)) && dball { eprintln!("retfail {entry:#X} block {b:#X} pop pc {v:?} sp {:?}", x.regs[13]); }
+            if dbg { eprintln!("retdbg {b:#X} pop pc {v:?} regs {:?}", x.regs); }
+        }
+        if let S::Goto(e) = s {
+            if !matches!(e, E::Const(_)) && !switches.contains_key(&b) {
+                let t = match e {
+                    E::Iw(y) => &**y,
+                    y => y,
+                };
+                *ret_ok &= matches!(x.eval(t), Sym::Entry(14) | Sym::Banked(14));
+                if !matches!(x.eval(t), Sym::Entry(14) | Sym::Banked(14)) && dball { eprintln!("retfail {entry:#X} block {b:#X} goto {t:?} = {:?}", x.eval(t)); }
+                if dbg { eprintln!("retdbg {b:#X} goto {:?} = {:?} regs {:?} slots {:?}", t, x.eval(t), x.regs, x.slots); }
+            }
+        }
+        step_sym(x, s, all, kept);
+        match s {
+            S::Goto(E::Const(t)) if internal(*t) => {
+                let t = (t & !1) | thumb;
+                match ins_state.get_mut(&t) {
+                    Some(y) => y.join(x),
+                    None => {
+                        ins_state.insert(t, x.clone());
+                    }
+                }
+                *st = None;
+            }
+            S::Goto(_) | S::IfSome(..) | S::ExcReturn(_) => {
+                check(x, keep);
+                *st = None;
+            }
+            _ => {}
+        }
+    };
+    let join = |a: Option<SymState>, b: Option<SymState>| match (a, b) {
+        (None, y) | (y, None) => y,
+        (Some(mut a), Some(b)) => {
+            a.join(&b);
+            Some(a)
+        }
+    };
+    // may the statement change the flags a condition reads? (Guards are folded forms of the instruction's
+    // condition on the current flags; a compare made into flag locals writes `fa`/`fb`/`fz`.)
+    let invalidates = |s: &S, _guard: &Option<E>| -> bool {
+        if matches!(s, S::Do(e) if plain_block(e).is_some()) {
+            return false;
+        }
+        crate::raise::stmt_flags(s).1 != 0
+            || matches!(s, S::Call { .. } | S::IfSome(..) | S::ExcReturn(_))
+            || matches!(s, S::Do(e) | S::SetReg(_, e) if syncs(e))
+            || matches!(s, S::Let(ir::Tmp::Fa | ir::Tmp::Fb | ir::Tmp::Fz, _))
+    };
+    for &b in order {
+        let Some(st0) = ins_state.get(&b).cloned() else { continue };
+        let blk = &blocks[&b];
+        // path-sensitive for one condition at a time: `st` is the path where the current condition holds,
+        // `alt` the one where it does not (instructions with the same condition share one split)
+        let mut st = Some(st0);
+        let mut alt: Option<(String, Option<SymState>, Option<E>)> = None;
+        for ins in &blk.insts {
+            let cond = ins.cond != 14 || ins.guard.is_some();
+            if cond {
+                let key = if ins.cond != 14 { ins.cond.to_string() } else { format!("{:?}", ins.guard) };
+                if alt.as_ref().map(|a| &a.0) != Some(&key) {
+                    if let Some((_, o, _)) = alt.take() {
+                        st = join(st, o);
+                    }
+                    alt = Some((key, st.clone(), ins.guard.clone()));
+                }
+                let mut inv = false;
+                for s in &ins.stmts {
+                    step(&mut st, s, b, &mut ins_state, &mut keep, &mut ret_ok);
+                    inv |= invalidates(s, &ins.guard);
+                }
+                if inv {
+                    if let Some((_, o, _)) = alt.take() {
+                        st = join(st, o);
+                    }
+                }
+            } else {
+                for s in &ins.stmts {
+                    if alt.as_ref().is_some_and(|a| invalidates(s, &a.2)) {
+                        let (_, o, _) = alt.take().unwrap();
+                        st = join(st, o);
+                    }
+                    step(&mut st, s, b, &mut ins_state, &mut keep, &mut ret_ok);
+                    if let Some((_, o, _)) = alt.as_mut() {
+                        step(o, s, b, &mut ins_state, &mut keep, &mut ret_ok);
+                    }
+                }
+            }
+        }
+        if let Some((_, o, _)) = alt.take() {
+            st = join(st, o);
+        }
+        let Some(st) = st else { continue };
+        if let Some(t) = blk.falls_to {
+            if internal(t) {
+                let t = (t & !1) | thumb;
+                match ins_state.get_mut(&t) {
+                    Some(x) => x.join(&st),
+                    None => {
+                        ins_state.insert(t, st.clone());
+                    }
+                }
+            } else {
+                check(&st, &mut keep);
+                if dball { eprintln!("retfail {entry:#X} block {b:#X} falls out"); }
+                ret_ok = false;
+            }
+        }
+    }
+    (keep, ret_ok)
+}
+
+fn step_sym(st: &mut SymState, s: &S, all: u16, kept: &dyn Fn(u32) -> Option<u16>) {
+    let blk = match s {
+        S::Do(e) => plain_block(e),
+        S::IfSome(e, _) if block_return(s).is_some() => plain_block(e),
+        _ => None,
+    };
+    if let Some((load, pre, up, wb, rn, list)) = blk {
+        let base = st.regs[rn as usize];
+        let n = list.count_ones() as i64;
+        let first = match (up, pre) {
+            (true, false) => 0,
+            (true, true) => 4,
+            (false, false) => -4 * (n - 1),
+            (false, true) => -4 * n,
+        };
+        let mut k = 0;
+        for i in 0..16u8 {
+            if list >> i & 1 == 0 {
+                continue;
+            }
+            let at = match base {
+                Sym::Sp(o) => Some(o + first + 4 * k),
+                _ => None,
+            };
+            if load {
+                if i < 15 {
+                    st.regs[i as usize] = at.and_then(|a| st.slots.get(&a).copied()).unwrap_or(Sym::Unk);
+                }
+            } else if let Some(a) = at {
+                let v = if i < 15 { st.regs[i as usize] } else { Sym::Unk };
+                st.slots.insert(a, v);
+            }
+            k += 1;
+        }
+        if wb {
+            st.regs[rn as usize] = match base {
+                Sym::Sp(o) => Sym::Sp(if up { o + 4 * n } else { o - 4 * n }),
+                _ => Sym::Unk,
+            };
+        }
+        return;
+    }
+    match s {
+        S::SetReg(i, e) if *i < 15 => {
+            let v = match e {
+                E::Load { w: Width::B32, addr, .. } => match st.eval(addr) {
+                    Sym::Sp(a) => st.slots.get(&a).copied().unwrap_or(Sym::Unk),
+                    _ => Sym::Unk,
+                },
+                E::Call(H::Ldr, a) if a.len() == 2 => match st.eval(&a[1]) {
+                    Sym::Sp(a) if a % 4 == 0 => st.slots.get(&a).copied().unwrap_or(Sym::Unk),
+                    _ => Sym::Unk,
+                },
+                e => st.eval(e),
+            };
+            st.regs[*i as usize] = v;
+        }
+        S::Store { w, addr, val } => {
+            if let Sym::Sp(a) = st.eval(addr) {
+                let a = a & !3;
+                if *w == Width::B32 {
+                    let v = st.eval(val);
+                    st.slots.insert(a, v);
+                } else {
+                    st.slots.insert(a, Sym::Unk);
+                }
+            }
+        }
+        S::Call { target: E::Const(t), .. } => {
+            let d = direct_for(*t);
+            let keeps = kept(*t).unwrap_or(0);
+            // not (yet) in the direct table: the calling convention's clobbers (checked once it is)
+            let rets = d.map_or(0x500F, |d| d.rets);
+            for r in mask_regs(rets & !keeps) {
+                st.regs[r as usize] = Sym::Unk;
+            }
+            // the callee's frame lies below this sp
+            if let Sym::Sp(o) = st.regs[13] {
+                st.slots.retain(|&k, _| k >= o);
+            }
+        }
+        S::Do(E::Call(H::Msr, _)) => {
+            // a mode switch may swap r8-r14 (checked at run time: a return elsewhere leaves exactly)
+            for r in 8..15 {
+                st.regs[r] = match st.regs[r] {
+                    Sym::Entry(x) | Sym::Banked(x) => Sym::Banked(x),
+                    _ => Sym::Unk,
+                };
+            }
+        }
+        _ => {
+            let (mut u, mut w) = (BTreeSet::new(), BTreeSet::new());
+            regs_ext(s, all, &mut u, &mut w);
+            for r in w.into_iter().filter(|&r| r < 15) {
+                st.regs[r as usize] = Sym::Unk;
+            }
+        }
+    }
+}
+
+/// Why a statement keeps the function from being closed (no-spill mode), if it does.
+fn stmt_escape(s: &S, internal: &dyn Fn(u32) -> bool) -> Option<&'static str> {
+    let bad = |h: H| matches!(h, H::Swi | H::BlockUser | H::Mrc | H::Mcr);
+    match s {
+        S::Call { target: E::Const(_), .. } => None,
+        S::Call { .. } => Some("computed call"),
+        S::Goto(E::Const(t)) => (!internal(*t)).then_some("tail jump"),
+        S::Goto(e) => has_helper(e, &bad).then_some("helper"),
+        S::ExcReturn(_) => Some("exception return"),
+        S::IfSome(..) => block_return(s).is_none().then_some("exception return"),
+        S::Do(e) if plain_block(e).is_some() || matches!(e, E::Call(H::Msr, _)) => None,
+        S::Do(e) | S::SetReg(_, e) if syncs(e) => Some("sync helper"),
+        S::Let(_, e) | S::Let2(_, _, e) | S::SetFlag(_, e) | S::SetNz(e) | S::Do(e) | S::SetReg(_, e) => has_helper(e, &bad).then_some("helper"),
+        S::Store { addr, val, .. } => (has_helper(addr, &bad) || has_helper(val, &bad)).then_some("helper"),
+    }
 }
 
 /// Needs the locals written to `c.r` first (and read back after): the helper uses `c.r` itself.
@@ -1589,7 +2108,105 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
             }
         }
     }
-    let all: BTreeSet<u8> = used.union(&written).copied().filter(|&i| i < 15).collect();
+    let mut all: BTreeSet<u8> = used.union(&written).copied().filter(|&i| i < 15).collect();
+    // Block 5.5: no-spill emission (ARM9, `--timing native`)
+    let nospill = cost.is_none() && crate::lift::timing_native() && nospill_enabled();
+    let own = if nospill { CURRENT.with(|c| c.borrow().1.clone()) } else { None };
+    if nospill {
+        let thumb = f.entry & 1;
+        let internal = |t: u32| blocks.contains_key(&((t & !1) | thumb));
+        // the registers again, with block transfers, direct calls and `msr`
+        let all0 = to_mask(&all);
+        let (mut u2, mut w2) = (BTreeSet::new(), BTreeSet::new());
+        let mut escape: Option<&'static str> = None;
+        let mut calls = Vec::new();
+        for b in blocks.values() {
+            if header.contains(&b.start) || crate::lift::polls(b.start) {
+                escape.get_or_insert("loop (poll point)");
+            }
+            if b.falls_to.is_some_and(|t| !internal(t)) {
+                escape.get_or_insert("falls through");
+            }
+            for ins in &b.insts {
+                for s in &ins.stmts {
+                    regs_ext(s, all0, &mut u2, &mut w2);
+                    if let Some(e) = stmt_escape(s, &internal) {
+                        escape.get_or_insert(e);
+                    }
+                    if let S::Call { target: E::Const(t), .. } = s {
+                        calls.push(*t);
+                    }
+                }
+                if let Some(g) = &ins.guard {
+                    regs_e(g, &mut u2);
+                }
+            }
+        }
+        written = w2.into_iter().filter(|&i| i < 15).collect();
+        all = u2.union(&written).copied().filter(|&i| i < 15).collect();
+        let mut rets = to_mask(&written);
+        if escape.is_none() {
+            let (keep, ret_ok) = preserved_regs(&blocks, &order, f.entry, to_mask(&all), &switches, &|_| None);
+            if !ret_ok {
+                // a jump through a register or a popped value that is not the return address (a tail call)
+                escape = Some("returns elsewhere");
+            } else if std::env::var("MKDS_SPILL").map_or(true, |v| v != "exact") {
+                // a closed function's results leave out the registers it keeps (`MKDS_SPILL=exact`: all it writes)
+                rets &= !keep;
+            }
+        }
+        let allm = to_mask(&all);
+        // register liveness (backward, to a fixed point); every exit reads the results
+        let mut lin: BTreeMap<u32, u16> = blocks.keys().map(|&b| (b, 0)).collect();
+        loop {
+            let mut changed = false;
+            for &b in order.iter().rev() {
+                let blk = &blocks[&b];
+                let mut live = blk.succ.iter().fold(0u16, |a, s| a | lin.get(s).copied().unwrap_or(0));
+                if blk.falls_to.is_some_and(|t| !internal(t)) {
+                    live |= rets;
+                }
+                for ins in blk.insts.iter().rev() {
+                    let cond = ins.cond != 14 || ins.guard.is_some();
+                    for s in ins.stmts.iter().rev() {
+                        let (mut u, mut w) = (BTreeSet::new(), BTreeSet::new());
+                        regs_ext(s, allm, &mut u, &mut w);
+                        match s {
+                            S::Goto(E::Const(t)) if internal(*t) => live |= lin.get(&((t & !1) | thumb)).copied().unwrap_or(0),
+                            S::Goto(_) | S::IfSome(..) | S::ExcReturn(_) => live |= rets,
+                            _ => {}
+                        }
+                        if !cond {
+                            live &= !to_mask(&w);
+                        }
+                        live |= to_mask(&u);
+                    }
+                    if let Some(g) = &ins.guard {
+                        let mut u = BTreeSet::new();
+                        regs_e(g, &mut u);
+                        live |= to_mask(&u);
+                    }
+                }
+                if lin[&b] != live {
+                    lin.insert(b, live);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let live_in = lin[&f.entry];
+        LAST_FACTS.with(|x| *x.borrow_mut() = Some(Facts { escape, calls, live_in, written: rets }));
+        if let Some(o) = &own {
+            // the signature handed in must cover what this emission found (mkds_gen iterates to a fixed point)
+            if o.params & live_in != live_in || o.rets & rets != rets {
+                return Err("direct signature not converged");
+            }
+            written = mask_regs(o.rets).collect();
+            all = all.union(&written).copied().chain(mask_regs(o.params)).collect();
+        }
+    }
     // named struct fields at the accesses (printed as accessors)
     let typed = infer_fields(&blocks, &order, &preds, f.entry, notes);
     let reg_names = typed_names(&typed.regs, notes.module_of);
@@ -1597,7 +2214,7 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
         Some(n) => format!("r{r} = `{n}` (a `{st}`)"),
         None => format!("r{r} points to a `{st}`"),
     }).collect();
-    let ctx = Ctx { blocks: &blocks, rpo, idom, merge, header, children, names, notes, switches: &switches, fields: typed.fields, budget_flags, native_timing: cost.is_none() && crate::lift::timing_native() };
+    let ctx = Ctx { blocks: &blocks, rpo, idom, merge, header, children, names, notes, switches: &switches, fields: typed.fields, budget_flags, native_timing: cost.is_none() && crate::lift::timing_native(), nospill, selfn: own.is_some() };
     ir::set_reg_names(reg_names);
     LAST_TYPES.with(|t| *t.borrow_mut() = (typed.args.clone(), typed.calls.clone()));
     ir::take_field_uses();
@@ -1608,6 +2225,57 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
     let mut s = String::new();
     if !args_doc.is_empty() {
         let _ = writeln!(s, "/// Arguments: {}.", args_doc.join(", "));
+    }
+    if let Some(o) = &own {
+        // Block 5.5: the direct variant (for the `direct` crate) and a T1 entry that wraps it
+        let params: Vec<u8> = mask_regs(o.params).collect();
+        let rets: Vec<u8> = mask_regs(o.rets).collect();
+        let ret_ty = if rets.is_empty() { "u32".to_string() } else { format!("(u32, {})", vec!["u32"; rets.len()].join(", ")) };
+        let mut d = s.clone();
+        let _ = writeln!(d, "#[allow(non_snake_case, unused_variables, unused_assignments, unused_mut, unreachable_code, unused_parens, unused_braces, unused_macros, unused_labels, clippy::all)]");
+        let ps: Vec<String> = params.iter().map(|&i| format!("mut {}: u32", ir::reg_name(i))).collect();
+        let _ = writeln!(d, "pub fn {}(c: &mut recomp::rt::Cpu, m: &mut dyn recomp::rt::Bus{}{}) -> {ret_ty} {{", o.name, if ps.is_empty() { "" } else { ", " }, ps.join(", "));
+        let _ = writeln!(d, "    #[allow(unused_imports)] use recomp::rt as R;\n    #[allow(unused_imports)] use recomp::arm::interwork as iw;\n    #[allow(unused_imports)] use recomp::rt::Mem as _;");
+        let locals: Vec<u8> = all.iter().copied().filter(|i| o.params >> i & 1 == 0).collect();
+        if !locals.is_empty() {
+            let _ = writeln!(d, "    let ({}) = ({});", locals.iter().map(|&i| format!("mut {}", ir::reg_name(i))).collect::<Vec<_>>().join(", "), locals.iter().map(|_| "0u32").collect::<Vec<_>>().join(", "));
+        }
+        if use_fab || use_fz {
+            let mut v = Vec::new();
+            if use_fab {
+                v.extend(["fa", "fb"]);
+            }
+            if use_fz {
+                v.push("fz");
+            }
+            let _ = writeln!(d, "    let ({}) = ({});", v.iter().map(|x| format!("mut {x}")).collect::<Vec<_>>().join(", "), v.iter().map(|_| "0u32").collect::<Vec<_>>().join(", "));
+        }
+        let back = if rets.is_empty() { "t".to_string() } else { format!("(t, {})", rets.iter().map(|&i| ir::reg_name(i)).collect::<Vec<_>>().join(", ")) };
+        let _ = writeln!(d, "    macro_rules! exit {{ ($e:expr) => {{{{ let t: u32 = $e; return {back}; }}}} }}");
+        for mac in ["spill", "reload", "leave", "poll"] {
+            let _ = writeln!(d, "    macro_rules! {mac} {{ ($($x:tt)*) => {{ compile_error!(\"{mac} in a direct function\") }} }}");
+        }
+        let _ = writeln!(d, "    macro_rules! budget {{ ($($x:tt)*) => {{}} }}");
+        d.push_str(&body);
+        d.push_str("}\n");
+        LAST_DIRECT.with(|x| *x.borrow_mut() = Some(d));
+        // the T1 entry: registers from `c.r`, results back to `c.r`, then on as the translation would
+        let _ = writeln!(s, "#[allow(non_snake_case, unused_variables, clippy::all)]");
+        let _ = writeln!(s, "pub fn f_{id}_t1(c: &mut recomp::rt::Cpu, m: &mut dyn recomp::rt::Bus, pc: u32) -> u32 {{");
+        let _ = writeln!(s, "    #[allow(unused_imports)] use recomp::rt as R;");
+        let _ = writeln!(s, "    if pc != {:#X} || !R::t1_enabled({:#X}) {{ return f_{id}(c, m, pc); }}", f.entry, f.entry);
+        let args: String = params.iter().map(|&i| format!(", c.r[{i}]")).collect();
+        if rets.is_empty() {
+            let _ = writeln!(s, "    let x = direct::{}(c, m{args});", o.name);
+        } else {
+            let vs: Vec<String> = (0..rets.len()).map(|k| format!("v{k}")).collect();
+            let _ = writeln!(s, "    let (x, {}) = direct::{}(c, m{args});", vs.join(", "), o.name);
+            let sets: String = rets.iter().zip(&vs).map(|(i, v)| format!("c.r[{i}] = {v}; ")).collect();
+            let _ = writeln!(s, "    {}", sets.trim_end());
+        }
+        let _ = writeln!(s, "    f_{id}(c, m, x)\n}}");
+        ir::set_reg_names(Default::default());
+        return Ok(s);
     }
     let _ = writeln!(s, "#[allow(non_snake_case, unused_variables, unused_assignments, unused_mut, unreachable_code, unused_parens, unused_braces, unused_macros, unused_labels, clippy::all)]");
     let _ = writeln!(s, "pub fn f_{id}_t1(c: &mut recomp::rt::Cpu, m: &mut dyn recomp::rt::Bus, pc: u32) -> u32 {{");
@@ -1708,6 +2376,10 @@ fn block_code(c: &Ctx, x: u32, depth: usize, out: &mut String) {
     indent(out, depth);
     // Block 5.4 (`--timing native`): poll points keep the slice-end check, every other block's `budget!` is empty
     let mac = if c.native_timing && (crate::lift::polls(b.start) || c.header.contains(&x)) { "poll" } else { "budget" };
+    if c.nospill && mac == "budget" {
+        // Block 5.5: `budget!` is empty without a budget; the line goes (the poll points stay)
+        out.truncate(out.len() - 4 * depth);
+    } else {
     match c.budget_flags.get(&x) {
         Some(fl) => {
             let _ = writeln!(out, "{mac}!({:#X}, {}, {{ {} }}); // {:#X}", b.start, b.charge, ir::print_locals(fl).replace(char::from(10), " "), b.start & !1);
@@ -1715,6 +2387,7 @@ fn block_code(c: &Ctx, x: u32, depth: usize, out: &mut String) {
         None => {
             let _ = writeln!(out, "{mac}!({:#X}, {}); // {:#X}", b.start, b.charge, b.start & !1);
         }
+    }
     }
     for ins in &b.insts {
         let mut text = String::new();
@@ -1780,6 +2453,36 @@ fn stmt_code(c: &Ctx, x: u32, s: &S, depth: usize, out: &mut String) {
         S::ExcReturn(e) => {
             let v = ir::expr_locals(e);
             line(out, &format!("spill!(); let v = {v}; let th = c.restore_spsr(); leave!(if th {{ v | 1 }} else {{ v & !3 }});"))
+        }
+        S::Call { target: E::Const(t), ret } if c.nospill && direct_for(*t).is_some() => {
+            // Block 5.5: a closed callee, called directly (nothing to spill)
+            let d = direct_for(*t).unwrap();
+            let name = (c.names)(*t).map(|n| format!(" // {n}")).unwrap_or_default();
+            let args: String = mask_regs(d.params).map(|i| format!(", {}", ir::reg_name(i))).collect();
+            let path = if c.selfn { d.name.clone() } else { format!("direct::{}", d.name) };
+            let call = format!("{path}(c, m{args})");
+            let rets: Vec<String> = mask_regs(d.rets).map(ir::reg_name).collect();
+            let stmt = if rets.is_empty() { format!("let x = {call};") } else { format!("let x: u32; (x, {}) = {call};", rets.join(", ")) };
+            let bad = if c.selfn { format!("R::bad_return(x, {ret:#X})") } else { "exit!(x)".into() };
+            line(out, &format!("{stmt} if x != {ret:#X} {{ {bad}; }}{name}"))
+        }
+        S::IfSome(e, _) if c.nospill && block_return(s).is_some() => {
+            line(out, &format!("{} exit!(iw(v));{}", inline_block(e), block_note(e)))
+        }
+        S::Do(e) if c.nospill && plain_block(e).is_some() => line(out, &format!("{}{}", inline_block(e), block_note(e))),
+        S::Do(e) if c.nospill && matches!(e, E::Call(H::Msr, _)) => {
+            // only the banked registers take part in a mode switch
+            let mut regs = BTreeSet::new();
+            let mut w = BTreeSet::new();
+            for b in c.blocks.values() {
+                for ins in &b.insts {
+                    ins.stmts.iter().for_each(|s| regs_ext(s, 0, &mut regs, &mut w));
+                }
+            }
+            let banked: Vec<u8> = regs.union(&w).copied().filter(|&i| (8..15).contains(&i)).collect();
+            let sp: String = banked.iter().map(|&i| format!("c.r[{i}] = {}; ", ir::reg_name(i))).collect();
+            let rl: String = banked.iter().map(|&i| format!(" {} = c.r[{i}];", ir::reg_name(i))).collect();
+            line(out, &format!("{sp}{};{rl}", ir::expr_locals(e)))
         }
         S::Call { target, ret } => {
             let name = match target {
