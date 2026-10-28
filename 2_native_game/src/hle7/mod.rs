@@ -20,6 +20,12 @@
 //! acceptance race) is *forwarded* to the CPU unchanged, so behaviour degrades to the exact model instead
 //! of breaking; [`Router::forwarded`] counts them.
 //!
+//! **Without the ARM7 CPU (`MKDS_HW_SND=native`, Block 5.4).** Every tag is claimed from the start. The CPU's
+//! boot runs once as plain code ([`snd::Snd::boot`]); NVRAM, RTC, touch, PM, WM, backup, WVR and CTRDG start-up
+//! are answered here; SOUND, OS (12: reset request, answered by [`snd`]'s main-loop poll), CARD (14) and MIC (9)
+//! and any command without a native handler go to the ARM7's own lifted callbacks as plain calls, with the
+//! SPI service thread's queue drained the same way (MIC, and touch / PM / NVRAM commands forwarded there).
+//!
 //! Timing: replies are queued when a command completes and delivered at the next [`Router::advance`]
 //! (called after every ARM9 slice), not after the ARM7's thread and SPI latency; flash writes complete at
 //! once. Touch auto-sampling runs on the V-count lines the ARM7's periodic V-alarms would use.
@@ -164,12 +170,17 @@ impl Router {
             let mut r = Router::new();
             if snd::native_selected() {
                 r.snd = Some(snd::Snd::new());
+                if !snd::cpu_boot_selected() {
+                    // no ARM7 CPU at all (Block 5.4): every tag is answered here, natively or by the lifted
+                    // callbacks run as plain calls
+                    r.claimed = u32::MAX;
+                }
             }
             let var = |k: &str| std::env::var(k).ok();
             if let Some(m) =
                 var("MKDS_HLE7_TAGS").and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok())
             {
-                r.claimed = m & CLAIMED;
+                r.claimed &= m;
             }
             if let Some(l) = var("MKDS_HLE7_LATENCY").and_then(|v| v.parse().ok()) {
                 r.latency = l;
@@ -210,6 +221,13 @@ impl Router {
             self.advance(hw, None);
             return true;
         };
+        // Block 5.4: the ARM7 boots without its CPU the first time it would run (`MKDS_SND_BOOT=cpu`: the CPU
+        // boots and the driver takes over later)
+        if let Some(s) = self.snd.as_mut().filter(|s| !s.active && !snd::cpu_boot_selected()) {
+            s.boot(hw, a);
+            self.claimed = u32::MAX;
+            hw.hle7_tags = u32::MAX;
+        }
         self.advance(hw, Some(&mut a.s.periph));
         let Some(s) = self.snd.as_mut() else { return true };
         if !s.active {

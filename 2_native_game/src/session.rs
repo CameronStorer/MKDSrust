@@ -30,6 +30,8 @@ pub struct Session<'a> {
     /// `code_epoch` at the last periodic residency check: unchanged code needs no re-hash.
     residency_epoch: u64,
     pub resident_overlays: Vec<&'static str>,
+    /// Residency checks made because `FS_AfterLoadOverlay` was entered (Block 5.4 condition 4).
+    pub residency_rechecks: u64,
     /// Continue into the next lifted block within a slice (default). Off: every call, return or
     /// computed jump ends the slice, as before 2026-10-15 (finer CPU interleaving, much slower).
     pub chain: bool,
@@ -123,6 +125,7 @@ impl<'a> Session<'a> {
             residency_frame: u64::MAX,
             residency_epoch: u64::MAX,
             resident_overlays: Vec::new(),
+            residency_rechecks: 0,
             chain: true,
             overlay_windows: Vec::new(),
             shadow: None,
@@ -193,9 +196,15 @@ impl<'a> Session<'a> {
             self.code_epoch = self.machine.hw.code_epoch;
         }
         let frame = self.frame_number();
+        // Block 5.4 condition 4 (native OS time): an overlay load just finished (`FS_AfterLoadOverlay`
+        // entered): re-check now, whatever the frame.
+        let loaded = self.machine.os_gate.as_mut().is_some_and(|g| std::mem::take(&mut g.overlay_loaded));
+        if loaded {
+            self.residency_rechecks += 1;
+        }
         // Once a frame, and only if overlay code was written since the last check (watched writes
         // bump `code_epoch`; without one the verification result cannot change).
-        if frame != self.residency_frame && self.code_epoch != self.residency_epoch {
+        if loaded || frame != self.residency_frame && self.code_epoch != self.residency_epoch {
             self.residency_epoch = self.code_epoch;
             let before = self.resident_overlays.clone();
             self.resident_overlays = self
@@ -288,6 +297,9 @@ impl<'a> Session<'a> {
                 }
                 if let Some(g) = bus.m.os_gate.as_mut() {
                     g.entry(self.pc, self.cpu.r[0]);
+                    if g.overlay_loaded {
+                        break; // re-check residency before the overlay's code runs (next slice start)
+                    }
                 }
                 if let Some(p) = bus.m.tick_pin.as_mut() {
                     p.entry(self.pc, &mut self.cpu);
@@ -330,7 +342,7 @@ impl<'a> Session<'a> {
         }
         // Preserve half bus cycles between slices instead of rounding every slice up.
         self.half_cycle += used as u64;
-        self.machine.tick(self.half_cycle / 2);
+        self.machine.slice_end(self.pc, self.half_cycle / 2);
         self.half_cycle %= 2;
         if let Some(a) = &self.machine.arm7 {
             if let Some(reason) = &a.execution_error {
@@ -427,7 +439,8 @@ impl<'a> Session<'a> {
             p.slice_end(self.pc, used);
         }
         self.half_cycle += used as u64;
-        self.machine.tick(self.half_cycle / 2);
+        let end = self.fibers.as_ref().map_or(self.pc, |f| f.last_end.0);
+        self.machine.slice_end(end, self.half_cycle / 2);
         self.half_cycle %= 2;
         if let Some(a) = &self.machine.arm7 {
             if let Some(reason) = &a.execution_error {
@@ -503,7 +516,23 @@ impl Drop for Session<'_> {
     /// `MKDS_HW_TIME=native`: one summary line of the OS time / IRQ gate (nothing otherwise).
     fn drop(&mut self) {
         if let (Some(g), Some(v)) = (&self.machine.os_gate, &self.machine.hw.vtime) {
-            eprintln!("MKDS_HW_TIME=native: {g}; {v}");
+            eprintln!("MKDS_HW_TIME=native: {g}; {v}; residency re-checks at FS_AfterLoadOverlay {}", self.residency_rechecks);
+        }
+        if self.machine.budget_free {
+            let m = &self.machine;
+            eprintln!(
+                "MKDS_TIMING=native: frame-event time {}; hardware advanced by busy-wait spins {}, by the guard {}; ARM7 CPU cycles {}, plain-call instructions {}",
+                if m.event_time() { "on" } else { "off (ARM7 CPU present)" },
+                m.spin_advances,
+                m.guard_advances,
+                m.arm7.as_ref().map_or(0, |a| a.lifted_cycles + a.interpreted_instructions),
+                m.arm7.as_ref().map_or(0, |a| a.plain_cycles)
+            );
+            if !m.guard_sites.is_empty() {
+                let mut v: Vec<_> = m.guard_sites.iter().map(|(&pc, &n)| (n, pc)).collect();
+                v.sort_unstable_by(|a, b| b.cmp(a));
+                eprintln!("MKDS_TIMING=native: guard advances by slice-end pc (64-byte block): {:x?}", &v[..v.len().min(8)]);
+            }
         }
     }
 }

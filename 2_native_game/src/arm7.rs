@@ -76,6 +76,8 @@ pub struct State7 {
     pub undecodable: bool,
     /// Diagnostics (`MKDS_PXI_LOG`): the block being run, for the main-RAM write summary.
     pub trace_pc: u32,
+    /// [`Arm7::plain_boot`]: `os_init_lock`'s last write (extension 0xBF) waits for the ARM9's lock init.
+    pub boot_lock_pending: bool,
 }
 
 pub struct Arm7 {
@@ -87,6 +89,9 @@ pub struct Arm7 {
     diagnostic_interpreter: bool,
     pub execution_error: Option<String>,
     pub lifted_cycles: u64,
+    /// Instructions run as plain calls ([`Arm7::plain_call`], [`Arm7::plain_boot`]: the event-driven ARM7 of
+    /// `MKDS_HW_SND=native`), counted apart from the CPU's own [`Arm7::lifted_cycles`].
+    pub plain_cycles: u64,
     pub interpreted_instructions: u64,
     /// `MKDS_SND_LOG` (diagnostics, record only): log the SND driver's command deliveries and thread-loop
     /// iterations as the CPU reaches them ([`crate::hle7::snd::log`]).
@@ -152,6 +157,7 @@ impl Arm7 {
             diagnostic_interpreter: true,
             execution_error: None,
             lifted_cycles: 0,
+            plain_cycles: 0,
             interpreted_instructions: 0,
             snd_watch: crate::hle7::snd::log::on(),
             watch_pc: if crate::hle7::snd::log::on() { crate::hle7::snd::addr::MAIN_LOOP_MARK } else { 0 },
@@ -182,6 +188,7 @@ impl Arm7 {
                 profile: None,
                 undecodable: false,
                 trace_pc: 0,
+                boot_lock_pending: false,
                 audio_out: std::collections::VecDeque::new(),
                 audio_cycles: 0,
                 icache: vec![None; ((CODE_HI - CODE_LO) / 2) as usize],
@@ -908,10 +915,48 @@ pub struct Plain<'a> {
     /// Replaying ([`Arm7::feed`]): reads come from the recording, the FIFO is reported as it was.
     feed: Option<&'a mut crate::hle7::snd::Feed>,
     feed_on: bool,
+    /// [`Arm7::plain_boot`]: the boot's waits on the ARM9 are answered at once ([`boot`]); set when the boot
+    /// reached the main loop's first halt.
+    boot: bool,
+    /// The boot reached the main loop's halt, with this much budget left.
+    halted: Option<u32>,
+    /// [`Arm7::plain_boot`] diagnostics: calls made, by target.
+    calls: Option<HashMap<u32, u64>>,
+}
+
+/// The ARM7 start-up's waits, answered by [`Plain`] during [`Arm7::plain_boot`] (addresses from
+/// `dictionary/game_names.csv`).
+pub mod boot {
+    /// `pxi_init`'s sync-nibble handshake reads IPCSYNC: during the boot the ARM9 is reported as having
+    /// echoed the ARM7's nibble, so the countdown ends at once; the ARM9's side of the handshake is then
+    /// answered by [`crate::ds_mem::Bus::sync_responder`].
+    pub const IPCSYNC: u32 = 0x0400_0180;
+    /// `ctrdg_check_cartridge_maybe`: spins until the ARM9's CTRDG word arrives; skipped (the native router
+    /// answers that word: `hle7::Router::receive`, tag CTRDG).
+    pub const CTRDG_CHECK: u32 = 0x0380_3EB4;
+    /// `pxi_is_remote_callback_ready` (`card_init` spins until the ARM9 registered its CARD callback):
+    /// reported ready.
+    pub const PXI_REMOTE_READY: u32 = 0x037F_B698;
+    /// `os_init_lock`: waits until the ARM9's `OS_InitLock` has taken the shared lock word (owner 0x7F at
+    /// 0x027FFFF4), writes the ARM7's lock-ID tables (0x027FFFB8/BC) and then the extension half-word
+    /// (0x027FFFF6 = 0xBF). Done natively: the flag and tables now, the extension once the ARM9 has finished
+    /// its own lock init ([`State7::boot_lock_pending`]; the ARM9 waits for the extension to be 0 first).
+    pub const OS_INIT_LOCK: u32 = 0x037F_8CBC;
+    pub const OS_INIT_LOCK_DONE: u32 = 0x0380_76E0;
+    pub const LOCK_IDS: u32 = 0x027F_FFB8;
+    pub const LOCK_OWNER: u32 = 0x027F_FFF4;
+    pub const LOCK_EXT: u32 = 0x027F_FFF6;
+    /// `svc_halt_veneer`: the first call is the main loop's halt (`arm7_main` 0x037F846C): the boot is over.
+    pub const HALT: u32 = 0x037F_8528;
 }
 
 impl Plain<'_> {
     fn read(&mut self, a: u32, n: usize) -> u32 {
+        if self.boot && a & !3 == boot::IPCSYNC {
+            // the ARM9 "echoes" the ARM7's own output nibble (bits 8-11) in bits 0-3
+            let v = self.v.read(a & !3, 4) & !0xF | (self.v.s.sync_ctl >> 8) & 0xF;
+            return v >> (8 * (a & 3));
+        }
         if let Some(f) = self.feed.as_deref_mut().filter(|_| matches!(a >> 24, 0x02 | 0x04)) {
             if let Some(v) = f.take(a, n) {
                 return v;
@@ -961,6 +1006,35 @@ impl Mem for Plain<'_> {
 
 impl Bus for Plain<'_> {
     fn call(&mut self, c: &mut Cpu, target: u32, ret: u32) -> u32 {
+        if let Some(n) = self.calls.as_mut() {
+            *n.entry(target).or_insert(0) += 1;
+        }
+        if self.boot {
+            match target & !1 {
+                boot::CTRDG_CHECK => return ret,
+                boot::OS_INIT_LOCK => {
+                    if self.v.read(boot::OS_INIT_LOCK_DONE, 4) == 0 {
+                        self.v.write(boot::OS_INIT_LOCK_DONE, 1, 4);
+                        self.v.write(boot::LOCK_IDS, 0xFFFF_FFFF, 4);
+                        self.v.write(boot::LOCK_IDS + 4, 0xFFFF_0000, 4);
+                        self.v.s.boot_lock_pending = true;
+                    }
+                    return ret;
+                }
+                boot::PXI_REMOTE_READY => {
+                    c.r[0] = 1;
+                    return ret;
+                }
+                boot::HALT => {
+                    // stop here: unwind every frame (the main loop is not run; the event-driven ARM7 is)
+                    self.halted = Some(c.budget);
+                    c.r[15] = ret;
+                    c.budget = 0;
+                    return rt::BUDGET_EXHAUSTED;
+                }
+                _ => {}
+            }
+        }
         let d = self.d;
         d.call(c, self, target, ret)
     }
@@ -999,9 +1073,9 @@ impl Arm7 {
         let sp = cpu.r[13];
         self.s.trace_pc = target;
         let feed_on = self.feed.is_some();
-        let mut bus = Plain { v: View { s: &mut self.s, hw }, d, sent, feed: self.feed.as_deref_mut(), feed_on };
+        let mut bus = Plain { v: View { s: &mut self.s, hw }, d, sent, feed: self.feed.as_deref_mut(), feed_on, boot: false, halted: None, calls: None };
         let pc = d.call(cpu, &mut bus, target, PLAIN_RET);
-        self.lifted_cycles += (PLAIN_LIMIT - cpu.budget) as u64;
+        self.plain_cycles += (PLAIN_LIMIT - cpu.budget) as u64;
         if let Some(e) = d.take_error() {
             return Err(format!("plain ARM7 call {target:#010x}: {e}"));
         }
@@ -1012,6 +1086,50 @@ impl Arm7 {
             ));
         }
         Ok(cpu.r[0])
+    }
+
+    /// Block 5.4 (`MKDS_HW_SND=native`): runs the ARM7's start-up (from its entry: crt0, autoloads,
+    /// `arm7_main`'s OS / PXI / SND / FS / RTC / WVR / SPI initialisation, the service threads up to their
+    /// first blocking receive) as plain code on `cpu`, without the CPU loop, without time and without
+    /// interrupts, until `arm7_main` reaches its main loop's first halt. The waits on the ARM9 are answered
+    /// in place ([`boot`]). Thread switches the OS makes on the way (a new higher-priority thread runs until it
+    /// blocks, then the main thread resumes) happen inside the run, as on the CPU. On return the CPU's
+    /// registers are those of the main thread at the halt and the CPU is marked halted; it is never run.
+    pub fn plain_boot(
+        &mut self,
+        hw: &mut ds_mem::Bus,
+        cpu: &mut Cpu,
+        sent: &mut std::collections::VecDeque<u32>,
+    ) -> Result<(), String> {
+        let d = self.dispatcher.as_ref().ok_or("no ARM7 table installed")?;
+        cpu.budget = PLAIN_LIMIT;
+        let mut bus = Plain { v: View { s: &mut self.s, hw }, d, sent, feed: None, feed_on: false, boot: true, halted: None, calls: Some(HashMap::new()) };
+        let mut pc = self.pc;
+        while pc != rt::BUDGET_EXHAUSTED {
+            let Some(f) = d.get(pc) else {
+                return Err(format!("ARM7 boot: no lifted code at {pc:#010x}: {}", d.describe(pc)));
+            };
+            pc = f(cpu, &mut bus, pc);
+        }
+        let halted = bus.halted;
+        cpu.budget = halted.unwrap_or(0);
+        let mut calls: Vec<(u64, u32)> = bus.calls.take().unwrap_or_default().into_iter().map(|(t, n)| (n, t)).collect();
+        calls.sort_unstable_by(|a, b| b.cmp(a));
+        self.plain_cycles += (PLAIN_LIMIT - cpu.budget) as u64;
+        if let Some(e) = d.take_error() {
+            return Err(format!("ARM7 boot: {e}"));
+        }
+        if halted.is_none() {
+            return Err(format!(
+                "ARM7 boot did not reach the main loop (pc {:#010x}, lr {:#010x}); most called: {:x?}",
+                cpu.r[15],
+                cpu.r[14],
+                &calls[..calls.len().min(8)]
+            ));
+        }
+        self.pc = cpu.r[15];
+        self.s.halted = true;
+        Ok(())
     }
 
     /// The ARM7 CPU is idle: halted in a thread context with no interrupt pending and every ARM9 word read
@@ -1216,7 +1334,49 @@ mod tests {
         assert_eq!(cpu.r[13], 0x0380_F000);
         assert_eq!(sent, [42], "queued, not dropped, while the FIFO is full");
         assert_eq!(hw.fifo_in.len(), 16);
-        assert_eq!(a.lifted_cycles, 5);
+        assert_eq!((a.lifted_cycles, a.plain_cycles), (0, 5), "plain calls are not CPU cycles");
+    }
+
+    #[test]
+    fn plain_boot_answers_the_waits_and_stops_at_the_main_loop_halt() {
+        // entry: the PXI handshake (count 8..0 while IPCSYNC echoes), skip the CTRDG wait, a "remote ready"
+        // spin, then the main loop's halt
+        fn entry(c: &mut crate::rt::Cpu, m: &mut dyn crate::rt::Bus, _pc: u32) -> u32 {
+            crate::rt::spend(c, 1);
+            let mut n = 8i32;
+            while n >= 0 {
+                m.w16(0x0400_0180, (n as u16) << 8);
+                if m.r16(0x0400_0180) & 0xF == n as u16 { n -= 1 } else { n = 8 }
+            }
+            if m.call(c, super::boot::CTRDG_CHECK, 0x0380_0004) != 0x0380_0004 { return 0x0380_0004; }
+            loop {
+                c.r[0] = 0;
+                m.call(c, super::boot::PXI_REMOTE_READY, 0x0380_0008);
+                if c.r[0] != 0 { break; }
+            }
+            c.r[1] = 7;
+            let r = m.call(c, super::boot::HALT, 0x0380_000C);
+            if r != 0x0380_000C { return r; }
+            c.r[1] = 99; // not reached
+            0x0380_0010
+        }
+        fn spin(_c: &mut crate::rt::Cpu, _m: &mut dyn crate::rt::Bus, pc: u32) -> u32 {
+            pc // the real CTRDG check would never return without the ARM9
+        }
+        static T: &[crate::mem::Lifted] = &[
+            crate::mem::Lifted { segment: "arm7", entry: 0x0380_0000, blocks: &[0x0380_0000], insts: &[], f: entry },
+            crate::mem::Lifted { segment: "arm7", entry: super::boot::CTRDG_CHECK, blocks: &[super::boot::CTRDG_CHECK], insts: &[], f: spin },
+        ];
+        let mut hw = crate::ds_mem::Bus::new();
+        hw.arm7_lle = true;
+        let mut a = super::Arm7::new();
+        a.configure_lifted(T, false);
+        a.pc = 0x0380_0000;
+        let mut cpu = a.cpu.clone();
+        let mut sent = std::collections::VecDeque::new();
+        a.plain_boot(&mut hw, &mut cpu, &mut sent).unwrap();
+        assert_eq!((cpu.r[1], a.pc, a.s.halted), (7, 0x0380_000C, true));
+        assert_eq!(a.lifted_cycles, 0, "the CPU never ran");
     }
 
     #[test]

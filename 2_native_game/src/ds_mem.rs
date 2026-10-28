@@ -319,6 +319,11 @@ pub struct Bus {
     pub bios9: Vec<u8>,
     /// The game card in the slot (the user's ROM), when inserted.
     pub card: Option<crate::card::Card>,
+    /// Block 5.4 (`MKDS_HW_SND=native`, no ARM7 CPU): the ARM7's side of the `PXI_Init` sync-nibble
+    /// handshake, answered natively. `Some` while it runs: the ARM7 counts its nibble down from 8 and steps
+    /// to the next value when the ARM9 echoes the current one, as `pxi_init`'s loop does; it ends when the
+    /// ARM9 has echoed 0. `None` (the default): the ARM7 CPU or the old stand-in answers.
+    pub sync_responder: Option<u8>,
     /// The ARM9 wrote IPCSYNC with bit 13 (IRQ request to the ARM7) since the ARM7 last looked.
     pub sync_irq_to_arm7: bool,
     watched_main_code: Option<(usize, usize)>,
@@ -480,6 +485,7 @@ impl Bus {
             hle7_tags: 0,
             hle7_in: Vec::new(),
             sync_irq_to_arm7: false,
+            sync_responder: None,
             watched_main_code: None,
             code_epoch: 0,
             probe: None,
@@ -931,7 +937,16 @@ impl Bus {
                     p.pxi(&self.main, EV_A9_SYNC, mine | (irq as u32) << 8);
                 }
                 crate::hle7::trace::event("9S", self.cycles, if (off, n) == (0x181, 1) { v << 8 } else { v } & 0xFFFF, None);
-                if self.arm7_lle {
+                if self.sync_responder.is_some() {
+                    if mine as u8 == self.arm7_sync {
+                        if self.arm7_sync == 0 {
+                            self.sync_responder = None; // the ARM9 echoed 0: the handshake is over
+                        } else {
+                            self.arm7_sync -= 1;
+                            self.sync_responder = Some(self.arm7_sync);
+                        }
+                    }
+                } else if self.arm7_lle {
                     // the real ARM7 (crate::arm7) answers; bit 13 asks for an IPC sync IRQ on its side
                     if (off, n) != (0x181, 1) && v & 0x2000 != 0
                         || (off, n) == (0x181, 1) && v & 0x20 != 0
@@ -1481,6 +1496,31 @@ mod tests {
             0x0600_0000,
             "a retained diagnostic log is not a full hardware FIFO"
         );
+    }
+
+    #[test]
+    fn native_sync_responder_counts_down_on_echo_and_finishes() {
+        let mut b = Bus::new();
+        b.arm7_lle = true;
+        b.arm7_set_sync(8, false);
+        b.sync_responder = Some(8);
+        // the ARM9's PXI_Init loop (0x0214D830): echo; count changes; done at 0 after > 4 changes
+        let (mut changes, mut done) = (0, false);
+        for _ in 0..40 {
+            let lr = b.r16(IO_BASE + 0x180) & 0xF;
+            b.w16(IO_BASE + 0x180, lr << 8);
+            if lr == 0 && changes > 4 {
+                done = true;
+                break;
+            }
+            if b.r16(IO_BASE + 0x180) & 0xF != lr {
+                changes += 1;
+            }
+        }
+        assert!(done);
+        assert_eq!((changes, b.sync_responder), (8, None));
+        b.w16(IO_BASE + 0x180, 0);
+        assert_eq!(b.r16(IO_BASE + 0x180) & 0xF, 0, "no answer after the handshake");
     }
 
     #[test]

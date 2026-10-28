@@ -202,12 +202,31 @@ pub struct IrqGate {
     pub polled: u64,
     pub watchdog: u64,
     pub held: u64,
+    /// Block 5.4 condition 4: the ARM9 entered `FS_AfterLoadOverlay` (an overlay was just loaded); the session
+    /// re-checks overlay residency at its next slice start and clears this. Count of entries.
+    pub overlay_loaded: bool,
+    pub overlay_loads: u64,
+    /// Diagnostics (`MKDS_GATE_WATCH=hex,hex,..`): entries counted per watched pc.
+    pub watch: Vec<(u32, u64)>,
 }
+
+/// `FS_AfterLoadOverlay` (AMCE revision 0): runs after an overlay's code and data are in place.
+pub const FS_AFTER_LOAD_OVERLAY: u32 = 0x0200_51F4;
+/// The step of the game's own overlay loader (`fs_request_overlay_archive_load` 0x02059EA4 →
+/// `FS_LoadOverlayInfo` …, which does not go through `FS_LoadOverlay`) that makes freshly loaded code
+/// executable: data-cache flush, instruction-cache invalidate, BSS clear (0x0200583C). Measured on the
+/// reference route (`MKDS_GATE_WATCH`): `FS_AfterLoadOverlay` 0 entries, this 1.
+pub const FS_OVERLAY_CODE_READY: u32 = 0x0200_583C;
 
 impl std::fmt::Display for IrqGate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "IRQs delivered after a safe point {}, by a loop poll {}, by the watchdog {} ({} sites); slice starts that held one back {}",
-            self.delivered, self.polled, self.watchdog, self.reported.len(), self.held)
+            self.delivered, self.polled, self.watchdog, self.reported.len(), self.held)?;
+        write!(f, "; overlay loads (FS_AfterLoadOverlay / code ready) {}", self.overlay_loads)?;
+        if !self.watch.is_empty() {
+            write!(f, "; watched entries {:x?}", self.watch)?;
+        }
+        Ok(())
     }
 }
 
@@ -225,7 +244,8 @@ impl IrqGate {
     }
 
     pub fn new(limit: u64) -> Self {
-        IrqGate { open: false, held_since: None, limit: limit.max(1), reported: Vec::new(), delivered: 0, polled: 0, watchdog: 0, held: 0 }
+        IrqGate { open: false, held_since: None, limit: limit.max(1), reported: Vec::new(), delivered: 0, polled: 0, watchdog: 0, held: 0, overlay_loaded: false, overlay_loads: 0,
+            watch: std::env::var("MKDS_GATE_WATCH").map(|v| v.split(',').filter_map(|x| u32::from_str_radix(x.trim().trim_start_matches("0x"), 16).ok()).map(|a| (a, 0)).collect()).unwrap_or_default() }
     }
 
     /// A wait (CP15 halt, BIOS wait): the safe point of every frame.
@@ -238,6 +258,15 @@ impl IrqGate {
     #[inline]
     pub fn entry(&mut self, pc: u32, r0: u32) {
         if pc & 0xFFFF_FF00 != 0x0200_FC00 {
+            if pc == FS_AFTER_LOAD_OVERLAY || pc == FS_OVERLAY_CODE_READY {
+                self.overlay_loaded = true;
+                self.overlay_loads += 1;
+            }
+            if !self.watch.is_empty() {
+                if let Some(w) = self.watch.iter_mut().find(|w| w.0 == pc) {
+                    w.1 += 1;
+                }
+            }
             return;
         }
         if let Some(&(_, check, _)) = SAFE_ENTRIES.iter().find(|e| e.0 == pc) {

@@ -27,11 +27,16 @@ pub struct Native {
     pub f: LiftedFn,
 }
 
+/// Block 5.4: set by a budget-free machine (`MKDS_TIMING=native`, `Machine::budget_free`): natives pay no
+/// instruction budget, like the generated code around them.
+pub static BUDGET_FREE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Charges `cost` instructions; `false` means the slice is out of budget and the caller must return
-/// [`rt::BUDGET_EXHAUSTED`] (the dispatch loop comes back to the same entry later).
+/// [`rt::BUDGET_EXHAUSTED`] (the dispatch loop comes back to the same entry later). In a budget-free build
+/// ([`BUDGET_FREE`]) nothing is charged and the call always proceeds.
 #[inline]
 pub fn enter(c: &mut Cpu, pc: u32, cost: u32) -> bool {
-    if rt::spend(c, cost) {
+    if BUDGET_FREE.load(std::sync::atomic::Ordering::Relaxed) || rt::spend(c, cost) {
         return true;
     }
     c.r[15] = pc;

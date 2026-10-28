@@ -336,12 +336,13 @@ pub fn run_with_tables(
     }
     let arm7 = session.machine.arm7.as_ref();
     eprintln!(
-        "Acceptance driver stopped at frame {} after {:?}; stats {:?}; ARM7 lifted cycles {} interpreted instructions {}{}; fiber thread switches {}; results captures require inspection",
+        "Acceptance driver stopped at frame {} after {:?}; stats {:?}; ARM7 lifted cycles {} interpreted instructions {} plain-call instructions {}{}; fiber thread switches {}; results captures require inspection",
         session.frame_number(),
         wall.elapsed(),
         session.stats,
         arm7.map_or(0, |a| a.lifted_cycles),
         arm7.map_or(0, |a| a.interpreted_instructions),
+        arm7.map_or(0, |a| a.plain_cycles),
         arm7.and_then(|a| a.execution_error.as_deref()).map_or(String::new(), |e| format!("; ARM7 error: {e}")),
         session.fiber_switches()
     );
@@ -459,7 +460,17 @@ pub mod oracle {
     pub struct Mask {
         pub ranges: Vec<(u32, u32, String)>,
         pub regions: Vec<(String, String)>,
+        /// `kart +0xSTART-+0xEND reason`: offsets inside every kart of the kart array (`*0x0217ACF8`, eight
+        /// karts of [`KART_SIZE`] bytes), so one line covers all karts on any course or mode.
+        pub karts: Vec<(u32, u32, String)>,
+        /// The kart array's address at the sample being hashed (0 = none yet: kart entries mask nothing).
+        pub kart_array: u32,
     }
+
+    /// The kart array pointer and each kart's size (the race loop's `pointer(kart, 0x5a8)` check).
+    pub const KART_ARRAY_PTR: u32 = 0x0217_ACF8;
+    pub const KART_SIZE: u32 = 0x5A8;
+    pub const KARTS: u32 = 8;
 
     impl Mask {
         pub fn parse(text: &str) -> Result<Mask, String> {
@@ -478,6 +489,17 @@ pub mod oracle {
                         return Err(format!("mask line {}: region {name} needs a reason", n + 1));
                     }
                     m.regions.push((name.into(), why.trim().into()));
+                    continue;
+                }
+                if head == "kart" {
+                    let (range, why) = reason.split_once(char::is_whitespace).unwrap_or((reason, ""));
+                    let (a, b) = range.split_once('-').ok_or(format!("mask line {}: expected kart +0xA-+0xB", n + 1))?;
+                    let off = |x: &str| num(x.trim_start_matches('+'));
+                    let (a, b) = (off(a).map_err(|e| e.to_string())?, off(b).map_err(|e| e.to_string())?);
+                    if b <= a || b > KART_SIZE || why.trim().is_empty() {
+                        return Err(format!("mask line {}: kart range must be non-empty, inside a kart, with a reason", n + 1));
+                    }
+                    m.karts.push((a, b, why.trim().into()));
                     continue;
                 }
                 if reason.is_empty() {
@@ -500,6 +522,18 @@ pub mod oracle {
                 let (lo, hi) = ((a as u64).max(base as u64), (b as u64).min(end));
                 if lo < hi {
                     buf[(lo - base as u64) as usize..(hi - base as u64) as usize].fill(0);
+                }
+            }
+            if self.kart_array == 0 {
+                return;
+            }
+            for k in 0..KARTS {
+                let kart = (self.kart_array + k * KART_SIZE) as u64;
+                for &(a, b, _) in &self.karts {
+                    let (lo, hi) = ((kart + a as u64).max(base as u64), (kart + b as u64).min(end));
+                    if lo < hi {
+                        buf[(lo - base as u64) as usize..(hi - base as u64) as usize].fill(0);
+                    }
                 }
             }
         }
@@ -541,6 +575,68 @@ pub mod oracle {
     }
 
     /// `inputs.csv` change rows: (logical frame, buttons).
+    /// `MKDS_SHOT_FRAMES=a,b,..`: logical frames whose screens the recorder saves (diagnostics).
+    fn shot_frames() -> &'static [u32] {
+        static F: std::sync::OnceLock<Vec<u32>> = std::sync::OnceLock::new();
+        F.get_or_init(|| {
+            std::env::var("MKDS_SHOT_FRAMES")
+                .map(|v| v.split(',').filter_map(|f| f.trim().parse().ok()).collect())
+                .unwrap_or_default()
+        })
+    }
+
+    /// Writes 256-wide packed 0x00RRGGBB pixels (top screen above bottom) as an RGB PNG (uncompressed
+    /// deflate blocks: no image crate in the game's tools).
+    fn shot(path: &Path, px: &[u32]) -> std::io::Result<()> {
+        fn crc(d: &[u8]) -> u32 {
+            let mut c = !0u32;
+            for &b in d {
+                c ^= b as u32;
+                for _ in 0..8 {
+                    c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+                }
+            }
+            !c
+        }
+        fn chunk(out: &mut Vec<u8>, kind: &[u8], data: &[u8]) {
+            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            let start = out.len();
+            out.extend_from_slice(kind);
+            out.extend_from_slice(data);
+            let c = crc(&out[start..]);
+            out.extend_from_slice(&c.to_be_bytes());
+        }
+        let h = (px.len() / 256) as u32;
+        let mut raw = Vec::with_capacity(px.len() * 3 + h as usize);
+        for row in px.chunks(256) {
+            raw.push(0);
+            raw.extend(row.iter().flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8]));
+        }
+        let mut z = vec![0x78, 0x01];
+        for (k, part) in raw.chunks(65535).enumerate() {
+            let last = (k + 1) * 65535 >= raw.len();
+            z.push(last as u8);
+            z.extend_from_slice(&(part.len() as u16).to_le_bytes());
+            z.extend_from_slice(&(!(part.len() as u16)).to_le_bytes());
+            z.extend_from_slice(part);
+        }
+        let (mut a, mut b) = (1u32, 0u32);
+        for &x in &raw {
+            a = (a + x as u32) % 65521;
+            b = (b + a) % 65521;
+        }
+        z.extend_from_slice(&(b << 16 | a).to_be_bytes());
+        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&256u32.to_be_bytes());
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        ihdr.extend_from_slice(&[8, 2, 0, 0, 0]);
+        chunk(&mut out, b"IHDR", &ihdr);
+        chunk(&mut out, b"IDAT", &z);
+        chunk(&mut out, b"IEND", &[]);
+        std::fs::write(path, out)
+    }
+
     pub fn read_inputs(path: &Path) -> Result<Vec<(u32, u16)>, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
         let mut rows = Vec::new();
@@ -737,6 +833,13 @@ pub mod oracle {
                 }
             }
             m.sync_gx();
+            if !self.mask.karts.is_empty() {
+                // kart-relative mask entries follow the kart array of this sample (main RAM only)
+                let mut b = [0u8; 4];
+                m.hw.peek_into(KART_ARRAY_PTR, &mut b);
+                let k = u32::from_le_bytes(b);
+                self.mask.kart_array = if (0x0200_0000..0x0240_0000 - KARTS * KART_SIZE).contains(&k) { k } else { 0 };
+            }
             let lag = self.last.map_or(0, |l| frame.wrapping_sub(l).wrapping_sub(1));
             let probe = {
                 let p = m.hw.probe.as_mut().unwrap();
@@ -821,6 +924,10 @@ pub mod oracle {
             if self.dumps.contains(&frame) {
                 // diagnostics only: raw RAM goes to the (scratch) output directory, never to the repo
                 std::fs::write(self.dir.join(format!("ram_{frame}.bin")), &m.hw.main)?;
+            }
+            if shot_frames().contains(&frame) {
+                // diagnostics only (`MKDS_SHOT_FRAMES=a,b,..`): both screens as PNG, for writing input scripts
+                shot(&self.dir.join(format!("shot_{frame}.png")), &m.render_snapshot().screens())?;
             }
             self.waits = [0; 4];
             self.last = Some(frame);

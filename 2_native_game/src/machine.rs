@@ -85,7 +85,23 @@ pub struct Machine<'a> {
     /// Block 5.4 (`MKDS_TIMING=native`, a build generated with `--timing native`): the ARM9 code pays no
     /// instruction budget, so a wait for an interrupt ends the slice (budget 0) to let the IRQ be taken.
     pub budget_free: bool,
+    /// Block 5.4 frame-event time: hardware time advanced at slice ends because the ARM9 spun in a listed
+    /// busy-wait loop ([`crate::os_hle::SAFE_LOOPS`]), and by the guard (a long run of slices with no time
+    /// and no wait; target 0). Each advance is [`SPIN_QUANTUM`] bus cycles.
+    pub spin_advances: u64,
+    pub guard_advances: u64,
+    /// Slice-end pcs (by 64-byte block) where the guard advanced time: unlisted busy-waits.
+    pub guard_sites: HashMap<u32, u64>,
+    /// Slice ends since hardware time last moved (guard).
+    quiet_slices: u64,
+    last_slice_cycles: u64,
 }
+
+/// Bus cycles of hardware time one spin in a busy-wait loop is worth under frame-event time (as one step of
+/// [`Machine::wait_for_interrupt`]).
+pub const SPIN_QUANTUM: u64 = 1000;
+/// Slice ends without hardware time after which the guard advances it anyway.
+pub const SPIN_GUARD: u64 = 1 << 16;
 
 /// Longest stretch (in 1000-cycle steps) a wait-for-interrupt may fast-forward before giving up.
 const WFI_LIMIT: u32 = 2_000_000;
@@ -123,8 +139,14 @@ impl<'a> Machine<'a> {
             os_gate: None,
             tick_pin: crate::os_hle::TickPin::from_env(),
             budget_free: crate::os_hle::budget_free(),
+            spin_advances: 0,
+            guard_advances: 0,
+            guard_sites: HashMap::new(),
+            quiet_slices: 0,
+            last_slice_cycles: 0,
         };
         if m.budget_free {
+            crate::native::BUDGET_FREE.store(true, std::sync::atomic::Ordering::Relaxed);
             if let Some(r) = m.hle7.as_mut() {
                 r.latency = 0; // replies are synchronous (see `pxi_sync`)
             }
@@ -305,6 +327,40 @@ impl Machine<'_> {
 
     pub fn gx_trace_error(&self) -> Option<&str> {
         self.gx_trace_error.as_deref()
+    }
+
+    /// Block 5.4 frame-event time: on in a budget-free build once the ARM7 has no CPU (`MKDS_HW_SND=native`
+    /// booted it natively). Then hardware time (`Bus::advance`: scanlines, V-blank, timers, the ARM7's
+    /// ticks) passes only in waits and listed busy-waits, never by instruction count.
+    pub fn event_time(&self) -> bool {
+        self.budget_free && self.hle7.as_ref().and_then(|r| r.snd.as_ref()).is_some_and(|s| s.booted && s.active)
+    }
+
+    /// A slice of `used` budget units ended at `pc`: the hardware's share. Exact model: `cycles` bus cycles
+    /// (from the instruction count). Frame-event time: none, but GX commands and PXI words are exchanged at
+    /// once (`tick(0)`); a spin in a listed busy-wait loop is worth [`SPIN_QUANTUM`].
+    pub fn slice_end(&mut self, pc: u32, cycles: u64) {
+        if !self.event_time() {
+            return self.tick(cycles);
+        }
+        let start = self.hw.cycles;
+        let spin = crate::os_hle::SAFE_LOOPS.iter().any(|&(lo, hi, _)| (lo..hi).contains(&(pc & !1)));
+        if spin {
+            self.spin_advances += 1;
+            self.tick(SPIN_QUANTUM);
+        } else if self.quiet_slices >= SPIN_GUARD {
+            self.guard_advances += 1;
+            *self.guard_sites.entry(pc & !0x3F).or_insert(0) += 1;
+            self.tick(SPIN_QUANTUM);
+        } else {
+            self.tick(0);
+        }
+        if self.hw.cycles != start || self.hw.cycles != self.last_slice_cycles {
+            self.quiet_slices = 0;
+        } else {
+            self.quiet_slices += 1;
+        }
+        self.last_slice_cycles = self.hw.cycles;
     }
 
     /// Fast-forward the hardware until an interrupt is pending (or give up and note it).

@@ -21,9 +21,20 @@
 //! - SPU writes go to [`crate::spu`] as before; audio is rendered up to the current time before every driver
 //!   call (so per tick), not per CPU burst.
 //!
-//! Start-up (take-over): the ARM7 CPU still runs its own boot (PXI_Init sync handshake, CTRDG wait, OS, SND
-//! init, thread start). When its main loop has been reached and it is halted with nothing pending, this
-//! module takes over for good ([`Snd::try_take_over`]); the tick phase is kept from the OS alarm.
+//! Start-up (Block 5.4 finish, the default for `MKDS_HW_SND=native`): **the ARM7 CPU never runs.** Its boot
+//! (crt0, autoloads, `arm7_main`: OS, PXI, SND, FS, RTC, WVR, SPI initialisation, and each service thread up
+//! to its first blocking receive) runs once as plain code before the ARM9 first needs the ARM7
+//! ([`Snd::boot`], [`crate::arm7::Arm7::plain_boot`]); its waits on the ARM9 are answered in place: the
+//! `PXI_Init` sync-nibble handshake (the ARM9's side is then answered by
+//! [`crate::ds_mem::Bus::sync_responder`]), the wait for the ARM9's CTRDG word (answered later by the router)
+//! and `card_init`'s wait for the ARM9's CARD callback. The main loop after the boot's first halt is
+//! replaced by [`Snd::main_loop_poll`] (reset requests). Services whose ARM7 code runs on a thread are
+//! driven as plain calls too: the SPI thread's queue (touch, MIC, PM, NVRAM commands that reach the lifted
+//! callbacks) is drained by [`Snd::drain_spi`]; OS (tag 12, reset) and CARD (tag 14) words go to their lifted
+//! callbacks. The tick phase comes from the driver's OS alarm, as at a take-over.
+//!
+//! Diagnostic fallback (`MKDS_SND_BOOT=cpu`): the ARM7 CPU runs its own boot and this module takes over
+//! once its main loop is reached and it is idle ([`Snd::try_take_over`]; bus cycle ~838,144).
 //!
 //! Diagnostics: `MKDS_SND_LOG=<file>` (both modes, record only) writes the driver's event stream (see [`log`]).
 //!
@@ -79,6 +90,13 @@ pub mod addr {
     /// The ARM7 main loop (`arm7_main` 0x037F846C) calls this right after every halt: reaching it means the
     /// start-up is over.
     pub const MAIN_LOOP_MARK: u32 = 0x037F_B0D4;
+    /// The SPI service thread's message queue (`spi_thread_main` 0x0380128C) and its handlers by message type
+    /// (0 touch, 1 MIC, 2 PM, 3 NVRAM), each called with the message.
+    pub const SPI_QUEUE: u32 = 0x0380_9BDC;
+    pub const SPI_HANDLERS: [u32; 4] = [0x0380_17EC, 0x0380_2F5C, 0x0380_2388, 0x0380_405C];
+    /// The OS's reset-request flag (set by `os_pxi_command_callback` for OS command 0x10) and `snd_shutdown`.
+    pub const OS_RESET_REQUESTED: u32 = 0x0380_78B4;
+    pub const SND_SHUTDOWN: u32 = 0x037F_BA10;
     /// The driver thread's message queue (1 = tick, 2 = command wake-up) and its tick alarm (`OSAlarm`).
     pub const SND_QUEUE: u32 = 0x0380_79B4;
     pub const SND_TICK_ALARM: u32 = 0x0380_79D4;
@@ -125,6 +143,18 @@ pub struct Snd {
     pub irqs: u64,
     pub took_over_at: Option<u64>,
     pub error: Option<String>,
+    /// Booted without the ARM7 CPU ([`Snd::boot`]).
+    pub booted: bool,
+    /// SPI-thread messages served ([`Snd::drain_spi`]) by type; OS reset requests seen.
+    pub spi_msgs: [u64; 4],
+    pub resets: u64,
+    /// The ARM7 was asked to reset (OS command 0x10 answered): nothing more runs on it.
+    reset: bool,
+}
+
+/// `MKDS_SND_BOOT=cpu`: the diagnostic fallback (the ARM7 CPU runs its own boot, then a take-over).
+pub fn cpu_boot_selected() -> bool {
+    std::env::var("MKDS_SND_BOOT").is_ok_and(|v| v.eq_ignore_ascii_case("cpu"))
 }
 
 impl Snd {
@@ -143,6 +173,54 @@ impl Snd {
         if !a.watch_hit || !a.idle(hw) {
             return false;
         }
+        let r = self.start(hw, a);
+        self.took_over_at = Some(hw.cycles);
+        if let Ok(path) = std::env::var("MKDS_SND_REPLAY") {
+            let r = r.and_then(|_| replay(hw, a, self, &path));
+            eprintln!("[snd] replay of {path}: {r:?}");
+            log::flush();
+            std::process::exit(if r.is_ok() { 0 } else { 2 });
+        }
+        let vblank = hw.r32(crate::ds_mem::VBLANK_COUNT);
+        eprintln!(
+            "[snd] native sound driver took over from the ARM7 CPU at bus cycle {} (V-blank {vblank}), next tick in {} cycles",
+            hw.cycles, self.next_tick
+        );
+        if let Err(e) = r.and_then(|_| self.drain(hw, a)) {
+            self.fail(a, e);
+        }
+        true
+    }
+
+    /// Boot the ARM7 without its CPU ([`crate::arm7::Arm7::plain_boot`]) and start the event-driven driver.
+    /// Called once, before the ARM7 would first run. Returns whether this is active.
+    pub fn boot(&mut self, hw: &mut Bus, a: &mut Arm7) -> bool {
+        if self.active {
+            return true;
+        }
+        let mut cpu = a.cpu.clone();
+        let r = a.plain_boot(hw, &mut cpu, &mut self.sent).and_then(|_| {
+            a.cpu = cpu;
+            // the ARM9's side of the PXI_Init handshake: the ARM7 starts counting down from 8
+            hw.arm7_set_sync(8, false);
+            hw.sync_responder = Some(8);
+            self.start(hw, a)
+        });
+        self.booted = true;
+        self.active = true;
+        self.took_over_at = Some(hw.cycles);
+        match r.and_then(|_| self.drain(hw, a)) {
+            Ok(()) => eprintln!(
+                "[snd] ARM7 booted without its CPU ({} plain instructions); native sound driver active, next tick in {} cycles",
+                a.plain_cycles, self.next_tick
+            ),
+            Err(e) => self.fail(a, format!("native ARM7 boot: {e}")),
+        }
+        true
+    }
+
+    /// The driver's private registers and tick phase; stops the driver's OS tick alarm (ticks are posted here).
+    fn start(&mut self, hw: &mut Bus, a: &mut Arm7) -> Result<(), String> {
         let top = a.irq_stack_top();
         self.cpu = Cpu::default();
         self.cpu.set_mode(0x12);
@@ -164,22 +242,7 @@ impl Snd {
             Ok(())
         })();
         self.active = true;
-        self.took_over_at = Some(hw.cycles);
-        if let Ok(path) = std::env::var("MKDS_SND_REPLAY") {
-            let r = r.and_then(|_| replay(hw, a, self, &path));
-            eprintln!("[snd] replay of {path}: {r:?}");
-            log::flush();
-            std::process::exit(if r.is_ok() { 0 } else { 2 });
-        }
-        let vblank = hw.r32(crate::ds_mem::VBLANK_COUNT);
-        eprintln!(
-            "[snd] native sound driver took over from the ARM7 CPU at bus cycle {} (V-blank {vblank}), next tick in {} cycles",
-            hw.cycles, self.next_tick
-        );
-        if let Err(e) = r.and_then(|_| self.drain(hw, a)) {
-            self.fail(a, e);
-        }
-        true
+        r
     }
 
     fn fail(&mut self, a: &mut Arm7, e: String) {
@@ -193,7 +256,7 @@ impl Snd {
     /// `cycles` bus cycles have passed: deliver the ARM9's words, the ARM7's interrupts and the driver
     /// ticks due, then the driver's replies.
     pub fn advance(&mut self, hw: &mut Bus, a: &mut Arm7, cycles: u64) {
-        if self.error.is_some() {
+        if self.error.is_some() || self.reset {
             return;
         }
         self.unrendered += cycles;
@@ -221,7 +284,48 @@ impl Snd {
             self.drain(hw, a)?;
         }
         self.next_tick -= left;
+        self.main_loop_poll(hw, a)
+    }
+
+    /// What `arm7_main`'s loop does after each halt: a reset request from the ARM9 (OS tag 12, command 0x10)
+    /// is answered as `os_reset_system` would (sound shut down, command 0x10 sent back), then the ARM7 stops.
+    /// (Its other two polls, cartridge and card removal, cannot fire: nothing is ever removed.)
+    fn main_loop_poll(&mut self, hw: &mut Bus, a: &mut Arm7) -> Result<(), String> {
+        use crate::arm7::boot;
+        if a.s.boot_lock_pending && hw.r16(boot::LOCK_OWNER) == 0x7F {
+            // the ARM9's OS_InitLock is done: the rest of the ARM7's `os_init_lock`
+            hw.w16(boot::LOCK_EXT, 0xBF);
+            a.s.boot_lock_pending = false;
+        }
+        if !self.booted || (View { s: &mut a.s, hw }).r16(addr::OS_RESET_REQUESTED) == 0 {
+            return Ok(());
+        }
+        self.resets += 1;
+        self.call(hw, a, addr::SND_SHUTDOWN, [0; 4])?;
+        self.sent.push_back(super::pack(super::tag::OS, 0x10 << 8, false));
+        self.reset = true;
+        eprintln!("[snd] the ARM9 asked the ARM7 to reset: sound shut down, reset acknowledged");
         Ok(())
+    }
+
+    /// The SPI service thread (`spi_thread_main`): one handler call per message in its queue, as the thread
+    /// would after its blocking receive (touch / MIC / PM / NVRAM commands that reached the lifted callbacks;
+    /// MIC sampling then runs on the ARM7 timer interrupts).
+    fn drain_spi(&mut self, hw: &mut Bus, a: &mut Arm7) -> Result<(), String> {
+        if !self.booted {
+            return Ok(());
+        }
+        loop {
+            let got = self.call(hw, a, addr::OS_RECEIVE_MESSAGE, [addr::SPI_QUEUE, self.buf, 0, 0])?;
+            if got == 0 {
+                return Ok(());
+            }
+            let msg = View { s: &mut a.s, hw }.r32(self.buf);
+            let kind = View { s: &mut a.s, hw }.r32(msg);
+            let Some(&h) = addr::SPI_HANDLERS.get(kind as usize) else { continue };
+            self.spi_msgs[kind as usize] += 1;
+            self.call(hw, a, h, [msg, 0, 0, 0])?;
+        }
     }
 
     /// Run lifted code (audio rendered up to now first: the code may change the SPU registers).
@@ -249,7 +353,8 @@ impl Snd {
             return Ok(());
         }
         self.call(hw, a, cb, [tag, data, err, 0])?;
-        self.drain(hw, a)
+        self.drain(hw, a)?;
+        self.drain_spi(hw, a)
     }
 
     /// The driver thread: one loop body per message in its queue (`snd_thread_main` after its receive).
@@ -332,6 +437,7 @@ impl Snd {
             self.call(hw, a, h, [b, addr::IRQ_TABLE, 1 << b, 1])?;
             log::irq_end();
             self.drain(hw, a)?;
+            self.drain_spi(hw, a)?;
         }
     }
 
@@ -347,12 +453,15 @@ impl Snd {
 
     pub fn summary(&self) -> String {
         format!(
-            "native sound driver: took over at bus cycle {:?}; {} ticks, {} SND commands, {} loop bodies, {} interrupts{}",
+            "native sound driver: {} at bus cycle {:?}; {} ticks, {} SND commands, {} loop bodies, {} interrupts, SPI messages {:?}, resets {}{}",
+            if self.booted { "booted without the ARM7 CPU" } else { "took over" },
             self.took_over_at,
             self.ticks,
             self.commands,
             self.bodies,
             self.irqs,
+            self.spi_msgs,
+            self.resets,
             self.error.as_ref().map_or(String::new(), |e| format!("; error: {e}"))
         )
     }
