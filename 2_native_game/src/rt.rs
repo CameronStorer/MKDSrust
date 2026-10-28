@@ -582,6 +582,15 @@ mod tests {
     }
 }
 
+/// Block 5.5: a direct call (no-spill build) came back to `x` instead of its return address `ret`. A
+/// closed function always returns through the link register it was given, so this means the guest code
+/// broke the calling convention; inside a direct function there is no `c.r` state to continue from.
+#[cold]
+#[inline(never)]
+pub fn bad_return(x: u32, ret: u32) -> ! {
+    panic!("direct call returned to {x:#010x}, not to its return address {ret:#010x} (MKDS_SPILL=keep builds without direct calls)")
+}
+
 /// Block 4B: whether the raised (T1) version of the function at `entry` runs (else its exact T0
 /// translation does). `MKDS_T1` unset or `all`: every T1; `off`: none; otherwise a file of entry
 /// addresses (hex, one per line) for bisecting.
