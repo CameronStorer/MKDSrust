@@ -35,6 +35,7 @@ pub mod snd;
 pub mod spi;
 pub mod trace;
 
+mod clock;
 use crate::ds_mem::Bus;
 use crate::peripherals::Peripherals;
 use crate::rt::Mem;
@@ -116,6 +117,8 @@ pub mod shared {
 pub struct Router {
     /// Tags claimed (also written to [`Bus::hle7_tags`] by [`Router::install`]).
     pub claimed: u32,
+    /// Replay routers pin the RTC without mutating the process environment.
+    pub(super) fixed_rtc: bool,
     /// Replies not yet in the ARM7 → ARM9 FIFO, oldest first, with the bus cycle they become due.
     pending: VecDeque<(u64, u32)>,
     /// Bus cycles between a command and its reply ([`REPLY_LATENCY`]; `MKDS_HLE7_LATENCY` overrides).
@@ -148,6 +151,7 @@ impl Router {
     pub fn new() -> Router {
         Router {
             claimed: CLAIMED,
+            fixed_rtc: cfg!(test),
             pending: VecDeque::new(),
             latency: REPLY_LATENCY,
             now: 0,
@@ -321,11 +325,16 @@ impl Router {
         }
     }
 
-    /// RTC (`rtc_pxi_receive`, `rtc_execute_command`): reads come from the fixed clock in
-    /// [`crate::peripherals::Rtc`] (replays stay deterministic). Reply: `0x8000 | cmd << 8 | result`.
+    /// RTC (`rtc_pxi_receive`, `rtc_execute_command`): host local time by default; fixed via MKDS_RTC.
+    /// Fixed values come from [`crate::peripherals::Rtc`]. Reply: `0x8000 | cmd << 8 | result`.
     fn rtc(&mut self, hw: &mut Bus, p: &mut Peripherals, w: u32, data: u32) {
         let cmd = (data >> 8) & 0x7F;
-        let bytes = p.rtc.datetime_bcd();
+        let fixed = self.fixed_rtc || match std::env::var("MKDS_RTC") {
+            Ok(mode) => mode == "fixed",
+            Err(_) => std::env::var_os("MKDS_RECORD").is_some()
+                || std::env::var_os("MKDS_PXI_LOG").is_some(),
+        };
+        let bytes = if fixed { p.rtc.datetime_bcd() } else { clock::datetime_bcd() };
         let (at, from, n) = match cmd {
             0x10 => (shared::RTC_DATE, 0, 7),
             0x11 => (shared::RTC_DATE, 0, 4),

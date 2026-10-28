@@ -72,6 +72,7 @@ pub struct Report {
 pub fn run(events: &[Event], skip_write: &dyn Fn(u32) -> bool) -> Report {
     let mut hw = Bus::new();
     let mut r = Router::new();
+    r.fixed_rtc = true;
     r.latency = 0;
     r.install(&mut hw);
     r.log = Some(Vec::new());

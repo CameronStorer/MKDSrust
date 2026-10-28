@@ -10,7 +10,7 @@ The aim is to preserve playability beyond the original hardware, make the game's
 > You must own the game and dump your cartridge yourself. This repository supplies no Nintendo code, assets or ROMs and does not fetch them for you. Translation and extraction happen locally. Generated source, extracted assets and built games are for personal use and must not be shared.
 
 > [!WARNING]
-> This is a work in progress. Verification covers recorded scenarios, not every possible game state. Leave experimental native hardware options off for the established baseline.
+> This is a work in progress. Verification covers recorded scenarios, not every possible game state. Player builds use native hardware services and budget-free timing by default. Use exact timing and hardware switches for the established acceptance baseline.
 
 Driftlift is not affiliated with or endorsed by Nintendo. Nintendo, Mario Kart DS and other trademarks belong to their respective owners.
 
@@ -46,7 +46,7 @@ On **Home**, select your own supported ROM, inspect its compatibility result, se
 
 **Settings** and **Controls** have explicit Save buttons; changes apply on the next game launch. Controller bindings use menus, without physical controller capture. A rebuild into a nonempty destination creates a sibling directory and changes the active output only after success, preserving the old bundle. Keep the source checkout available for future builds.
 
-Preferences and the last completed build log live in `%APPDATA%\MKDS Native Builder\launcher.json` and `launcher-build.log` beside it. **Outdated** compares local source timestamps and the selected ROM hash; it is not an online update check. The three Advanced native FS/ARM7/time toggles are experimental and initially off. See [launcher documentation](launcher/README.md).
+Preferences and the last completed build log live in `%APPDATA%\MKDS Native Builder\launcher.json` and `launcher-build.log` beside it. **Outdated** compares local source timestamps and the selected ROM hash; it is not an online update check. Advanced offers Accuracy mode (exact hardware), off by default; it sets FS/ARM7/TIME/SND to exact in the game process. See [launcher documentation](launcher/README.md).
 
 ## Quick start: Windows scripts
 
@@ -290,6 +290,12 @@ Static recompilation removes runtime CPU instruction interpretation; the current
 The [function dictionary](dictionary/README.md) contains research metadata rather than game code. Only verified native replacements are enabled by default. For developers, `MKDS_NATIVES=all` includes trial replacements and `MKDS_NATIVES=off` selects translations throughout.
 
 Research notes: [MKDS Decomp Docs](https://docs.cameronstorer.com/MKDS-Decomp-Docs/).
+
+## Native defaults and exact builds
+
+Normal builds use budget-free native timing. Player executables default `MKDS_HW_FS`, `MKDS_HW_ARM7`, `MKDS_HW_TIME`, and `MKDS_HW_SND` to `native`; explicit environment overrides are preserved. Native RTC reads the host local date and time. Set `MKDS_RTC=fixed` for the deterministic clock (2010-06-15 12:00:00).
+
+For the original behavior, rebuild with `--timing exact` (or `MKDS_TIMING=exact`), then set all four hardware switches to `exact`. Accuracy mode in the launcher sets those four runtime switches; matching instruction timing requires an exact build. `acceptance.exe` keeps exact hardware defaults and a fixed RTC. Acceptance/reference proofs must build with `--timing exact --with-acceptance`; record/replay paths default to the fixed clock.
 
 ## Verification and source progress
 

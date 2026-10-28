@@ -334,6 +334,7 @@ fn run_internal(
     signatures: &'static [recomp::residency::SegmentSig],
     table7: Option<&'static [Lifted]>, options: Options,
 ) -> Result<RunReport, String> {
+    recomp::player_defaults();
     if options.headless && options.instruction_limit.is_none() {
         return Err("Headless diagnostics require a finite instruction limit".into());
     }

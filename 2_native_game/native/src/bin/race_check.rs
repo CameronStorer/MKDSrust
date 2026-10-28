@@ -49,6 +49,7 @@ pub fn run_with_tables(
     signatures: &'static [recomp::residency::SegmentSig],
     table7: &'static [recomp::mem::Lifted],
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var_os("MKDS_RTC").is_none() { unsafe { std::env::set_var("MKDS_RTC", "fixed"); } }
     // Block 5.0 oracle options (anywhere among the positional arguments; see `oracle`):
     // --record DIR, --replay INPUTS.csv (open loop, route ignored: pass `-`), --mask FILE, --dump-frames a,b
     let mut positional = Vec::new();

@@ -18,7 +18,7 @@ use std::{
 struct Preferences {
     rom: PathBuf,
     output: PathBuf,
-    native: [bool; 3],
+    accuracy: bool,
     fingerprint: String,
 }
 enum Event {
@@ -293,14 +293,13 @@ impl Launcher {
     fn play(&mut self) {
         self.busy = true;
         let output = self.prefs.output.clone();
-        let native = self.prefs.native;
+        let accuracy = self.prefs.accuracy;
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         std::thread::spawn(move || {
-            let env: Vec<_> = ["MKDS_HW_FS", "MKDS_HW_ARM7", "MKDS_HW_TIME"]
+            let env: Vec<_> = ["MKDS_HW_FS", "MKDS_HW_ARM7", "MKDS_HW_TIME", "MKDS_HW_SND"]
                 .into_iter()
-                .zip(native)
-                .map(|(k, on)| (k, on.then_some("native")))
+                .filter_map(|k| accuracy.then_some((k, Some("exact"))))
                 .collect();
             let _ = tx.send(Event::Played(
                 build::launch_with_env(&output, &[], &env).map_err(|e| e.to_string()),
@@ -618,10 +617,7 @@ impl Launcher {
         egui::CentralPanel::default().show(ctx, |ui| { egui::ScrollArea::vertical().show(ui, |ui| {
             ui.add_space(18.);
             match self.page { 0 => self.home(ui), 1 => self.settings_page(ui), 2 => self.controls_page(ui, ctx), _ => {
-                ui.heading("Advanced"); ui.label("Experimental native modes. These may cause crashes or incorrect behavior.");
-                let mut changed = false;
-                for (i, name) in ["Native filesystem (experimental)", "Native ARM7 (experimental)", "Native timing (experimental)"].iter().enumerate() { changed |= ui.checkbox(&mut self.prefs.native[i], *name).changed(); }
-                if changed { self.save(); } self.log_panel(ui);
+                ui.heading("Advanced"); let changed = ui.checkbox(&mut self.prefs.accuracy, "Accuracy mode (exact hardware)").changed(); if changed { self.save(); } self.log_panel(ui);
             }}
         }); });
         if self.busy && ctx.input(|i| i.viewport().close_requested()) {
@@ -664,9 +660,9 @@ mod tests {
         assert_eq!(map_key(egui::Key::Z), controls::key_index("Z"));
     }
     #[test]
-    fn experimental_defaults_are_off() {
+    fn accuracy_defaults_off() {
         let p: Preferences = serde_json::from_str("{}").unwrap();
-        assert_eq!(p.native, [false; 3]);
+        assert!(!p.accuracy);
     }
 
     #[test]
@@ -731,7 +727,7 @@ mod tests {
     #[test]
     fn child_environment_probe() {
         if let Some(path) = std::env::var_os("LAUNCHER_TEST_PROBE") {
-            let values: Vec<_> = ["MKDS_HW_FS", "MKDS_HW_ARM7", "MKDS_HW_TIME"]
+            let values: Vec<_> = ["MKDS_HW_FS", "MKDS_HW_ARM7", "MKDS_HW_TIME", "MKDS_HW_SND"]
                 .map(|k| std::env::var(k).unwrap_or_default())
                 .into();
             std::fs::write(path, values.join(",")).unwrap();
@@ -756,13 +752,14 @@ mod tests {
                     ("LAUNCHER_TEST_PROBE", Some(output)),
                     ("MKDS_HW_FS", Some("native")),
                     ("MKDS_HW_ARM7", None),
-                    ("MKDS_HW_TIME", Some("native"))
+                    ("MKDS_HW_TIME", Some("native")),
+                    ("MKDS_HW_SND", Some("exact")),
                 ]
             )
             .unwrap(),
             0
         );
-        assert_eq!(std::fs::read_to_string(output).unwrap(), "native,,native");
+        assert_eq!(std::fs::read_to_string(output).unwrap(), "native,,native,exact");
         assert_eq!(std::env::var_os("MKDS_HW_FS"), before);
     }
 }
