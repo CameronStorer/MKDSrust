@@ -373,8 +373,7 @@ pub mod oracle {
     use recomp::{ds_mem, machine::Machine};
     use std::cell::{Cell, RefCell};
     use std::io::{BufWriter, Write};
-    //! Usage, inputs and diagnostic scripts: https://github.com/CameronStorer/MKDSrust-Docs.
-use std::path::{Path, PathBuf};
+    use std::path::{Path, PathBuf};
     use std::rc::Rc;
 
     const MAIN_BLOCK: u32 = 0x1_0000;
