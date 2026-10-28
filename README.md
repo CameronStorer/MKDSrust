@@ -157,5 +157,7 @@ Project code is [GPL-3.0-or-later](LICENSE); this license does not cover Nintend
 
 ## Documentation
 
-See [MKDSrust-Docs](https://github.com/CameronStorer/MKDSrust-Docs) for technical details,
+See [the documentation](https://docs.mkdsrust.com) for technical details,
 research, verification procedures and the roadmap.
+
+Community mods: [mkdsrust.com](https://mkdsrust.com). See [PLUGIN_FORMAT.md](PLUGIN_FORMAT.md) for the package contract.

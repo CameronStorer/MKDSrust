@@ -13,6 +13,15 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(version, about = "MKDSrust: build and launch a native game from your own Mario Kart DS ROM")]
 struct Args {
+    /// Write a hashes-only retail file index from your ROM
+    #[arg(long, value_name = "OUT.json")]
+    retail_index: Option<PathBuf>,
+    /// Create a bsdiff4 patch from a locally extracted original and a modified file
+    #[arg(long, num_args = 3, value_names = ["ORIGINAL", "MODIFIED", "OUT.bsdiff"])]
+    make_patch: Option<Vec<PathBuf>>,
+    /// Package a manifest directory (patch-only) into a sibling .zip
+    #[arg(long, value_name = "DIR")]
+    pack_mod: Option<PathBuf>,
     /// Path to your own .nds file
     rom: Option<PathBuf>,
     /// Validate the ROM without building
@@ -126,6 +135,22 @@ fn run() -> Result<i32, BuildError> {
         }
     }
     let args = Args::parse();
+    let mod_error = |e: Box<dyn std::error::Error + Send + Sync>| BuildError(e.to_string());
+    if let Some(paths) = &args.make_patch {
+        mkds_builder::modpkg::make_patch(&paths[0], &paths[1], &paths[2]).map_err(mod_error)?;
+        return Ok(0);
+    }
+    if let Some(dir) = &args.pack_mod {
+        println!("{}", mkds_builder::modpkg::pack(dir).map_err(mod_error)?.display());
+        return Ok(0);
+    }
+    if let Some(out) = &args.retail_index {
+        let rom = args.rom.as_ref().ok_or_else(|| BuildError("--retail-index needs your ROM".into()))?;
+        if !rom::inspect_rom(rom)?.reference_match { return err("Retail indexing requires the supported AMCE rev 0 dump"); }
+        let index = mkds_builder::modpkg::RetailIndex::from_rom(&std::fs::read(rom)?).map_err(mod_error)?;
+        std::fs::write(out, serde_json::to_vec_pretty(&index).map_err(|e| BuildError(e.to_string()))?)?;
+        return Ok(0);
+    }
     if let Some(timing) = &args.timing { unsafe { std::env::set_var("MKDS_TIMING", timing); } }
     if args.clear_cache {
         let dir = args.cache_dir.clone().unwrap_or_else(build::default_cache_dir);

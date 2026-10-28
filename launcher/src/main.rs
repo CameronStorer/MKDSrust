@@ -24,8 +24,15 @@ struct Preferences {
     system_toolchain: bool,
     setup_done: bool,
     last_build: String,
+    verbose: bool,
+}
+fn build_date(stored: &str) -> String {
+    // Old launcher versions stored Debug(SystemTime). Preserve a readable migration.
+    let seconds = stored.parse::<i64>().ok().or_else(|| stored.split("tv_sec: ").nth(1).and_then(|s| s.split(',').next()).and_then(|s| s.parse().ok()));
+    seconds.and_then(mkds_builder::modpkg::format_timestamp).unwrap_or_else(|| "Unknown (rebuild to update)".into())
 }
 enum Event {
+    ModInstalled(Result<String, String>),
     Inspected(Result<RomInfo, String>, String),
     Log(String),
     Built(Result<PathBuf, String>, String),
@@ -306,7 +313,7 @@ impl Launcher {
                         Ok(p) => {
                             self.prefs.output = p;
                             self.prefs.fingerprint = stamp;
-                            self.prefs.last_build = format!("{:?}", SystemTime::now());
+                            self.prefs.last_build = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs().to_string();
                             self.wizard = 4;
                             self.message = "Build complete. Ready to play.".into();
                             self.save();
@@ -319,6 +326,10 @@ impl Launcher {
                     if let Err(e) = std::fs::write(self.dir.join("launcher-build.log"), &self.log) {
                         self.message = format!("Could not save build log: {e}");
                     }
+                }
+                Event::ModInstalled(result) => {
+                    self.busy = false;
+                    self.message = result.unwrap_or_else(|e| format!("Mod installation failed: {e}"));
                 }
                 Event::Played(result) => {
                     self.busy = false;
@@ -394,13 +405,16 @@ impl Launcher {
         self.busy = true;
         let output = self.prefs.output.clone();
         let accuracy = self.prefs.accuracy;
+        let verbose = self.prefs.verbose;
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         std::thread::spawn(move || {
-            let env: Vec<_> = ["MKDS_HW_FS", "MKDS_HW_ARM7", "MKDS_HW_TIME", "MKDS_HW_SND"]
+            let mut env: Vec<_> = ["MKDS_HW_FS", "MKDS_HW_ARM7", "MKDS_HW_TIME", "MKDS_HW_SND"]
                 .into_iter()
                 .filter_map(|k| accuracy.then_some((k, Some("exact"))))
                 .collect();
+            env.push(("MKDS_VERBOSE", Some(if verbose { "1" } else { "0" })));
+            if accuracy { env.push(("MKDS_NO_MODS", Some("1"))); }
             let _ = tx.send(Event::Played(
                 build::launch_with_env(&output, &[], &env).map_err(|e| e.to_string()),
             ));
@@ -558,11 +572,11 @@ impl Launcher {
                 &self.title
             });
             ui.label(format!(
-                "Last successful build: {}",
+                "Last built: {}",
                 if self.prefs.last_build.is_empty() {
-                    "No builds yet"
+                    "No builds yet".to_string()
                 } else {
-                    &self.prefs.last_build
+                    build_date(&self.prefs.last_build)
                 }
             ));
             ui.label(self.prefs.output.display().to_string());
@@ -674,6 +688,13 @@ impl Launcher {
             });
     }
     fn settings_page(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Advanced").show(ui, |ui| {
+            if ui.checkbox(&mut self.prefs.verbose, "Verbose game logging (show console)").changed() { self.save(); }
+            if ui.button("Open logs").clicked() {
+                let logs = self.prefs.output.join("logs");
+                if let Err(e) = std::fs::create_dir_all(&logs).and_then(|_| std::process::Command::new("explorer.exe").arg(logs).spawn().map(|_| ())) { self.message = e.to_string(); }
+            }
+        });
         if ui.button("Open save folder").clicked() {
             if let Some(folder) = mkds_builder::settings::save_folder() {
                 let result = std::fs::create_dir_all(&folder).and_then(|_| {
@@ -946,6 +967,89 @@ impl Launcher {
                 .show(ui, |ui| self.log_panel(ui));
         }
     }
+    fn install_mod(&mut self, archive: PathBuf) {
+        if self.busy { return; }
+        let game = self.prefs.output.clone(); let rom = self.prefs.rom.clone();
+        let (tx, rx) = mpsc::channel(); self.rx = Some(rx); self.busy = true;
+        self.message = "Screening mod against your ROM…".into();
+        std::thread::spawn(move || {
+            let result = (|| -> mkds_builder::modpkg::Result<String> {
+                if !game.join("manifest.json").is_file() { return Err("Build a game first".into()); }
+                let info = rom::inspect_rom(&rom)?;
+                if !info.reference_match { return Err("Mod screening requires the supported AMCE rev 0 ROM".into()); }
+                let retail = mkds_builder::modpkg::RetailIndex::from_rom(&std::fs::read(&rom)?)?;
+                let pkg = mkds_builder::modpkg::Package::read(&archive, &retail)?;
+                pkg.install(&game)?;
+                Ok(format!("Installed {}. Enable it below. {}", pkg.manifest.name, pkg.warnings.join("; ")))
+            })().map_err(|e| e.to_string());
+            let _ = tx.send(Event::ModInstalled(result));
+        });
+    }
+    fn mods_page(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        use mkds_builder::modpkg;
+        ui.heading("Mods");
+        ui.hyperlink_to("Browse mods on mkdsrust.com", "https://mkdsrust.com");
+        ui.label("Install a .zip or drop it here. Later enabled mods win. Place dependencies first.");
+        ui.label("Mods are disabled in exact timing and acceptance runs.");
+        ui.add_enabled_ui(!self.busy, |ui| {
+            if ui.button("Install from .zip").clicked() {
+                if let Some(path) = rfd::FileDialog::new().add_filter("Mod package", &["zip"]).pick_file() { self.install_mod(path); }
+            }
+            if ui.button("Open mods folder").clicked() {
+                let path = self.prefs.output.join("mods");
+                if let Err(e) = std::fs::create_dir_all(&path).and_then(|_| std::process::Command::new("explorer.exe").arg(path).spawn().map(|_| ())) { self.message = e.to_string(); }
+            }
+        });
+        if !self.busy {
+            if let Some(path) = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).next()) { self.install_mod(path); }
+        }
+        let installed = modpkg::installed(&self.prefs.output);
+        let mut enabled = modpkg::enabled(&self.prefs.output);
+        let active: Vec<_> = enabled.iter().filter_map(|id| installed.iter().find(|m| &m.id == id).cloned()).collect();
+        let mut displayed = installed.clone();
+        displayed.sort_by_key(|m| enabled.iter().position(|id| id == &m.id).unwrap_or(usize::MAX));
+        let mut changed = false; let mut remove = None;
+        ui.add_enabled_ui(!self.busy, |ui| {
+            for m in &displayed {
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let mut on = enabled.contains(&m.id);
+                    if ui.checkbox(&mut on, format!("{} {} ({})", m.name, m.version, m.id)).changed() {
+                        enabled.retain(|id| id != &m.id); if on { enabled.push(m.id.clone()); } changed = true;
+                    }
+                    if let Some(i) = enabled.iter().position(|id| id == &m.id) {
+                        if ui.add_enabled(i > 0, egui::Button::new("Up")).clicked() { enabled.swap(i, i-1); changed = true; }
+                        if ui.add_enabled(i+1 < enabled.len(), egui::Button::new("Down")).clicked() { enabled.swap(i, i+1); changed = true; }
+                    }
+                    if ui.button("Remove").clicked() { remove = Some(m.id.clone()); }
+                });
+                if !m.description.is_empty() { ui.label(&m.description); }
+                for warning in modpkg::issues(m, &active) { ui.colored_label(Color32::YELLOW, warning); }
+            }
+        });
+        let mut owners = std::collections::BTreeMap::new();
+        for m in &active {
+            for target in m.files.keys() {
+                if let Some(previous) = owners.insert(target, &m.id) {
+                    ui.colored_label(Color32::YELLOW, format!("Load order: {} overrides {} for {}", m.id, previous, target));
+                }
+            }
+        }
+        if let Some(id) = remove {
+            let path = self.prefs.output.join("mods").join(&id);
+            // IDs were validated; do not follow a directory link during removal.
+            match std::fs::symlink_metadata(&path) {
+                Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
+                    match std::fs::remove_dir_all(&path) {
+                        Ok(()) => { enabled.retain(|x| x != &id); changed = true; }
+                        Err(e) => self.message = e.to_string(),
+                    }
+                }
+                _ => self.message = "Unsafe mod folder; remove it manually".into(),
+            }
+        }
+        if changed { if let Err(e) = modpkg::save_enabled(&self.prefs.output, &enabled) { self.message = e.to_string(); } }
+    }
     fn advanced(&mut self, ui: &mut egui::Ui) {
         ui.heading("Advanced");
         ui.label("Build tools and diagnostics");
@@ -953,6 +1057,7 @@ impl Launcher {
         let mut changed = ui
             .checkbox(&mut self.prefs.accuracy, "Accuracy mode (exact hardware)")
             .changed();
+        changed |= ui.checkbox(&mut self.prefs.verbose, "Verbose game logging (show console)").changed();
         changed |= ui
             .checkbox(
                 &mut self.prefs.system_toolchain,
@@ -980,6 +1085,7 @@ impl Launcher {
             ("Open launcher data", self.dir.clone()),
             ("Open build cache", build::default_cache_dir()),
             ("Open game folder", self.prefs.output.clone()),
+            ("Open logs", self.prefs.output.join("logs")),
         ] {
             if ui.button(label).clicked() {
                 if let Err(e) = std::process::Command::new("explorer.exe").arg(path).spawn() {
@@ -1004,6 +1110,7 @@ impl Launcher {
             "https://github.com/CameronStorer/MKDSrust",
         );
         ui.hyperlink_to("Documentation", "https://docs.mkdsrust.com");
+        ui.hyperlink_to("Website and mods", "https://mkdsrust.com");
         ui.add_space(24.);
         ui.heading("Licenses & acknowledgements");
         ui.hyperlink_to(
@@ -1091,7 +1198,7 @@ impl Launcher {
             let frame = if self.page == 0 { egui::Frame::none().inner_margin(12.) } else { card() };
             frame.show(ui, |ui| { ui.set_min_width(ui.available_width()); match self.page {
                 0 => self.home(ui), 1 => self.settings_page(ui), 2 => self.controls_page(ui, ctx),
-                3 => { ui.heading("Mods"); ui.add_space(24.); ui.label(RichText::new("Coming soon").size(32.).color(Color32::from_rgb(245, 194, 74))); ui.label("Make the game your own. Plugin support will provide a home for community extensions."); ui.label("Texture packs are available now in Settings."); },
+                3 => self.mods_page(ui, ctx),
                 4 => self.advanced(ui), 5 => self.about(ui), _ => self.setup(ui),
             } });       }); });
         if self.busy && ctx.input(|i| i.viewport().close_requested()) {
@@ -1188,6 +1295,13 @@ fn main() -> eframe::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn verbose_persists_and_legacy_build_dates_remain_readable() {
+        let prefs = Preferences { verbose: true, last_build: "0".into(), ..Preferences::default() };
+        let restored: Preferences = serde_json::from_slice(&serde_json::to_vec(&prefs).unwrap()).unwrap();
+        assert!(restored.verbose); assert_eq!(build_date(&restored.last_build), "1970-01-01T00:00:00Z");
+        assert_eq!(build_date("SystemTime { tv_sec: 0, tv_nsec: 123 }"), "1970-01-01T00:00:00Z");
+    }
     #[test]
     fn physical_key_names_match_builder() {
         assert_eq!(map_key(egui::Key::ArrowLeft), controls::key_index("Left"));

@@ -11,6 +11,9 @@ ratatui = "0.30.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
+qbsdiff = "=1.4.4"
+zip = { version = "=2.4.2", default-features = false, features = ["deflate"] }
+semver = "=1.0.28"
 
 
 tempfile = "3.27.0"
