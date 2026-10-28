@@ -3,7 +3,7 @@
 **Recommendation: yes for the hardware switches in the player builds (`play.exe` / `game.exe`), after two small
 fixes listed under "Blockers"; keep `exact` as the default of `acceptance.exe` (it is the oracle). Budget-free
 timing (`MKDS_TIMING=native`) is ready to become the build default right after, with one listening check.**
-Implemented in the defaults follow-up: player hardware and builder timing default to native; acceptance stays exact. Native RTC uses host local time, with MKDS_RTC=fixed for deterministic runs.
+Implemented in the defaults follow-up: player hardware and builder timing default to native. Acceptance follows the build's generated timing; build the exact oracle with `--timing exact --with-acceptance`. Native RTC uses host local time, with MKDS_RTC=fixed for deterministic runs.
 
 ## What "native" means now
 | switch | native behaviour | state |

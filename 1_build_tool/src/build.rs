@@ -504,7 +504,10 @@ pub fn recompile(
         std::fs::create_dir_all(gdir.join("src/bin"))?;
         std::fs::write(
             gdir.join("src/bin/acceptance.rs"),
-            format!(
+            // Acceptance shares this build's generated timing. Budget-free code must
+            // enable the matching runtime before Session reads its cached switches.
+            // Exact builds leave the oracle's startup and hardware defaults alone.
+            with_timing(format!(
                 "//! Acceptance driver on this build's generated code (verification only).\n\
                  //! `acceptance <rom.nds> <route.csv> <new-output-dir> [max-frames]`\n\
                  #[path = {:?}]\n#[allow(dead_code)]\nmod race_check;\n\n\
@@ -513,7 +516,7 @@ pub fn recompile(
                  eprintln!(\"{{e}}\");\n        std::process::exit(1);\n    }}\n}}\n",
                 driver.trim_start_matches(r"\\?\"),
                 if has_arm7 { "lifted::LIFTED7" } else { "&[]" }
-            ),
+            )),
         )?;
     }
     let ws_toml = std::fs::read_to_string(ws.join("Cargo.toml"))?;

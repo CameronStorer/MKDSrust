@@ -295,7 +295,7 @@ Research notes: [MKDS Decomp Docs](https://docs.cameronstorer.com/MKDS-Decomp-Do
 
 Normal builds use budget-free native timing. Player executables default `MKDS_HW_FS`, `MKDS_HW_ARM7`, `MKDS_HW_TIME`, and `MKDS_HW_SND` to `native`; explicit environment overrides are preserved. Native RTC reads the host local date and time. Set `MKDS_RTC=fixed` for the deterministic clock (2010-06-15 12:00:00).
 
-For the original behavior, rebuild with `--timing exact` (or `MKDS_TIMING=exact`), then set all four hardware switches to `exact`. Accuracy mode in the launcher sets those four runtime switches; matching instruction timing requires an exact build. `acceptance.exe` keeps exact hardware defaults and a fixed RTC. Acceptance/reference proofs must build with `--timing exact --with-acceptance`; record/replay paths default to the fixed clock.
+For the original behavior, rebuild with `--timing exact` (or `MKDS_TIMING=exact`), then set all four hardware switches to `exact`. Accuracy mode in the launcher sets those four runtime switches; matching instruction timing requires an exact build. `acceptance.exe` uses its build's generated timing and a fixed RTC: native builds enable native runtime timing and hardware defaults, while exact builds keep exact hardware defaults. Acceptance/reference proofs must build with `--timing exact --with-acceptance`; record/replay paths default to the fixed clock.
 
 ## Verification and source progress
 
