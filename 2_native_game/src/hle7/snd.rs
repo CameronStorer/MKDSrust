@@ -26,6 +26,20 @@
 //! module takes over for good ([`Snd::try_take_over`]); the tick phase is kept from the OS alarm.
 //!
 //! Diagnostics: `MKDS_SND_LOG=<file>` (both modes, record only) writes the driver's event stream (see [`log`]).
+//!
+//! Message-level oracle (5.2b verification; scripts in `native/diagnostics/`):
+//! ```text
+//! MKDS_SND_LOG=exact.log acceptance rom.nds route.csv out 15000        # exact model: events, reads, exact.log.snap
+//! python snd_sched.py exact.log exact.sched                              # the exact schedule, reads per context
+//! MKDS_HW_SND=native MKDS_SND_REPLAY=exact.sched MKDS_SND_SNAP=exact.log.snap MKDS_SND_LOG=replay.log \
+//!     acceptance rom.nds route.csv out2 100                              # replays at take-over, then exits
+//! python snd_replay_cmp.py exact.log replay.log                          # replies / main writes / SPU writes
+//! ```
+//! The replay runs the same driver loop bodies and interrupt handlers as plain calls from the exact model's
+//! take-over snapshot, in the exact model's order (an interrupt that came in the middle of a loop body runs
+//! after the body call it interrupted), with every main-RAM and I/O read answered from the recording; each
+//! loop body's SPU and main-RAM writes and each interrupt's writes and replies must match.
+//! `MKDS_AUDIO_DUMP=<file>` (any mode) writes the rendered audio for `audio_cmp.py`.
 use crate::arm7::{Arm7, View};
 use crate::ds_mem::Bus;
 use crate::rt::{Cpu, Mem};
