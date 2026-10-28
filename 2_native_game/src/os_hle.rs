@@ -281,6 +281,72 @@ impl IrqGate {
     }
 }
 
+/// Test-only seed pin (`MKDS_RACE_SEED`, off by default), for seed-equalized oracle replays.
+///
+/// Race setup (`race_randomize_setup_maybe`, 0x0203B6AC) seeds its LCG with RTC seconds-of-day +
+/// `OS_GetTick()` and passes the seed to its first `msl_multiply_u64` call (entry 0x02133048, return
+/// 0x0203B739) in r2 (r3 = 0, the high word). Native OS time (and the native RTC) change that value, so
+/// the race differs from the first race frame by design. To compare everything *else*, the seed is pinned
+/// at that call:
+/// - `MKDS_RACE_SEED=log`: report each seed (`MKDS_RACE_SEED: call N seed 0x...`), change nothing;
+/// - `MKDS_RACE_SEED=0xA,0xB,...`: replace the seed of call N with the N-th value (from an exact run's log);
+///   calls beyond the list are reported and left alone.
+#[derive(Debug, Default)]
+pub struct SeedPin {
+    values: Option<Vec<u32>>,
+    /// Calls seen so far.
+    pub calls: usize,
+    /// The last call (sp, seed after pinning): a slice end at the callee's entry re-dispatches it.
+    last: Option<(u32, u32)>,
+}
+
+/// Entry of `msl_multiply_u64` and the return address of race setup's first call to it.
+pub const SEED_CALL: (u32, u32) = (0x0213_3048, 0x0203_B739);
+
+impl SeedPin {
+    /// `MKDS_RACE_SEED` (`None` when unset).
+    pub fn from_env() -> Option<Self> {
+        let v = std::env::var("MKDS_RACE_SEED").ok()?;
+        Some(Self::parse(&v))
+    }
+
+    pub fn parse(v: &str) -> Self {
+        let values = (v.trim() != "log").then(|| {
+            v.split(',')
+                .filter_map(|x| {
+                    let x = x.trim();
+                    let r = x.strip_prefix("0x").map_or_else(|| x.parse(), |h| u32::from_str_radix(h, 16));
+                    r.ok()
+                })
+                .collect()
+        });
+        SeedPin { values, calls: 0, last: None }
+    }
+
+    /// Control reached `pc` (a block dispatch). Cheap for every other pc.
+    #[inline]
+    pub fn entry(&mut self, pc: u32, c: &mut crate::rt::Cpu) {
+        if pc != SEED_CALL.0 || c.r[14] != SEED_CALL.1 {
+            return;
+        }
+        if self.last == Some((c.r[13], c.r[2])) {
+            return; // the same call dispatched again after a slice end
+        }
+        let seen = c.r[2];
+        let pinned = self.values.as_ref().and_then(|v| v.get(self.calls)).copied();
+        if let Some(p) = pinned {
+            c.r[2] = p;
+        }
+        eprintln!(
+            "MKDS_RACE_SEED: call {} seed {seen:#010x}{}",
+            self.calls,
+            pinned.map_or(String::new(), |p| format!(" pinned to {p:#010x}"))
+        );
+        self.calls += 1;
+        self.last = Some((c.r[13], c.r[2]));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,5 +409,32 @@ mod tests {
         g.open = false;
         g.wait();
         assert!(g.allow(0x0200_3000, true, true, 1200));
+    }
+
+    #[test]
+    fn seed_pin_replaces_only_race_setups_seed_once_per_call() {
+        let mut p = SeedPin::parse("0x1234,7");
+        let mut c = crate::rt::Cpu::default();
+        c.r[2] = 99;
+        c.r[13] = 0x0200_0100;
+        c.r[14] = 0x0200_0001;
+        p.entry(SEED_CALL.0, &mut c);
+        assert_eq!(c.r[2], 99, "other callers keep their arguments");
+        c.r[14] = SEED_CALL.1;
+        p.entry(SEED_CALL.0, &mut c);
+        assert_eq!((c.r[2], p.calls), (0x1234, 1));
+        p.entry(SEED_CALL.0, &mut c);
+        assert_eq!(p.calls, 1, "re-dispatch of the same call");
+        c.r[2] = 5;
+        p.entry(SEED_CALL.0, &mut c);
+        assert_eq!((c.r[2], p.calls), (7, 2));
+        c.r[2] = 5;
+        c.r[13] -= 8;
+        p.entry(SEED_CALL.0, &mut c);
+        assert_eq!((c.r[2], p.calls), (5, 3), "beyond the list: unchanged");
+        let mut l = SeedPin::parse("log");
+        c.r[2] = 42;
+        l.entry(SEED_CALL.0, &mut c);
+        assert_eq!((c.r[2], l.calls), (42, 1));
     }
 }

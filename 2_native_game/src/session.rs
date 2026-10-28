@@ -248,6 +248,9 @@ impl<'a> Session<'a> {
         if let Some(g) = self.machine.os_gate.as_mut() {
             g.entry(self.pc, self.cpu.r[0]);
         }
+        if let Some(p) = self.machine.seed_pin.as_mut() {
+            p.entry(self.pc, &mut self.cpu);
+        }
         let overlay = in_overlay(&self.overlay_windows, &self.resident_overlays, self.pc);
         let mut bus = Flat {
             m: &mut self.machine,
@@ -285,6 +288,9 @@ impl<'a> Session<'a> {
                 }
                 if let Some(g) = bus.m.os_gate.as_mut() {
                     g.entry(self.pc, self.cpu.r[0]);
+                }
+                if let Some(p) = bus.m.seed_pin.as_mut() {
+                    p.entry(self.pc, &mut self.cpu);
                 }
                 overlay = in_overlay(&self.overlay_windows, &self.resident_overlays, self.pc);
                 bus.pc = self.pc;

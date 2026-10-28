@@ -275,6 +275,9 @@ impl Guest {
             if let Some(g) = s.machine.os_gate.as_mut() {
                 g.entry(pc, s.cpu.r[0]);
             }
+            if let Some(p) = s.machine.seed_pin.as_mut() {
+                p.entry(pc, &mut s.cpu);
+            }
             let Some(f) = (if std::mem::take(&mut self.fresh) { self.resolve(pc) } else { d.get(pc) }) else {
                 let e = format!("No lifted ARM9 code at PC {pc:#010x}: {}", d.describe(pc));
                 self.s().fiber_error = Some(e);

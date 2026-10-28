@@ -80,6 +80,8 @@ pub struct Machine<'a> {
     /// Block 5.3 (`MKDS_HW_TIME=native`): IRQs are delivered only at safe points ([`crate::os_hle::IrqGate`]).
     /// `None` (the default): at every slice start, as the hardware model always did.
     pub os_gate: Option<crate::os_hle::IrqGate>,
+    /// Test-only (`MKDS_RACE_SEED`): pins race setup's RNG seed ([`crate::os_hle::SeedPin`]). `None` by default.
+    pub seed_pin: Option<crate::os_hle::SeedPin>,
 }
 
 /// Longest stretch (in 1000-cycle steps) a wait-for-interrupt may fast-forward before giving up.
@@ -116,6 +118,7 @@ impl<'a> Machine<'a> {
             host_quit: false,
             wait_hook: None,
             os_gate: None,
+            seed_pin: crate::os_hle::SeedPin::from_env(),
         }
     }
 
