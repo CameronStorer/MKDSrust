@@ -330,6 +330,8 @@ struct Lifted {
     t1_name: String,
     /// The field accessors the raised version calls (defined in the `layout` crate).
     fields: Vec<(ir::FieldRef, ir::Access)>,
+    /// Block 5.5: a closed function's direct variant (goes to the `direct` crate).
+    direct: Option<String>,
 }
 
 const RUST_KEYWORDS: &[&str] = &[
@@ -567,12 +569,17 @@ fn untyped_field_widths(funcs: &mut [Lifted]) {
                 renames.insert(old, format!("{}::{}(", r.module, r.accessor(*a)));
             }
         }
+        // longest first, so `x_u32(` is not hit by a shorter name's pattern
+        let mut v: Vec<_> = renames.into_iter().filter(|(a, b)| a != b).collect();
+        v.sort_by_key(|(a, _)| std::cmp::Reverse(a.len()));
         if let Ok(t) = &mut f.t1 {
-            // longest first, so `x_u32(` is not hit by a shorter name's pattern
-            let mut v: Vec<_> = renames.into_iter().filter(|(a, b)| a != b).collect();
-            v.sort_by_key(|(a, _)| std::cmp::Reverse(a.len()));
-            for (a, b) in v {
-                *t = replace_word(t, &a, &b);
+            for (a, b) in &v {
+                *t = replace_word(t, a, b);
+            }
+        }
+        if let Some(t) = &mut f.direct {
+            for (a, b) in &v {
+                *t = replace_word(t, a, b);
             }
         }
     }
@@ -737,6 +744,17 @@ fn with_notes9<T>(segment: &str, entry: u32, k: impl FnOnce(&raise_emit::Notes) 
 /// Layout facts from struct inference (`MKDS_TYPE_DUMP=<file>`), gathered over the final pass.
 static TYPE_DUMP: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
+/// Block 5.5: entries a direct call must not bypass the dispatcher for (they stay `m.call`): natives
+/// (installed by the dispatcher), the OS hooks at dispatch (IRQ safe entries, the tick pin's
+/// `OS_GetTick`), and the thread-context code, which must see the true registers in `c.r` (AMCE revision
+/// 0: `OS_Rescheduler` 0x0200DE50, `OS_SaveContext` 0x0200E6EC, `OS_LoadContext` 0x0200E738).
+fn direct_excluded() -> HashSet<u32> {
+    let mut x: HashSet<u32> = recomp::native::NATIVE.iter().chain(recomp::native::fs::NATIVES).map(|n| n.entry & !1).collect();
+    x.extend(recomp::os_hle::SAFE_ENTRIES.iter().map(|e| e.0 & !1));
+    x.extend([recomp::os_hle::OS_GET_TICK, 0x0200_DE50, 0x0200_E6EC, 0x0200_E738]);
+    x
+}
+
 /// An ARM9 function: its translation and, when the exact passes are on, its raised version.
 fn lifted9(segment: String, f: &lift::Func, id: String, img: &lift::Image) -> Lifted {
     let code = lift::emit_full(f, &id, Some(img), None, raise());
@@ -751,8 +769,10 @@ fn lifted9(segment: String, f: &lift::Func, id: String, img: &lift::Image) -> Li
         t
     };
     let fields = if t1.is_ok() { ir::take_field_uses() } else { Vec::new() };
+    let direct = raise_emit::take_direct();
+    let _ = raise_emit::take_facts();
     let t1_name = format!("f_{id}_t1");
-    Lifted { arm7: false, segment, entry: f.entry, code, t1, t1_name, id, fields }
+    Lifted { arm7: false, segment, entry: f.entry, code, t1, t1_name, id, fields, direct }
 }
 
 fn run() -> Result<ExitCode, String> {
@@ -1271,10 +1291,145 @@ fn run() -> Result<ExitCode, String> {
             *ARG_HINTS.write().unwrap() = Some(hints);
         }
     }
+    // Block 5.5 (`--timing native`): closed functions and their direct signatures
+    let mut own_sig: HashMap<(String, u32), raise_emit::DirectSig> = HashMap::new();
+    if raise() && std::env::var_os("MKDS_NO_T1").is_none() && raise_emit::nospill_enabled() {
+        let t = std::time::Instant::now();
+        let emit_facts = |seg: &str, f: &lift::Func, id: &str, src: &Option<String>| -> Option<raise_emit::Facts> {
+            let img = image(src);
+            raise_emit::set_current(seg, None);
+            let r = with_notes9(seg, f.entry, |n| raise_emit::emit_t1_annotated(f, id, Some(&img), n));
+            let _ = ir::take_field_uses();
+            let _ = raise_emit::take_types();
+            let _ = raise_emit::take_dump();
+            let facts = raise_emit::take_facts();
+            r.ok().and(facts)
+        };
+        raise_emit::set_direct(HashMap::new());
+        let facts: Vec<Option<raise_emit::Facts>> = jobs.iter().map(|(seg, f, id, src)| emit_facts(seg, f, id, src)).collect();
+        let excluded = direct_excluded();
+        let mut closed: Vec<bool> = jobs.iter().zip(&facts).map(|((_, f, _, _), x)| x.as_ref().is_some_and(|x| x.escape.is_none()) && !excluded.contains(&(f.entry & !1))).collect();
+        let mut rows: HashMap<u32, Vec<usize>> = HashMap::new();
+        for (i, (_, f, _, _)) in jobs.iter().enumerate() {
+            rows.entry(f.entry).or_default().push(i);
+        }
+        // a call from `seg` reaches a closed row: the caller's own segment, or one always resident
+        let reaches = |closed: &[bool], seg: &str, t: u32| -> Option<usize> {
+            let r = rows.get(&t)?;
+            r.iter().copied().find(|&j| closed[j] && jobs[j].0 == seg).or_else(|| r.iter().copied().find(|&j| closed[j] && !jobs[j].0.starts_with("ov9_")))
+        };
+        // closed functions that fail the return check once the callee signatures are known
+        let mut dropped: HashSet<usize> = HashSet::new();
+        let (sigs, rounds) = 'outer: loop {
+        loop {
+            let mut changed = false;
+            for i in 0..jobs.len() {
+                if closed[i] && facts[i].as_ref().unwrap().calls.iter().any(|&t| reaches(&closed, &jobs[i].0, t).is_none()) {
+                    closed[i] = false;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let mut why: BTreeMap<&str, usize> = BTreeMap::new();
+        for (i, x) in facts.iter().enumerate() {
+            let w = match x {
+                None => "not raised",
+                Some(_) if closed[i] => "closed",
+                Some(_) if dropped.contains(&i) => "returns elsewhere (with the callee signatures)",
+                Some(x) => x.escape.unwrap_or(if excluded.contains(&(jobs[i].1.entry & !1)) { "native, hook or thread context" } else { "calls a function that is not closed" }),
+            };
+            *why.entry(w).or_default() += 1;
+        }
+        eprintln!("mkds_gen: no-spill: functions by reason {why:?}");
+        // readable unique names in the `direct` crate
+        let mut count: HashMap<String, usize> = HashMap::new();
+        let ident = |i: usize| -> Option<String> {
+            let n = CALL_NAMES.get()?.get(&(jobs[i].0.clone(), jobs[i].1.entry & !1))?;
+            let n: String = n.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect();
+            let ok = n.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) && !RUST_KEYWORDS.contains(&n.as_str()) && !n.starts_with("f_") && !n.starts_with("sub_");
+            ok.then_some(n)
+        };
+        for i in (0..jobs.len()).filter(|&i| closed[i]) {
+            if let Some(n) = ident(i) {
+                *count.entry(n).or_default() += 1;
+            }
+        }
+        let mut sigs: BTreeMap<usize, raise_emit::DirectSig> = BTreeMap::new();
+        for i in (0..jobs.len()).filter(|&i| closed[i]) {
+            let name = match ident(i) {
+                Some(n) if count[&n] == 1 => n,
+                Some(n) => format!("{n}_{}", jobs[i].2.to_lowercase()),
+                None => format!("sub_{}", jobs[i].2.to_lowercase()),
+            };
+            sigs.insert(i, raise_emit::DirectSig { params: 0, rets: 0, name });
+        }
+        let table = |sigs: &BTreeMap<usize, raise_emit::DirectSig>| -> HashMap<u32, Vec<(String, raise_emit::DirectSig)>> {
+            let mut m: HashMap<u32, Vec<(String, raise_emit::DirectSig)>> = HashMap::new();
+            for (&i, d) in sigs {
+                m.entry(jobs[i].1.entry).or_default().push((jobs[i].0.clone(), d.clone()));
+            }
+            m
+        };
+        // arguments and results: least fixed point (registers only get added)
+        let mut rounds = 0;
+        loop {
+            rounds += 1;
+            raise_emit::set_direct(table(&sigs));
+            let mut changed = false;
+            let keys: Vec<usize> = sigs.keys().copied().collect();
+            for i in keys {
+                let (seg, f, id, src) = &jobs[i];
+                let x = emit_facts(seg, f, id, src).expect("a closed function emits");
+                let d = sigs.get_mut(&i).unwrap();
+                let (p, r) = (d.params | x.live_in, d.rets | x.written);
+                if (p, r) != (d.params, d.rets) {
+                    d.params = p;
+                    d.rets = r;
+                    changed = true;
+                }
+            }
+            if !changed || rounds == 64 {
+                break;
+            }
+        }
+        if rounds == 64 {
+            return Err("no-spill: direct signatures did not converge".into());
+        }
+        raise_emit::set_direct(table(&sigs));
+        // the final check with the real callee signatures (the first pass assumed the calling convention)
+        let mut bad = Vec::new();
+        for &i in sigs.keys() {
+            let (seg, f, id, src) = &jobs[i];
+            if emit_facts(seg, f, id, src).is_none_or(|x| x.escape.is_some()) {
+                bad.push(i);
+            }
+        }
+        if bad.is_empty() {
+            break 'outer (sigs, rounds);
+        }
+        for i in bad {
+            closed[i] = false;
+            dropped.insert(i);
+        }
+        };
+        let sites: usize = (0..jobs.len())
+            .filter_map(|i| facts[i].as_ref().map(|x| (i, x)))
+            .map(|(i, x)| x.calls.iter().filter(|&&t| reaches(&closed, &jobs[i].0, t).is_some()).count())
+            .sum();
+        eprintln!("mkds_gen: no-spill: {} closed functions, signatures in {rounds} rounds, {sites} call sites call them directly ({:.1}s)", sigs.len(), t.elapsed().as_secs_f64());
+        for (i, d) in sigs {
+            own_sig.insert((jobs[i].0.clone(), jobs[i].1.entry), d);
+        }
+    }
     for (seg, f, id, src) in &jobs {
         let img = image(src);
+        raise_emit::set_current(seg, own_sig.get(&(seg.clone(), f.entry)).cloned());
         funcs.push(lifted9(seg.clone(), f, id.clone(), &img));
     }
+    raise_emit::set_current("", None);
     if let Some(p) = std::env::var_os("MKDS_TYPE_DUMP") {
         let mut t = TYPE_DUMP.lock().unwrap().join("\n");
         t.push('\n');
@@ -1314,7 +1469,7 @@ fn run() -> Result<ExitCode, String> {
             raise_emit::emit_t1_full(f, &id, Some(&img7), &notes, Some(&|d, jumped| rt::arm7_cycles(d, true, jumped)))
         } else {
             Err("exact generation")
-        }, t1_name: format!("f_{id}_t1"), id, fields: Vec::new() });
+        }, t1_name: format!("f_{id}_t1"), id, fields: Vec::new(), direct: None });
     }
 
     // output directory: only create/replace our own previous output
@@ -1331,7 +1486,7 @@ fn run() -> Result<ExitCode, String> {
     if let Ok(dir) = std::fs::read_dir(&args.out) {
         for e in dir.flatten() {
             let n = e.file_name().to_string_lossy().into_owned();
-            if n.starts_with("part_") || n == "lifted" || n == "game" || n == "layout" {
+            if n.starts_with("part_") || n == "lifted" || n == "game" || n == "layout" || n == "direct" {
                 let _ = std::fs::remove_dir_all(e.path());
             }
         }
@@ -1350,6 +1505,9 @@ fn run() -> Result<ExitCode, String> {
                 f.code = format!("// {line}\n{}", f.code);
                 if let Ok(t1) = &f.t1 {
                     f.t1 = Ok(format!("/// {line}\n{t1}"));
+                }
+                if let Some(d) = &f.direct {
+                    f.direct = Some(format!("/// {line}\n{d}"));
                 }
                 named += 1;
             }
@@ -1386,6 +1544,21 @@ fn run() -> Result<ExitCode, String> {
     );
     let mut table7 = String::from("/// The ARM7 program, found by whole-program discovery (no metadata), plus our ARM7 IRQ stub at 0x18.\npub static LIFTED7: &[recomp::mem::Lifted] = &[\n");
     let mut members = Vec::new();
+    // Block 5.5: the direct variants of closed functions, in one crate (they only call each other)
+    let direct_src: Vec<&str> = funcs.iter().filter_map(|f| f.direct.as_deref()).collect();
+    let direct_dep = if direct_src.is_empty() { String::new() } else { "direct = { path = \"../direct\" }\n".to_string() };
+    if !direct_src.is_empty() {
+        let dir = args.out.join("direct");
+        std::fs::create_dir_all(dir.join("src")).map_err(|e| e.to_string())?;
+        put(dir.join("Cargo.toml"), &format!("[package]\nname = \"direct\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n{recomp_dep}\nlayout = {{ path = \"../layout\" }}\n"))?;
+        let mut src = String::from("//! Generated from the user's ROM: raised functions that reach no safe point, called directly with\n//! their registers as Rust arguments and results (Block 5.5, `--timing native`).\n#![allow(non_snake_case, non_upper_case_globals, clippy::all)]\n#[allow(unused_imports)]\nuse layout::*;\n");
+        for d in &direct_src {
+            src.push_str(d);
+        }
+        put(dir.join("src/lib.rs"), &src)?;
+        members.push("direct".to_string());
+        eprintln!("mkds_gen: {} direct functions in crate direct", direct_src.len());
+    }
     let mut part_of: HashMap<String, String> = HashMap::new();
     let mut deps = String::new();
     let mut bytes = 0usize;
@@ -1393,7 +1566,7 @@ fn run() -> Result<ExitCode, String> {
         let name = format!("part_{n:02}");
         let dir = args.out.join(&name);
         std::fs::create_dir_all(dir.join("src")).map_err(|e| e.to_string())?;
-        put(dir.join("Cargo.toml"), &format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n{recomp_dep}\nlayout = {{ path = \"../layout\" }}\n"))?;
+        put(dir.join("Cargo.toml"), &format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n{recomp_dep}\nlayout = {{ path = \"../layout\" }}\n{direct_dep}"))?;
         let mut src = String::from("//! Generated from the user's ROM (lifted machine code).\n#![allow(non_snake_case, non_upper_case_globals, clippy::all)]\n#[allow(unused_imports)]\nuse layout::*;\n");
         for f in chunk {
             part_of.insert(f.id.clone(), name.clone());
@@ -1588,7 +1761,7 @@ edition = \"2024\"
     println!(
         "{status}: {lifted_n}/{} entries lifted in {} part crates ({:.1} MB), {fallback_sites} undecoded sites left to the interpreter -> {}",
         rows.len(),
-        members.len() - 2 - args.game as usize,
+        members.len() - 2 - args.game as usize - members.iter().any(|m| m == "direct") as usize,
         bytes as f64 / 1e6,
         args.out.display()
     );
