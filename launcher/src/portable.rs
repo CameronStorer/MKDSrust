@@ -79,6 +79,14 @@ fn run(command: &mut Command, log: &mut dyn FnMut(String)) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn walk(d: &std::path::Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        for e in std::fs::read_dir(d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() { out.extend(walk(&p)) } else { out.push(p) }
+        }
+        out
+    }
     #[test]
     fn embedded_source_is_complete_and_has_no_game_payload() {
         let data = tempfile::tempdir().unwrap();
@@ -92,7 +100,10 @@ mod tests {
         ] {
             assert!(dir.join(file).is_file(), "{file}");
         }
-        assert!(!dir.join("assets").exists());
+        // Only the project's own window icon may come from assets/, never game assets.
+        assert!(dir.join("assets/branding/icon.png").is_file());
+        let assets: Vec<_> = walk(&dir.join("assets"));
+        assert_eq!(assets, vec![dir.join("assets/branding/icon.png")]);
         assert!(!dir.join("2_native_game/target").exists());
         assert_eq!(
             dir,

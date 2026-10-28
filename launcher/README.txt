@@ -12,6 +12,9 @@ The executable contains project source, not a ROM, Nintendo game assets or
 translated game code. These are produced only on your computer from your ROM.
 Do not distribute generated games, generated source or extracted assets.
 
+Each build goes into its own folder (an MKDSrust subfolder if you pick a folder
+with other files). The generated Rust source is in its source folder.
+
 Settings and Controls apply on the next game launch. Advanced contains logs,
 build folders, accuracy mode and an optional system Rust setting.
 

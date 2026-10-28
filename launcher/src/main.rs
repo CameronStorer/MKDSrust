@@ -337,17 +337,7 @@ impl Launcher {
         };
         let data = self.dir.clone();
         let system = self.prefs.system_toolchain;
-        let mut output = self.prefs.output.clone();
-        if output.exists() && std::fs::read_dir(&output).map_or(true, |mut i| i.next().is_some()) {
-            let suffix = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos();
-            output = output.with_file_name(format!(
-                "{}-{suffix}",
-                output.file_name().unwrap_or_default().to_string_lossy()
-            ));
-        }
+        let output = build_folder(&self.prefs.output);
         let stamp = fingerprint();
         self.source_stamp = stamp.clone();
         self.log = format!(
@@ -384,7 +374,7 @@ impl Launcher {
                 allow_unverified: false,
                 offline: false,
                 allow_incomplete: false,
-                keep_source: false,
+                keep_source: true,
                 with_acceptance: false,
                 jobs: None,
                 cache_dir: Some(build::default_cache_dir()),
@@ -1320,5 +1310,43 @@ mod tests {
             "native,,native,exact"
         );
         assert_eq!(std::env::var_os("MKDS_HW_FS"), before);
+    }
+}
+
+/// Where a build goes. An empty or new folder is used as is. A folder that holds other files (e.g. the Desktop)
+/// gets an `MKDSrust` subfolder. Earlier builds are kept: a taken name gets " (2)", " (3)", ...
+fn build_folder(chosen: &Path) -> PathBuf {
+    let free = |p: &Path| std::fs::read_dir(p).map_or(true, |mut i| i.next().is_none());
+    let is_build = |p: &Path| p.join("manifest.json").is_file();
+    let base = if free(chosen) || is_build(chosen) {
+        chosen.to_path_buf()
+    } else {
+        chosen.join("MKDSrust")
+    };
+    if free(&base) {
+        return base;
+    }
+    let name = base.file_name().unwrap_or_default().to_string_lossy().into_owned();
+    (2..)
+        .map(|n| base.with_file_name(format!("{name} ({n})")))
+        .find(|p| free(p))
+        .unwrap()
+}
+
+#[cfg(test)]
+mod build_folder_tests {
+    use super::build_folder;
+
+    #[test]
+    fn picks_readable_folders() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        assert_eq!(build_folder(&root.join("new")), root.join("new"));
+        std::fs::write(root.join("note.txt"), "x").unwrap();
+        assert_eq!(build_folder(root), root.join("MKDSrust"));
+        std::fs::create_dir(root.join("MKDSrust")).unwrap();
+        std::fs::write(root.join("MKDSrust/manifest.json"), "{}").unwrap();
+        assert_eq!(build_folder(root), root.join("MKDSrust (2)"));
+        assert_eq!(build_folder(&root.join("MKDSrust")), root.join("MKDSrust (2)"));
     }
 }
