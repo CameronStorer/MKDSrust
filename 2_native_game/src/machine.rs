@@ -66,6 +66,15 @@ pub struct Machine<'a> {
     pub gx_offsets: std::collections::BTreeMap<u32, u64>,
     pub frame_polys: Vec<crate::gx::Polygon>,
     pub frame_viewport: [u8; 4],
+    /// The SWAP_BUFFERS parameter that ended [`Machine::frame_polys`] (sort and depth mode).
+    pub frame_swap_param: u32,
+    /// Presenters (the player): latch what the screens show at each display start, see
+    /// [`Machine::render_snapshot`]. Off by default (acceptance and its proofs read the live state).
+    pub display_latch: bool,
+    /// With `display_latch`: the polygons, viewport and swap parameter the 3D engine renders this frame
+    /// (the SWAP_BUFFERS frame takes effect at the next V-blank), and the latched display.
+    displayed: (Vec<crate::gx::Polygon>, [u8; 4], u32),
+    latched: Option<RenderSnapshot>,
     gx_trace: Option<BufWriter<std::fs::File>>,
     gx_trace_error: Option<String>,
     pub idle_poll: Option<Box<dyn FnMut() -> Option<IdleAction> + 'a>>,
@@ -130,6 +139,10 @@ impl<'a> Machine<'a> {
             gx_offsets: Default::default(),
             frame_polys: Vec::new(),
             frame_viewport: [0, 0, 255, 191],
+            frame_swap_param: 0,
+            display_latch: false,
+            displayed: (Vec::new(), [0, 0, 255, 191], 0),
+            latched: None,
             gx_trace: None,
             gx_trace_error: None,
             idle_poll: None,
@@ -366,12 +379,43 @@ impl Machine<'_> {
     /// Fast-forward the hardware until an interrupt is pending (or give up and note it).
     /// Advances the hardware (and the ARM7, if running) by `cycles` bus cycles.
     pub fn tick(&mut self, cycles: u64) {
-        if self.profile_time {
-            return self.tick_timed(cycles);
+        let before = self.hw.cycles;
+        if self.display_latch {
+            // geometry the CPU wrote before this time step belongs before its V-blank (no guest-visible effect)
+            self.sync_gx();
         }
-        self.hw.advance(cycles);
-        self.sync_gx();
-        self.run_arm7(cycles);
+        if self.profile_time {
+            self.tick_timed(cycles);
+        } else {
+            self.hw.advance(cycles);
+            self.sync_gx();
+            self.run_arm7(cycles);
+        }
+        if self.display_latch {
+            self.latch_display(before);
+        }
+    }
+
+    /// Display latch for presenters (`display_latch`). The console renders the 3D frame that SWAP_BUFFERS
+    /// ended at the next V-blank and scans each frame out from line 0 with the registers, VRAM and capture
+    /// setting the game left in the V-blank. Snapshots taken at an arbitrary later point mix two frames once
+    /// the game runs a whole frame of work at the V-blank (budget-free timing): the next frame's POWCNT1
+    /// screen swap or polygons with this frame's display capture, so the dual-screen 3D of the course intros
+    /// showed images on the wrong screen. Called after each step of hardware time (at most a few thousand
+    /// cycles, so a step never holds both a V-blank and a display start).
+    fn latch_display(&mut self, before: u64) {
+        use crate::ds_mem::{CYCLES_PER_LINE, LINES, VISIBLE_LINES};
+        let frame = LINES * CYCLES_PER_LINE;
+        let vblank = VISIBLE_LINES * CYCLES_PER_LINE;
+        let after = self.hw.cycles;
+        let vblanks = |c: u64| (c + frame - vblank) / frame;
+        if vblanks(after) != vblanks(before) {
+            self.displayed = (self.frame_polys.clone(), self.frame_viewport, self.frame_swap_param);
+        }
+        if after / frame != before / frame {
+            let (polys, viewport, swap) = self.displayed.clone();
+            self.latched = Some(self.snapshot_with(polys, viewport, swap));
+        }
     }
 
     fn tick_timed(&mut self, cycles: u64) {
@@ -455,6 +499,7 @@ impl Machine<'_> {
             if self.gx.swaps != before {
                 self.frame_polys = std::mem::take(&mut self.gx.polygons);
                 self.frame_viewport = self.gx.viewport;
+                self.frame_swap_param = self.gx.swap_param;
                 self.gx_swaps = self.gx.swaps;
             }
         }
@@ -467,6 +512,7 @@ impl Machine<'_> {
     pub fn render_frame3d(&self) -> Vec<u32> {
         let mut polys = self.frame_polys.clone();
         crate::gx::resolve_toon(&mut polys, &self.hw.io);
+        crate::raster::hardware_order(&mut polys, self.frame_viewport, self.frame_swap_param);
         render_3d(&self.hw.io, &self.hw.vram, &polys, self.frame_viewport)
     }
 
@@ -1022,22 +1068,31 @@ fn render_3d(
 
 impl Machine<'_> {
     /// Synchronize pending GX writes and capture exactly the inputs used by the renderer.
+    /// With [`Machine::display_latch`] on, the frame on screen as latched at its display start (see
+    /// `latch_display`); until the first one, and with the latch off, the live state.
     pub fn render_snapshot(&mut self) -> RenderSnapshot {
+        if self.display_latch {
+            if let Some(snap) = &self.latched {
+                return snap.clone();
+            }
+        }
         self.sync_gx();
+        self.snapshot_with(self.frame_polys.clone(), self.frame_viewport, self.frame_swap_param)
+    }
+
+    fn snapshot_with(&self, mut polys: Vec<crate::gx::Polygon>, viewport: [u8; 4], swap_param: u32) -> RenderSnapshot {
         let mut io = self.hw.io.clone();
         // the capture of the frame being shown (the enable bit itself may already be cleared)
         io[0x64..0x68].copy_from_slice(&self.hw.capture_latch.to_le_bytes());
+        crate::gx::resolve_toon(&mut polys, &self.hw.io);
+        crate::raster::hardware_order(&mut polys, viewport, swap_param);
         RenderSnapshot {
             io,
             palette: self.hw.palette.clone(),
             oam: self.hw.oam.clone(),
             vram: self.hw.vram.to_vec(),
-            polys: {
-                let mut polys = self.frame_polys.clone();
-                crate::gx::resolve_toon(&mut polys, &self.hw.io);
-                polys
-            },
-            viewport: self.frame_viewport,
+            polys,
+            viewport,
         }
     }
 }

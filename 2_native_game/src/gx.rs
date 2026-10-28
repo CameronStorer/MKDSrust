@@ -136,6 +136,8 @@ pub struct Gx {
     pub polygons: Vec<Polygon>,
     /// Number of SWAP_BUFFERS commands seen (frames).
     pub swaps: u32,
+    /// The last SWAP_BUFFERS parameter: bit 0 translucent sort (0 = auto by Y, 1 = manual), bit 1 depth (W).
+    pub swap_param: u32,
     /// Commands whose number is not a geometry command (diagnostics).
     pub unknown: Vec<u8>,
     // FIFO unpacking
@@ -465,6 +467,7 @@ impl Gx {
                 ]
             }
             0x50 => {
+                self.swap_param = p[0] & 3;
                 self.swaps += 1;
                 self.prim = None;
             }
