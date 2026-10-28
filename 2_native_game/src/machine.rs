@@ -285,11 +285,15 @@ impl Machine<'_> {
     }
 
     fn run_arm7(&mut self, cycles: u64) {
+        let mut cpu = true;
         if let Some(r) = self.hle7.as_mut() {
-            r.advance(&mut self.hw, self.arm7.as_mut().map(|a| &mut a.s.periph));
+            // Block 5.2b: false once the event-driven ARM7 (`MKDS_HW_SND=native`) has taken over
+            cpu = r.run(&mut self.hw, self.arm7.as_mut(), cycles);
         }
         if let Some(a) = self.arm7.as_mut() {
-            a.run(&mut self.hw, cycles as u32);
+            if cpu {
+                a.run(&mut self.hw, cycles as u32);
+            }
             // ARM7::run owns the sound clock. Drain its output; rendering again
             // here advances sample positions twice and discards alternate chunks.
             if !a.s.audio_out.is_empty() {

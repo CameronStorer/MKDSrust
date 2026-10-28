@@ -25,6 +25,7 @@
 //! once. Touch auto-sampling runs on the V-count lines the ARM7's periodic V-alarms would use.
 pub mod backup;
 pub mod replay;
+pub mod snd;
 pub mod spi;
 pub mod trace;
 
@@ -126,6 +127,9 @@ pub struct Router {
     pub log: Option<Vec<u32>>,
     /// Backing peripherals when there is no ARM7 CPU (tests); otherwise the CPU's are used.
     pub own_periph: Option<Box<Peripherals>>,
+    /// The event-driven ARM7 sound driver (`MKDS_HW_SND=native`, Block 5.2b); once it has taken over, every
+    /// tag is claimed and words without a native service go to the ARM7's own (lifted) PXI callbacks.
+    pub snd: Option<snd::Snd>,
 }
 
 impl Default for Router {
@@ -148,6 +152,7 @@ impl Router {
             sent: [0; 32],
             log: None,
             own_periph: None,
+            snd: None,
         }
     }
 
@@ -155,8 +160,11 @@ impl Router {
     /// Diagnostics: `MKDS_HLE7_TAGS=<hex mask>` claims only those tags, `MKDS_HLE7_LATENCY=<cycles>` sets
     /// the reply latency.
     pub fn from_env(hw: &mut Bus) -> Option<Router> {
-        native_selected().then(|| {
+        (native_selected() || snd::native_selected()).then(|| {
             let mut r = Router::new();
+            if snd::native_selected() {
+                r.snd = Some(snd::Snd::new());
+            }
             let var = |k: &str| std::env::var(k).ok();
             if let Some(m) =
                 var("MKDS_HLE7_TAGS").and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok())
@@ -188,7 +196,31 @@ impl Router {
     /// Hand `word` to the ARM7 CPU as if the router were not there.
     pub(crate) fn forward(&mut self, hw: &mut Bus, word: u32) {
         self.forwarded[(word & 0x1F) as usize] += 1;
-        hw.ipc_out.push(word);
+        match self.snd.as_mut() {
+            Some(s) if s.active => s.inbox.push(word),
+            _ => hw.ipc_out.push(word),
+        }
+    }
+
+    /// One step of the ARM7 side for `cycles` bus cycles (`Machine::run_arm7`): the native services, and with
+    /// `MKDS_HW_SND=native` the event-driven ARM7 once it has taken over. Returns whether the ARM7 CPU must
+    /// still run.
+    pub fn run(&mut self, hw: &mut Bus, a: Option<&mut crate::arm7::Arm7>, cycles: u64) -> bool {
+        let Some(a) = a else {
+            self.advance(hw, None);
+            return true;
+        };
+        self.advance(hw, Some(&mut a.s.periph));
+        let Some(s) = self.snd.as_mut() else { return true };
+        if !s.active {
+            if !s.try_take_over(hw, a) {
+                return true;
+            }
+            self.claimed = u32::MAX;
+            hw.hle7_tags = u32::MAX;
+        }
+        s.advance(hw, a, cycles);
+        false
     }
 
     /// Take the ARM9's new words, run time-driven service work (touch auto-sampling), deliver replies.
@@ -244,6 +276,9 @@ impl Router {
         self.received[t as usize] += 1;
         match t {
             tag::NVRAM | tag::TOUCH | tag::PM => spi::receive(self, hw, p, w),
+            tag::SOUND if self.snd.as_ref().is_some_and(|s| s.active) => {
+                self.snd.as_mut().unwrap().inbox.push(w);
+            }
             tag::RTC => self.rtc(hw, p, w, data),
             tag::FS => backup::receive(self, hw, p, w, data, err),
             tag::CTRDG if data & 0x3F == 1 => {
