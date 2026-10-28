@@ -18,8 +18,14 @@
 mod arm;
 #[path = "../../build_support.rs"]
 mod build_support;
+#[path = "../ir.rs"]
+mod ir;
 #[path = "../lift.rs"]
 mod lift;
+#[path = "../raise.rs"]
+mod raise;
+#[path = "../raise_emit.rs"]
+mod raise_emit;
 #[path = "../rt.rs"]
 mod rt;
 #[path = "../signature.rs"]
@@ -29,7 +35,7 @@ mod thumb;
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -80,6 +86,12 @@ fn parse_args() -> Result<Args, String> {
             }
             "--no-game" => game = false,
             "--allow-incomplete" => allow_incomplete = true,
+            // Block 5.4: `native` emits ARM9 code without the per-block budget (see `recomp::lift::timing_native`)
+            "--timing" => match value("--timing")?.as_str() {
+                "native" => lift::set_timing_native(true, recomp::os_hle::SAFE_LOOPS),
+                "exact" => lift::set_timing_native(false, &[]),
+                t => return Err(format!("--timing must be exact or native, not {t}")),
+            },
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -238,6 +250,12 @@ fn write_signatures(
     Ok(())
 }
 
+/// Block 4B passes that keep exact behaviour (proven by a bit-identical race): on by default;
+/// `MKDS_EXACT=1` generates the plain translation.
+fn raise() -> bool {
+    std::env::var_os("MKDS_EXACT").is_none()
+}
+
 fn sha_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -248,6 +266,9 @@ fn generator_id() -> String {
     let mut h = Sha256::new();
     for src in [
         include_bytes!("../lift.rs").as_slice(),
+        include_bytes!("../ir.rs"),
+        include_bytes!("../raise.rs"),
+        include_bytes!("../raise_emit.rs"),
         include_bytes!("../arm.rs"),
         include_bytes!("../thumb.rs"),
         include_bytes!("../rt.rs"),
@@ -303,6 +324,455 @@ struct Lifted {
     entry: u32,
     id: String,
     code: String,
+    /// The raised (T1) version, installed at the entry (block 4B), or why there is none.
+    t1: Result<String, &'static str>,
+    /// The raised version's Rust name (the dictionary name where there is one).
+    t1_name: String,
+    /// The field accessors the raised version calls (defined in the `layout` crate).
+    fields: Vec<(ir::FieldRef, ir::Access)>,
+    /// Block 5.5: a closed function's direct variant (goes to the `direct` crate).
+    direct: Option<String>,
+}
+
+const RUST_KEYWORDS: &[&str] = &[
+    "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum", "extern", "false", "fn", "for",
+    "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "self", "static", "struct",
+    "super", "trait", "true", "type", "unsafe", "use", "where", "while", "abstract", "become", "box", "do", "final", "gen",
+    "macro", "override", "priv", "try", "typeof", "unsized", "virtual", "yield",
+];
+
+/// Gives every raised function its dictionary name (else `sub_<segment>_<address>`), unique across the
+/// generated code: a name used more than once gets the segment and address appended.
+fn name_t1(funcs: &mut [Lifted]) {
+    let ident = |f: &Lifted| -> Option<String> {
+        let n = CALL_NAMES.get()?.get(&(f.segment.clone(), f.entry & !1))?;
+        let n: String = n.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect();
+        let ok = n.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) && !RUST_KEYWORDS.contains(&n.as_str()) && !n.starts_with("f_") && !n.starts_with("sub_");
+        ok.then_some(n)
+    };
+    let mut count: HashMap<String, usize> = HashMap::new();
+    for f in funcs.iter().filter(|f| f.t1.is_ok()) {
+        if let Some(n) = ident(f) {
+            *count.entry(n).or_default() += 1;
+        }
+    }
+    for f in funcs.iter_mut() {
+        let Ok(code) = &f.t1 else { continue };
+        let name = match ident(f) {
+            Some(n) if count[&n] == 1 => n,
+            Some(n) => format!("{n}_{}", f.id.to_lowercase()),
+            None => format!("sub_{}", f.id.to_lowercase()),
+        };
+        f.t1 = Ok(code.replacen(&format!("pub fn f_{}_t1(", f.id), &format!("pub fn {name}("), 1));
+        f.t1_name = name;
+    }
+}
+
+/// Dictionary names by (segment, address without the Thumb bit), for call comments in T1 code.
+static CALL_NAMES: std::sync::OnceLock<HashMap<(String, u32), String>> = std::sync::OnceLock::new();
+
+/// The dictionary name of the function a call from `segment` reaches at `target`: the caller's own
+/// segment first (overlays share addresses), then any other segment with a function there.
+fn call_name(segment: &str, target: u32) -> Option<String> {
+    let names = CALL_NAMES.get()?;
+    let a = target & !1;
+    names.get(&(segment.to_string(), a)).or_else(|| names.iter().find(|((s, e), _)| *e == a && !s.starts_with("ov")).map(|(_, n)| n)).cloned()
+}
+
+/// Research layout for comments in raised code: field names by (struct, offset), the fields each
+/// function uses (by entry, without the Thumb bit) and global names by address.
+#[derive(Default)]
+struct Layout {
+    /// (struct, offset) -> (field name, type).
+    fields: HashMap<(String, u32), (String, String)>,
+    /// Struct -> its Rust module name.
+    modules: BTreeMap<String, String>,
+    uses: HashMap<u32, Vec<(String, u32)>>,
+    globals: HashMap<u32, String>,
+    /// Struct -> the struct it extends (its fields come first).
+    parent: HashMap<String, String>,
+    /// Global address -> the struct the pointer stored there points to.
+    points_global: HashMap<u32, String>,
+    /// Global address -> the struct stored there itself (`Foo` or the first of `Foo[8]`).
+    is_global: HashMap<u32, String>,
+    /// (struct, offset) -> the struct the pointer in that field points to.
+    points_field: HashMap<(String, u32), String>,
+    /// Offset -> the structs with a field there.
+    by_offset: HashMap<u32, Vec<String>>,
+    /// Struct -> share of its word slots (up to its last field) holding a known field.
+    density: HashMap<String, f64>,
+}
+static LAYOUT: std::sync::OnceLock<Layout> = std::sync::OnceLock::new();
+
+fn hex(s: &str) -> Option<u32> {
+    u32::from_str_radix(s.trim().trim_start_matches("0x").trim_start_matches("0X"), 16).ok()
+}
+
+/// Reads `fields.csv`, `field_uses.csv` and `globals.csv` from `dir` (any may be missing).
+fn load_layout(dir: &Path) -> Layout {
+    let mut l = Layout::default();
+    let rows = |name: &str| -> Vec<Vec<String>> {
+        std::fs::read_to_string(dir.join(name)).map(|t| csv_records(&t).into_iter().skip(1).collect()).unwrap_or_default()
+    };
+    // structs.csv: aliases (one struct under several research names), parents, global roots
+    // (`*0x0217ACF8`) and pointer fields (`*(kart+0x514)`)
+    let st_rows = rows("structs.csv");
+    let mut canon: HashMap<String, String> = st_rows.iter().filter_map(|r| r.first()).map(|n| (n.clone(), n.clone())).collect();
+    for r in &st_rows {
+        let (Some(n), Some(aliases)) = (r.first(), r.get(1)) else { continue };
+        for a in aliases.split(';').map(str::trim).filter(|a| !a.is_empty()) {
+            canon.entry(a.to_string()).or_insert_with(|| n.clone());
+        }
+    }
+    let canon = |s: &str| canon.get(s.trim()).cloned().unwrap_or_else(|| s.trim().to_string());
+    let pointee = |ty: &str| -> Option<String> {
+        let t = ty.trim().trim_matches('"').trim();
+        let inner = t.strip_prefix("ptr<")?.strip_suffix('>')?.trim();
+        Some(canon(inner))
+    };
+    let mut fields_at: Vec<(String, u32, String)> = Vec::new();
+    for r in &st_rows {
+        let Some(n) = r.first() else { continue };
+        if let Some(p) = r.get(2).filter(|p| !p.trim().is_empty()) {
+            l.parent.insert(n.clone(), canon(p));
+        }
+        if let Some(a) = r.get(3).and_then(|root| hex(root.trim().strip_prefix('*')?)) {
+            l.points_global.insert(a, n.clone());
+        }
+        // `*(kart+0x514)`: the struct a field of another struct points to
+        if let Some(rec) = r.get(5) {
+            if let Some(inner) = rec.trim().strip_prefix("*(").and_then(|x| x.split(')').next()) {
+                if let Some((base, off)) = inner.split_once('+') {
+                    if let Some(off) = hex(off) {
+                        fields_at.push((canon(base), off, n.clone()));
+                    }
+                }
+            }
+        }
+    }
+    let mut taken: HashSet<(String, String)> = HashSet::new();
+    for r in rows("fields.csv") {
+        if let (Some(st), Some(off), Some(n)) = (r.first(), r.get(1).and_then(|o| hex(o)), r.get(2)) {
+            let st = canon(st);
+            if l.fields.contains_key(&(st.clone(), off)) {
+                continue; // an alias names the same field: the first name stays
+            }
+            // field names unique per struct, usable as Rust names
+            let mut name = rust_ident(&snake_case(n));
+            if !taken.insert((st.clone(), name.clone())) {
+                name = format!("{name}_{off:x}");
+                taken.insert((st.clone(), name.clone()));
+            }
+            let ty = r.get(3).cloned().unwrap_or_default();
+            if let Some(p) = pointee(&ty) {
+                l.points_field.insert((st.clone(), off), p);
+            }
+            l.fields.insert((st, off), (name, ty));
+        }
+    }
+    for (base, off, st) in fields_at {
+        l.points_field.entry((base, off)).or_insert(st);
+    }
+    // pointer seeds only to structs with known fields
+    let known: HashSet<String> = l.fields.keys().map(|(st, _)| st.clone()).collect();
+    l.points_global.retain(|_, st| known.contains(st));
+    l.points_field.retain(|_, st| known.contains(st));
+    for (st, off) in l.fields.keys() {
+        l.by_offset.entry(*off).or_default().push(st.clone());
+    }
+    for v in l.by_offset.values_mut() {
+        v.sort();
+    }
+    let mut slots: HashMap<String, (BTreeSet<u32>, u32)> = HashMap::new();
+    for (st, off) in l.fields.keys() {
+        let e = slots.entry(st.clone()).or_default();
+        e.0.insert(off / 4);
+        e.1 = e.1.max(off / 4 + 1);
+    }
+    l.density = slots.into_iter().map(|(st, (used, n))| (st, used.len() as f64 / n.max(1) as f64)).collect();
+    let mut used: HashSet<String> = ["std", "core", "alloc", "recomp", "layout", "r", "iw", "m", "c"].iter().map(|s| s.to_string()).collect();
+    let structs: BTreeSet<String> = l.fields.keys().map(|(st, _)| st.clone()).collect();
+    for st in structs {
+        let base = rust_ident(&snake_case(&st));
+        let mut m = base.clone();
+        let mut k = 2;
+        while !used.insert(m.clone()) {
+            m = format!("{base}_{k}");
+            k += 1;
+        }
+        l.modules.insert(st, m);
+    }
+    for r in rows("field_uses.csv") {
+        if let (Some(f), Some(st), Some(off)) = (r.first().and_then(|f| hex(f)), r.get(1), r.get(2).and_then(|o| hex(o))) {
+            l.uses.entry(f & !1).or_default().push((canon(st), off));
+        }
+    }
+    for r in rows("globals.csv") {
+        if let (Some(a), Some(n)) = (r.first().and_then(|a| hex(a)), r.get(1)) {
+            if let Some(p) = r.get(2).and_then(|t| pointee(t)) {
+                l.points_global.entry(a).or_insert(p);
+            } else if let Some(t) = r.get(2) {
+                // a struct instance: `Foo` or an array `Foo[8]` (its first element)
+                let t = t.trim().trim_matches('"').trim();
+                let base = canon(t.split('[').next().unwrap_or(""));
+                if !base.is_empty() && known.contains(&base) {
+                    l.is_global.insert(a, base);
+                }
+            }
+            l.globals.insert(a, n.clone());
+        }
+    }
+    l
+}
+
+/// The field if the function at `entry` is known to access exactly one named field at `off`.
+fn field_name(entry: u32, off: u32) -> Option<ir::FieldRef> {
+    let l = LAYOUT.get()?;
+    let mut hits = l.uses.get(&(entry & !1))?.iter().filter(|(_, o)| *o == off);
+    let (st, o) = hits.next()?;
+    if hits.next().is_some() {
+        return None;
+    }
+    let (name, ty) = l.fields.get(&(st.clone(), *o))?;
+    Some(ir::FieldRef { strukt: st.clone(), module: l.modules.get(st)?.clone(), name: name.clone(), off: *o, primary: primary_access(ty) })
+}
+
+/// Fields without a scalar type take the access the code uses most as their plain accessor
+/// (`kart::bounce(m, p)` instead of `kart::bounce_u32(m, p)`): the raised text and the recorded
+/// uses are renamed to match.
+fn untyped_field_widths(funcs: &mut [Lifted]) {
+    let mut count: HashMap<(String, u32), BTreeMap<ir::Access, usize>> = HashMap::new();
+    for f in funcs.iter() {
+        for (r, a) in &f.fields {
+            if r.primary.is_none() && !a.is_store() {
+                *count.entry((r.strukt.clone(), r.off)).or_default().entry(*a).or_default() += 1;
+            }
+        }
+    }
+    // most used load; ties go to the first kind
+    let pick: HashMap<(String, u32), ir::Access> = count.into_iter().map(|(k, m)| {
+        let best = m.iter().max_by(|x, y| x.1.cmp(y.1).then(y.0.cmp(x.0))).map(|(a, _)| *a).unwrap();
+        (k, best)
+    }).collect();
+    for f in funcs.iter_mut() {
+        if f.fields.is_empty() {
+            continue;
+        }
+        let mut renames: BTreeMap<String, String> = BTreeMap::new();
+        for (r, a) in f.fields.iter_mut() {
+            if r.primary.is_some() {
+                continue;
+            }
+            if let Some(&p) = pick.get(&(r.strukt.clone(), r.off)) {
+                let old = format!("{}::{}(", r.module, r.accessor(*a));
+                r.primary = Some(p);
+                renames.insert(old, format!("{}::{}(", r.module, r.accessor(*a)));
+            }
+        }
+        // longest first, so `x_u32(` is not hit by a shorter name's pattern
+        let mut v: Vec<_> = renames.into_iter().filter(|(a, b)| a != b).collect();
+        v.sort_by_key(|(a, _)| std::cmp::Reverse(a.len()));
+        if let Ok(t) = &mut f.t1 {
+            for (a, b) in &v {
+                *t = replace_word(t, a, b);
+            }
+        }
+        if let Some(t) = &mut f.direct {
+            for (a, b) in &v {
+                *t = replace_word(t, a, b);
+            }
+        }
+    }
+}
+
+/// `text` with `from` replaced where it starts a word (not preceded by an identifier character).
+fn replace_word(text: &str, from: &str, to: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find(from) {
+        let prev = if i > 0 { rest[..i].chars().last() } else { out.chars().last() };
+        out.push_str(&rest[..i]);
+        if prev.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_') {
+            out.push_str(from);
+        } else {
+            out.push_str(to);
+        }
+        rest = &rest[i + from.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The structs the function at `entry` is known to use a field of at `off`.
+fn structs_at(entry: u32, off: u32) -> Vec<String> {
+    let Some(l) = LAYOUT.get() else { return Vec::new() };
+    let mut v: Vec<String> = l.uses.get(&(entry & !1)).into_iter().flatten().filter(|(_, o)| *o == off).map(|(st, _)| st.clone()).collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// Struct `st`'s field at `off` (or the field of the struct it extends).
+fn field_in(st: &str, off: u32) -> Option<ir::FieldRef> {
+    let l = LAYOUT.get()?;
+    let mut st = st.to_string();
+    for _ in 0..8 {
+        if let Some((name, ty)) = l.fields.get(&(st.clone(), off)) {
+            return Some(ir::FieldRef { strukt: st.clone(), module: l.modules.get(&st)?.clone(), name: name.clone(), off, primary: primary_access(ty) });
+        }
+        st = l.parent.get(&st)?.clone();
+    }
+    None
+}
+
+/// The access a field type implies: scalars of 1, 2 or 4 bytes (`fx12`/`fx32` are 4-byte fixed
+/// point, `fx16` 2-byte); none for vectors, arrays and unknown types.
+fn primary_access(ty: &str) -> Option<ir::Access> {
+    use ir::Access::*;
+    let t = ty.trim().trim_matches('"').trim().to_ascii_lowercase();
+    match t.as_str() {
+        "u8" | "bool" => Some(U8),
+        "s8" | "i8" => Some(I8),
+        "u16" => Some(U16),
+        "s16" | "i16" | "fx16" => Some(I16),
+        "u32" | "s32" | "i32" | "fx12" | "fx32" | "fnptr" => Some(U32),
+        _ if t.starts_with("ptr") => Some(U32),
+        _ => None,
+    }
+}
+
+/// `CamelCase` / `mixed_Case` -> `snake_case`.
+fn snake_case(s: &str) -> String {
+    let mut out = String::new();
+    let mut prev_lower = false;
+    for ch in s.chars() {
+        if ch.is_ascii_uppercase() {
+            if prev_lower {
+                out.push('_');
+            }
+            out.push(ch.to_ascii_lowercase());
+            prev_lower = false;
+        } else if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            prev_lower = ch.is_ascii_lowercase() || ch.is_ascii_digit();
+        } else {
+            if !out.ends_with('_') {
+                out.push('_');
+            }
+            prev_lower = false;
+        }
+    }
+    out.trim_matches('_').to_string()
+}
+
+/// `s` as a usable Rust identifier: never empty, never starting with a digit, never a keyword.
+fn rust_ident(s: &str) -> String {
+    const KW: &[&str] = &["as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return", "self", "static", "struct", "super", "trait", "true", "type", "unsafe", "use", "where", "while", "async", "await", "dyn", "abstract", "become", "box", "do", "final", "macro", "override", "priv", "typeof", "unsized", "virtual", "yield", "try", "gen", "union"];
+    let s = if s.is_empty() { "field".to_string() } else { s.to_string() };
+    let s = if s.starts_with(|c: char| c.is_ascii_digit()) { format!("f_{s}") } else { s };
+    if KW.contains(&s.as_str()) { format!("{s}_") } else { s }
+}
+
+/// The `layout` crate: every research struct as a module with its field offsets (`pub const`) and
+/// the accessors the raised code calls, each the exact helper call it replaces.
+fn layout_crate(used: &BTreeSet<(ir::FieldRef, ir::Access)>) -> String {
+    let mut s = String::from(
+        "//! Struct layouts from our research: field offsets, and the accessors the raised code uses\n\
+         //! (`kart::racer_index(m, p)` reads the field of the struct at `p`). Each accessor is exactly\n\
+         //! the memory access it names. Generated; the names come from the dictionary.\n\
+         #![allow(non_snake_case, dead_code, clippy::all)]\n",
+    );
+    let Some(l) = LAYOUT.get() else { return s };
+    let mut by_struct: BTreeMap<&str, Vec<(u32, &str, &str)>> = BTreeMap::new();
+    for ((st, off), (n, ty)) in &l.fields {
+        by_struct.entry(st).or_default().push((*off, n, ty));
+    }
+    for (st, mut fields) in by_struct {
+        fields.sort();
+        let module = &l.modules[st];
+        let _ = writeln!(s, "\n/// `{st}`.\npub mod {module} {{\n    #[allow(unused_imports)] use recomp::rt as R;\n    #[allow(unused_imports)] use recomp::rt::Mem;");
+        for (off, n, ty) in &fields {
+            let ty = if ty.is_empty() { String::new() } else { format!(": `{}`", ty.replace(['\n', '\r', '`'], " ")) };
+            let _ = writeln!(s, "    /// `{n}`{ty}\n    pub const {}: u32 = {off:#X};", n.to_ascii_uppercase());
+        }
+        for (f, a) in used.iter().filter(|(f, _)| f.strukt == st) {
+            let off = f.off;
+            let at = if off == 0 { "p".to_string() } else { format!("p.wrapping_add({off:#X})") };
+            if a.is_store() {
+                let _ = writeln!(s, "    #[inline(always)] pub fn {}<M: Mem + ?Sized>(m: &mut M, p: u32, v: u32) {{ R::{}(m, {at}, v) }}", f.accessor(*a), a.helper());
+            } else {
+                let _ = writeln!(s, "    #[inline(always)] pub fn {}<M: Mem + ?Sized>(m: &mut M, p: u32) -> u32 {{ R::{}(m, {at}) }}", f.accessor(*a), a.helper());
+            }
+        }
+        s.push_str("}\n");
+    }
+    s
+}
+
+fn global_name(a: u32) -> Option<String> {
+    LAYOUT.get()?.globals.get(&a).cloned()
+}
+
+/// Rounds of whole-program type propagation (each passes argument types one call level further).
+const TYPE_ROUNDS: usize = 3;
+
+/// Argument types from the callers: (function entry without the Thumb bit, register) -> struct.
+static ARG_HINTS: std::sync::RwLock<Option<HashMap<(u32, u8), String>>> = std::sync::RwLock::new(None);
+
+fn arg_hint(entry: u32, r: u8) -> Option<String> {
+    ARG_HINTS.read().unwrap().as_ref()?.get(&(entry & !1, r)).cloned()
+}
+
+/// Runs `k` with the comment and type sources for the raised version of the ARM9 function at `entry`.
+fn with_notes9<T>(segment: &str, entry: u32, k: impl FnOnce(&raise_emit::Notes) -> T) -> T {
+    k(&raise_emit::Notes {
+        call: &|t| call_name(segment, t),
+        field: &|off| field_name(entry, off),
+        fields_of: &|off| structs_at(entry, off),
+        field_in: &field_in,
+        module_of: &|st| LAYOUT.get()?.modules.get(st).cloned(),
+        arg_hint: &|r| arg_hint(entry, r),
+        global_points: &|a| LAYOUT.get()?.points_global.get(&a).cloned(),
+        field_points: &|st, off| LAYOUT.get()?.points_field.get(&(st.to_string(), off)).cloned(),
+        structs_with: &|off| LAYOUT.get().and_then(|l| l.by_offset.get(&off).cloned()).unwrap_or_default(),
+        density: &|st| LAYOUT.get().and_then(|l| l.density.get(st).copied()).unwrap_or(1.0),
+        global: &global_name,
+        global_is: &|a| LAYOUT.get()?.is_global.get(&a).cloned(),
+    })
+}
+
+/// Layout facts from struct inference (`MKDS_TYPE_DUMP=<file>`), gathered over the final pass.
+static TYPE_DUMP: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Block 5.5: entries a direct call must not bypass the dispatcher for (they stay `m.call`): natives
+/// (installed by the dispatcher), the OS hooks at dispatch (IRQ safe entries, the tick pin's
+/// `OS_GetTick`), and the thread-context code, which must see the true registers in `c.r` (AMCE revision
+/// 0: `OS_Rescheduler` 0x0200DE50, `OS_SaveContext` 0x0200E6EC, `OS_LoadContext` 0x0200E738).
+fn direct_excluded() -> HashSet<u32> {
+    let mut x: HashSet<u32> = recomp::native::NATIVE.iter().chain(recomp::native::fs::NATIVES).map(|n| n.entry & !1).collect();
+    x.extend(recomp::os_hle::SAFE_ENTRIES.iter().map(|e| e.0 & !1));
+    x.extend([recomp::os_hle::OS_GET_TICK, 0x0200_DE50, 0x0200_E6EC, 0x0200_E738]);
+    x
+}
+
+/// An ARM9 function: its translation and, when the exact passes are on, its raised version.
+fn lifted9(segment: String, f: &lift::Func, id: String, img: &lift::Image) -> Lifted {
+    let code = lift::emit_full(f, &id, Some(img), None, raise());
+    let t1 = if !raise() {
+        Err("exact generation (MKDS_EXACT)")
+    } else if std::env::var_os("MKDS_NO_T1").is_some() {
+        Err("T1 off (MKDS_NO_T1)")
+    } else {
+        let _ = raise_emit::take_dump();
+        let t = with_notes9(&segment, f.entry, |n| raise_emit::emit_t1_annotated(f, &id, Some(img), n));
+        TYPE_DUMP.lock().unwrap().extend(raise_emit::take_dump());
+        t
+    };
+    let fields = if t1.is_ok() { ir::take_field_uses() } else { Vec::new() };
+    let direct = raise_emit::take_direct();
+    let _ = raise_emit::take_facts();
+    let t1_name = format!("f_{id}_t1");
+    Lifted { arm7: false, segment, entry: f.entry, code, t1, t1_name, id, fields, direct }
 }
 
 fn run() -> Result<ExitCode, String> {
@@ -333,6 +803,19 @@ fn run() -> Result<ExitCode, String> {
 
     // lift every entry; each gets exactly one row
     let mut rows = Vec::new();
+    // dictionary names for call comments in raised code (the comment lines come later)
+    {
+        let mut merged = HashMap::new();
+        for p in &args.names {
+            let text = std::fs::read_to_string(p).map_err(|e| format!("cannot read names table {}: {e}", p.display()))?;
+            merge_names(&text, &mut merged)?;
+        }
+        let _ = CALL_NAMES.set(merged.into_iter().filter(|(_, e)| !e.name.is_empty()).map(|(k, e)| (k, e.name)).collect());
+        // layout tables live next to the name tables (the dictionary folder)
+        if let Some(dir) = args.names.first().and_then(|p| p.parent()) {
+            let _ = LAYOUT.set(load_layout(dir));
+        }
+    }
     let mut funcs = Vec::new();
     let mut spans: BTreeMap<String, Vec<(u32, u32)>> = BTreeMap::new();
     let mut pending: Vec<Pending> = Vec::new();
@@ -552,9 +1035,9 @@ fn run() -> Result<ExitCode, String> {
         }
         eprintln!("mkds_gen: ARM9 discovery round {round}: {} functions gained entry points, {} gap functions, {ov_now} overlay gap functions", changed.len(), gap_funcs.len());
     }
+    // ARM9 functions to raise: (segment, function, id, image segment; None = the fixed sections)
+    let mut jobs: Vec<(String, &lift::Func, String, Option<String>)> = Vec::new();
     for p in &pending {
-        let (base, data) = &images[&p.segment];
-        let img = lift::Image::new(*base, data);
         let id = format!("{}_{:08X}", p.segment, p.func.entry);
         let row = &mut rows[p.row];
         row.insts = p.func.insts.len();
@@ -563,7 +1046,7 @@ fn run() -> Result<ExitCode, String> {
         if !p.extra.is_empty() {
             row.reason = format!("{} entry points added by cross-function discovery", p.extra.len());
         }
-        funcs.push(Lifted { arm7: false, segment: p.segment.clone(), entry: p.func.entry, code: lift::emit_with(&p.func, &id, Some(&img)), id });
+        jobs.push((p.segment.clone(), &p.func, id, Some(p.segment.clone())));
     }
 
     if let Some(path) = &args.signatures {
@@ -575,27 +1058,389 @@ fn run() -> Result<ExitCode, String> {
     let mut extra: Vec<Row> = Vec::new();
     let stub9: Vec<u8> = rt::ARM9_IRQ_STUB.iter().flat_map(|w| w.to_le_bytes()).collect();
     let stub7: Vec<u8> = rt::ARM7_IRQ_STUB.iter().flat_map(|w| w.to_le_bytes()).collect();
-    {
-        let img = lift::Image::new(0xFFFF_0018, &stub9);
-        let f = lift::discover(&img, 0xFFFF_0018, Some((0xFFFF_0018, 0xFFFF_0018 + stub9.len() as u32)), 100)?;
-        extra.push(discovered_row("bios9", &f));
-        funcs.push(Lifted { arm7: false, segment: "bios9".into(), entry: f.entry, code: lift::emit_with(&f, "bios9_FFFF0018", Some(&img)), id: "bios9_FFFF0018".into() });
-    }
+    let stub9_img = lift::Image::new(0xFFFF_0018, &stub9);
+    let stub9_f = lift::discover(&stub9_img, 0xFFFF_0018, Some((0xFFFF_0018, 0xFFFF_0018 + stub9.len() as u32)), 100)?;
+    extra.push(discovered_row("bios9", &stub9_f));
+    jobs.push(("bios9".into(), &stub9_f, "bios9_FFFF0018".into(), Some("bios9".into())));
     for (&entry, f) in &gap_funcs {
         let seg = fixed_seg(entry).expect("gap function inside a fixed segment");
         let id = format!("{seg}_{entry:08X}");
         extra.push(discovered_row(&seg, f));
-        funcs.push(Lifted { arm7: false, segment: seg, entry, code: lift::emit_with(f, &id, Some(&img9)), id });
+        jobs.push((seg, f, id, None));
     }
     for (ov, fs) in &ov_gap_funcs {
-        let (base, data) = &images[ov];
-        let img = lift::Image::new(*base, data);
         for (&entry, f) in fs {
             let id = format!("{ov}_{entry:08X}");
             extra.push(discovered_row(ov, f));
-            funcs.push(Lifted { arm7: false, segment: ov.clone(), entry, code: lift::emit_with(f, &id, Some(&img)), id });
+            jobs.push((ov.clone(), f, id, Some(ov.clone())));
         }
     }
+    // whole-program struct types: rounds of inference pass argument types from callers to
+    // callees; the last round's hints go into the generated code
+    let image = |seg: &Option<String>| -> lift::Image {
+        match seg.as_deref() {
+            None => lift::Image { segs: img9.segs.clone() },
+            Some("bios9") => lift::Image::new(0xFFFF_0018, &stub9),
+            Some(k) => lift::Image::new(images[k].0, &images[k].1),
+        }
+    };
+    // whole-program flag facts: calls and returns keep only the flags the other side reads
+    // (least fixed point: start from "nothing read" and grow until stable)
+    if raise() && std::env::var_os("MKDS_CALL_FLAGS_OFF").is_none() {
+        let entries: HashSet<u32> = jobs.iter().map(|j| j.1.entry & !1).collect();
+        // the functions each code address belongs to (jumps into the middle of a function)
+        let mut owner: HashMap<u32, Vec<u32>> = HashMap::new();
+        for j in &jobs {
+            for &b in &j.1.blocks {
+                owner.entry(b & !1).or_default().push(j.1.entry & !1);
+            }
+        }
+        // address-taken functions: an aligned word anywhere in the ARM9 program's images, or a
+        // constant in its code, equal to the entry (Thumb bit either way)
+        let mut taken: HashSet<u32> = HashSet::new();
+        // the values as stored (with the Thumb bit): which instruction set a pointer selects
+        let mut taken_exact: HashSet<u32> = HashSet::new();
+        let mut words = |data: &[u8]| {
+            for w in data.chunks_exact(4) {
+                let v = u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
+                if entries.contains(&(v & !1)) {
+                    taken.insert(v & !1);
+                    taken_exact.insert(v);
+                }
+            }
+        };
+        for (_, data) in images.values() {
+            words(data);
+        }
+        for (_, f, _, src) in &jobs {
+            let img = image(src);
+            for v in raise::code_constants(f, Some(&img)) {
+                if entries.contains(&(v & !1)) {
+                    taken.insert(v & !1);
+                    taken_exact.insert(v);
+                }
+            }
+        }
+        let zero = || raise::FlagContext {
+            entry: jobs.iter().flat_map(|j| j.1.blocks.iter().copied()).map(|b| (b, 0)).collect(),
+            ret: entries.iter().map(|&e| (e, 0)).collect(),
+            taken: taken.clone(),
+            any_entry: 0,
+            any_ret: 0,
+            restored: 0,
+            kills: HashMap::new(),
+            entered: HashSet::new(),
+        };
+        let mut ctx = zero();
+        // code other functions call or jump into below a function entry
+        raise::set_flag_context(Some(ctx.clone()));
+        for (_, f, _, src) in &jobs {
+            let img = image(src);
+            let (_, calls, tails, _) = raise::flag_facts(f, Some(&img));
+            for t in calls.into_iter().filter_map(|c| c.0).chain(tails) {
+                let t = t & !1;
+                if !entries.contains(&t) && owner.contains_key(&t) {
+                    ctx.entered.insert(t);
+                }
+            }
+        }
+        // what each function writes before every return: greatest fixed point from "all four"
+        ctx.kills = entries.iter().map(|&e| (e, raise::NZCV)).collect();
+        for _ in 0..32 {
+            raise::set_flag_context(Some(ctx.clone()));
+            let mut next = ctx.kills.clone();
+            for (_, f, _, src) in &jobs {
+                let img = image(src);
+                let k = raise::flag_kills(f, Some(&img));
+                let e = next.get_mut(&(f.entry & !1)).unwrap();
+                *e &= k;
+            }
+            if next == ctx.kills {
+                break;
+            }
+            ctx.kills = next;
+        }
+        let kills = ctx.kills.clone();
+        eprintln!("mkds_gen: {} of {} functions write all four flags before returning", kills.values().filter(|&&k| k == raise::NZCV).count(), kills.len());
+        // address-taken "functions" whose first instruction is conditional are data or code
+        // fragments read as functions (zero words decode as `andeq`): compiled code never starts a
+        // function by testing its caller's flags, and no computed call reaches them
+        let fragments: HashSet<u32> = jobs
+            .iter()
+            .filter(|(_, f, _, src)| {
+                // the ARM9 can't fetch instructions from DTCM
+                if (0x027E_0000..0x0280_0000).contains(&(f.entry & !1)) {
+                    return true;
+                }
+                let img = image(src);
+                // zero words (padding) decode as `andeq r0, r0, r0` / `movs r0, r0`
+                let a = f.entry & !1;
+                let zero = if f.entry & 1 != 0 { img.read16(a) == Some(0) } else { img.read32(a) == Some(0) };
+                zero || ir::lower_block(f, f.entry, Some(&img)).first().is_some_and(|i| i.cond != 14)
+            })
+            .map(|(_, f, _, _)| f.entry)
+            .collect();
+        // an entry a computed call can reach: address-taken, not a fragment, and in the
+        // instruction set a stored pointer selects when both decodes of the address are entries
+        let exact_entries: HashSet<u32> = jobs.iter().map(|j| j.1.entry).collect();
+        let callable = |e: u32| {
+            exact_entries.contains(&e) && taken.contains(&(e & !1)) && !fragments.contains(&e) && (!exact_entries.contains(&(e ^ 1)) || taken_exact.contains(&e))
+        };
+        eprintln!("mkds_gen: {} functions are data, padding or fragments (start with a conditional instruction or a zero word): not call targets", fragments.len());
+        let mut rounds = 0;
+        loop {
+            raise::set_flag_context(Some(ctx.clone()));
+            let mut next = zero();
+            next.kills = kills.clone();
+            next.entered = ctx.entered.clone();
+            for (_, f, _, src) in &jobs {
+                let img = image(src);
+                let (starts, calls, tails, restored) = raise::flag_facts(f, Some(&img));
+                next.restored |= restored;
+                let me = f.entry & !1;
+                // keyed by the exact address: a stray decode of the same bytes in the other
+                // instruction set is another block
+                for (b, v) in starts {
+                    *next.entry.entry(b).or_insert(0) |= v;
+                }
+                // returns of the code a call or jump reaches must keep `live`
+                // (a fixed address outside all known code can't return through our functions)
+                let needs = |t: Option<u32>, live: u8, next: &mut raise::FlagContext| match t {
+                    Some(t) => owner.get(&(t & !1)).into_iter().flatten().for_each(|g| *next.ret.get_mut(g).unwrap() |= live),
+                    None => next.any_ret |= live,
+                };
+                for (t, live) in calls {
+                    if let Some(tt) = t {
+                        if live != 0 && std::env::var_os("MKDS_RET_DEBUG").is_some() && ctx.any_ret == 0 && ctx.ret.values().all(|v| *v == 0) {
+                            eprintln!("ret_seed: round {rounds} {:#X} calls {tt:#X} leaving {live:#X} live", f.entry);
+                        }
+                    }
+                    if t.is_none() && live != 0 && ctx.any_ret == 0 && std::env::var_os("MKDS_ANYRET_DEBUG").is_some() {
+                        eprintln!("any_ret: round {rounds} {:#X} computed call leaves {live:#X} live (ret {:#X} restored {:#X} any_entry {:#X})", f.entry, ctx.ret[&me], ctx.restored, ctx.any_entry);
+                    }
+                    needs(t, live, &mut next);
+                }
+                // a tail jump returns to this function's callers
+                let mine = ctx.ret[&me] | if ctx.taken.contains(&me) { ctx.any_ret } else { 0 };
+                for t in tails {
+                    needs(Some(t), mine, &mut next);
+                }
+            }
+            next.any_entry = next.entry.iter().filter(|(e, _)| callable(**e)).fold(ctx.any_entry, |a, (_, b)| a | b);
+            next.any_ret |= ctx.any_ret;
+            next.restored |= ctx.restored;
+            for (k, v) in next.entry.iter_mut() {
+                *v |= ctx.entry.get(k).copied().unwrap_or(0);
+            }
+            for (k, v) in next.ret.iter_mut() {
+                *v |= ctx.ret[k];
+            }
+            if std::env::var_os("MKDS_ANYRET_DEBUG").is_some() {
+                for (e, v) in &next.entry {
+                    if *v != 0 && callable(*e) && ctx.entry.get(e).copied().unwrap_or(0) == 0 {
+                        eprintln!("entry_reads: round {rounds} {e:#X} {v:#X}");
+                    }
+                }
+            }
+            rounds += 1;
+            if next == ctx {
+                break;
+            }
+            ctx = next;
+        }
+        raise::set_flag_context(Some(ctx.clone()));
+        let free = ctx.ret.iter().filter(|(e, v)| (**v | if taken.contains(*e) { ctx.any_ret } else { 0 }) == 0).count();
+        eprintln!("mkds_gen: flag facts in {rounds} rounds: {free}/{} functions return without live flags ({} address-taken; after computed calls {:#X}, after CPSR restores {:#X})", ctx.ret.len(), taken.len(), ctx.any_ret, ctx.restored);
+        if let Ok(a) = std::env::var("MKDS_FN_DEBUG") {
+            let a = u32::from_str_radix(a.trim_start_matches("0x"), 16).unwrap();
+            raise::set_flag_context(Some(ctx.clone()));
+            for &b in jobs.iter().filter(|j| j.1.entry & !1 == a).flat_map(|j| j.1.blocks.iter()) { eprintln!("entry fact {b:#X} = {:#X}", ctx.entry.get(&b).copied().unwrap_or(99)); }
+            for (_, f, _, src) in jobs.iter().filter(|j| j.1.entry & !1 == a) {
+                let img = image(src);
+                let sf = raise::flag_effects(f, Some(&img));
+                for &b in &f.blocks {
+                    for ins in ir::lower_block(f, b, Some(&img)) {
+                        eprintln!("{:#X} cond {}", ins.addr, ins.cond);
+                        for s in &ins.stmts {
+                            eprintln!("    {:?} -> {:?}", s, sf(s, ins.addr));
+                            if let ir::S::Call { target: ir::E::Const(t), .. } = s { eprintln!("      callee entry fact {:#X}", ctx.entry.get(t).copied().unwrap_or(99)); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if raise() && std::env::var_os("MKDS_NO_T1").is_none() && LAYOUT.get().is_some() {
+        for round in 0..TYPE_ROUNDS {
+            let mut seen: BTreeMap<(u32, u8), BTreeSet<String>> = BTreeMap::new();
+            for (seg, f, id, src) in &jobs {
+                let img = image(src);
+                let _ = with_notes9(seg, f.entry, |n| raise_emit::emit_t1_annotated(f, id, Some(&img), n));
+                let _ = ir::take_field_uses();
+                let (args, calls) = raise_emit::take_types();
+                for (r, st) in args {
+                    seen.entry((f.entry & !1, r)).or_default().insert(st);
+                }
+                for (t, r, st) in calls {
+                    seen.entry((t & !1, r)).or_default().insert(st);
+                }
+            }
+            // a hint only where every caller (and the function itself) agrees
+            let hints: HashMap<(u32, u8), String> = seen.into_iter().filter(|(_, v)| v.len() == 1).map(|(k, v)| (k, v.into_iter().next().unwrap())).collect();
+            eprintln!("mkds_gen: type round {round}: {} typed arguments", hints.len());
+            *ARG_HINTS.write().unwrap() = Some(hints);
+        }
+    }
+    // Block 5.5 (`--timing native`): closed functions and their direct signatures
+    let mut own_sig: HashMap<(String, u32), raise_emit::DirectSig> = HashMap::new();
+    if raise() && std::env::var_os("MKDS_NO_T1").is_none() && raise_emit::nospill_enabled() {
+        let t = std::time::Instant::now();
+        let emit_facts = |seg: &str, f: &lift::Func, id: &str, src: &Option<String>| -> Option<raise_emit::Facts> {
+            let img = image(src);
+            raise_emit::set_current(seg, None);
+            let r = with_notes9(seg, f.entry, |n| raise_emit::emit_t1_annotated(f, id, Some(&img), n));
+            let _ = ir::take_field_uses();
+            let _ = raise_emit::take_types();
+            let _ = raise_emit::take_dump();
+            let facts = raise_emit::take_facts();
+            r.ok().and(facts)
+        };
+        raise_emit::set_direct(HashMap::new());
+        let facts: Vec<Option<raise_emit::Facts>> = jobs.iter().map(|(seg, f, id, src)| emit_facts(seg, f, id, src)).collect();
+        let excluded = direct_excluded();
+        let mut closed: Vec<bool> = jobs.iter().zip(&facts).map(|((_, f, _, _), x)| x.as_ref().is_some_and(|x| x.escape.is_none()) && !excluded.contains(&(f.entry & !1))).collect();
+        let mut rows: HashMap<u32, Vec<usize>> = HashMap::new();
+        for (i, (_, f, _, _)) in jobs.iter().enumerate() {
+            rows.entry(f.entry).or_default().push(i);
+        }
+        // a call from `seg` reaches a closed row: the caller's own segment, or one always resident
+        let reaches = |closed: &[bool], seg: &str, t: u32| -> Option<usize> {
+            let r = rows.get(&t)?;
+            r.iter().copied().find(|&j| closed[j] && jobs[j].0 == seg).or_else(|| r.iter().copied().find(|&j| closed[j] && !jobs[j].0.starts_with("ov9_")))
+        };
+        // closed functions that fail the return check once the callee signatures are known
+        let mut dropped: HashSet<usize> = HashSet::new();
+        let (sigs, rounds) = 'outer: loop {
+        loop {
+            let mut changed = false;
+            for i in 0..jobs.len() {
+                if closed[i] && facts[i].as_ref().unwrap().calls.iter().any(|&t| reaches(&closed, &jobs[i].0, t).is_none()) {
+                    closed[i] = false;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        let mut why: BTreeMap<&str, usize> = BTreeMap::new();
+        for (i, x) in facts.iter().enumerate() {
+            let w = match x {
+                None => "not raised",
+                Some(_) if closed[i] => "closed",
+                Some(_) if dropped.contains(&i) => "returns elsewhere (with the callee signatures)",
+                Some(x) => x.escape.unwrap_or(if excluded.contains(&(jobs[i].1.entry & !1)) { "native, hook or thread context" } else { "calls a function that is not closed" }),
+            };
+            *why.entry(w).or_default() += 1;
+        }
+        eprintln!("mkds_gen: no-spill: functions by reason {why:?}");
+        // readable unique names in the `direct` crate
+        let mut count: HashMap<String, usize> = HashMap::new();
+        let ident = |i: usize| -> Option<String> {
+            let n = CALL_NAMES.get()?.get(&(jobs[i].0.clone(), jobs[i].1.entry & !1))?;
+            let n: String = n.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect();
+            let ok = n.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) && !RUST_KEYWORDS.contains(&n.as_str()) && !n.starts_with("f_") && !n.starts_with("sub_");
+            ok.then_some(n)
+        };
+        for i in (0..jobs.len()).filter(|&i| closed[i]) {
+            if let Some(n) = ident(i) {
+                *count.entry(n).or_default() += 1;
+            }
+        }
+        let mut sigs: BTreeMap<usize, raise_emit::DirectSig> = BTreeMap::new();
+        for i in (0..jobs.len()).filter(|&i| closed[i]) {
+            let name = match ident(i) {
+                Some(n) if count[&n] == 1 => n,
+                Some(n) => format!("{n}_{}", jobs[i].2.to_lowercase()),
+                None => format!("sub_{}", jobs[i].2.to_lowercase()),
+            };
+            sigs.insert(i, raise_emit::DirectSig { params: 0, rets: 0, name });
+        }
+        let table = |sigs: &BTreeMap<usize, raise_emit::DirectSig>| -> HashMap<u32, Vec<(String, raise_emit::DirectSig)>> {
+            let mut m: HashMap<u32, Vec<(String, raise_emit::DirectSig)>> = HashMap::new();
+            for (&i, d) in sigs {
+                m.entry(jobs[i].1.entry).or_default().push((jobs[i].0.clone(), d.clone()));
+            }
+            m
+        };
+        // arguments and results: least fixed point (registers only get added)
+        let mut rounds = 0;
+        loop {
+            rounds += 1;
+            raise_emit::set_direct(table(&sigs));
+            let mut changed = false;
+            let keys: Vec<usize> = sigs.keys().copied().collect();
+            for i in keys {
+                let (seg, f, id, src) = &jobs[i];
+                let x = emit_facts(seg, f, id, src).expect("a closed function emits");
+                let d = sigs.get_mut(&i).unwrap();
+                let (p, r) = (d.params | x.live_in, d.rets | x.written);
+                if (p, r) != (d.params, d.rets) {
+                    d.params = p;
+                    d.rets = r;
+                    changed = true;
+                }
+            }
+            if !changed || rounds == 64 {
+                break;
+            }
+        }
+        if rounds == 64 {
+            return Err("no-spill: direct signatures did not converge".into());
+        }
+        raise_emit::set_direct(table(&sigs));
+        // the final check with the real callee signatures (the first pass assumed the calling convention)
+        let mut bad = Vec::new();
+        for &i in sigs.keys() {
+            let (seg, f, id, src) = &jobs[i];
+            if emit_facts(seg, f, id, src).is_none_or(|x| x.escape.is_some()) {
+                bad.push(i);
+            }
+        }
+        if bad.is_empty() {
+            break 'outer (sigs, rounds);
+        }
+        for i in bad {
+            closed[i] = false;
+            dropped.insert(i);
+        }
+        };
+        let sites: usize = (0..jobs.len())
+            .filter_map(|i| facts[i].as_ref().map(|x| (i, x)))
+            .map(|(i, x)| x.calls.iter().filter(|&&t| reaches(&closed, &jobs[i].0, t).is_some()).count())
+            .sum();
+        eprintln!("mkds_gen: no-spill: {} closed functions, signatures in {rounds} rounds, {sites} call sites call them directly ({:.1}s)", sigs.len(), t.elapsed().as_secs_f64());
+        for (i, d) in sigs {
+            own_sig.insert((jobs[i].0.clone(), jobs[i].1.entry), d);
+        }
+    }
+    for (seg, f, id, src) in &jobs {
+        let img = image(src);
+        raise_emit::set_current(seg, own_sig.get(&(seg.clone(), f.entry)).cloned());
+        funcs.push(lifted9(seg.clone(), f, id.clone(), &img));
+    }
+    raise_emit::set_current("", None);
+    if let Some(p) = std::env::var_os("MKDS_TYPE_DUMP") {
+        let mut t = TYPE_DUMP.lock().unwrap().join("\n");
+        t.push('\n');
+        std::fs::write(&p, t).map_err(|e| format!("cannot write {}: {e}", Path::new(&p).display()))?;
+    }
+    if std::env::var_os("MKDS_FOLD_STATS").is_some() {
+        eprintln!("mkds_gen: compare folding [no run, guarded, live after, live beyond cond, no form, folded] = {:?}", raise_emit::fold_stats());
+        eprintln!("mkds_gen: flags as locals [compares, made locals, folded away] = {:?}", raise_emit::flag_stats());
+    }
+    // the ARM7 program keeps the per-function rule
+    raise::set_flag_context(None);
     let (arm7_entry, arm7_secs) = build_support::arm7_sections(&rom)?;
     let mut arm7_ranges: Vec<(String, u32, u32)> = vec![("bios7".into(), 0x18, 0x18 + stub7.len() as u32)];
     arm7_ranges.extend(arm7_secs.iter().map(|s| (s.name.clone(), s.ram_address, s.ram_address + s.data.len() as u32)));
@@ -619,7 +1464,12 @@ fn run() -> Result<ExitCode, String> {
         let hi = f.insts.iter().last().map(|(&a, d)| (a & !1) + d.size).unwrap_or(lo);
         spans7.entry(seg.clone()).or_default().push((lo, hi));
         extra.push(discovered_row(&seg, f));
-        funcs.push(Lifted { arm7: true, segment: seg, entry, code: lift::emit_cost(f, &id, Some(&img7), Some(&|d, jumped| rt::arm7_cycles(d, true, jumped))), id });
+        funcs.push(Lifted { arm7: true, segment: seg, entry, code: lift::emit_full(f, &id, Some(&img7), Some(&|d, jumped| rt::arm7_cycles(d, true, jumped)), raise()), t1: if raise() && std::env::var_os("MKDS_NO_T1").is_none() {
+            let notes = raise_emit::Notes::NONE;
+            raise_emit::emit_t1_full(f, &id, Some(&img7), &notes, Some(&|d, jumped| rt::arm7_cycles(d, true, jumped)))
+        } else {
+            Err("exact generation")
+        }, t1_name: format!("f_{id}_t1"), id, fields: Vec::new(), direct: None });
     }
 
     // output directory: only create/replace our own previous output
@@ -636,7 +1486,7 @@ fn run() -> Result<ExitCode, String> {
     if let Ok(dir) = std::fs::read_dir(&args.out) {
         for e in dir.flatten() {
             let n = e.file_name().to_string_lossy().into_owned();
-            if n.starts_with("part_") || n == "lifted" || n == "game" {
+            if n.starts_with("part_") || n == "lifted" || n == "game" || n == "layout" || n == "direct" {
                 let _ = std::fs::remove_dir_all(e.path());
             }
         }
@@ -653,6 +1503,12 @@ fn run() -> Result<ExitCode, String> {
         for f in funcs.iter_mut().filter(|f| !f.arm7) {
             if let Some(line) = names.get(&(f.segment.clone(), f.entry & !1)) {
                 f.code = format!("// {line}\n{}", f.code);
+                if let Ok(t1) = &f.t1 {
+                    f.t1 = Ok(format!("/// {line}\n{t1}"));
+                }
+                if let Some(d) = &f.direct {
+                    f.direct = Some(format!("/// {line}\n{d}"));
+                }
                 named += 1;
             }
         }
@@ -660,16 +1516,20 @@ fn run() -> Result<ExitCode, String> {
         eprintln!("mkds_gen: {named} functions named from {}", tables.join(", "));
     }
 
+    name_t1(&mut funcs);
+    untyped_field_widths(&mut funcs);
+
     // balanced parts by emitted source size
     let recomp_dep = format!("recomp = {{ path = {} }}", toml_path(&recomp_path));
     let mut parts: Vec<Vec<&Lifted>> = vec![Vec::new()];
     let mut cur = 0usize;
     for f in &funcs {
-        if cur > 0 && cur + f.code.len() > args.part_bytes {
+        let len = f.code.len() + f.t1.as_ref().map_or(0, |t| t.len());
+        if cur > 0 && cur + len > args.part_bytes {
             parts.push(Vec::new());
             cur = 0;
         }
-        cur += f.code.len();
+        cur += len;
         parts.last_mut().unwrap().push(f);
     }
     let gen_id = generator_id();
@@ -684,17 +1544,40 @@ fn run() -> Result<ExitCode, String> {
     );
     let mut table7 = String::from("/// The ARM7 program, found by whole-program discovery (no metadata), plus our ARM7 IRQ stub at 0x18.\npub static LIFTED7: &[recomp::mem::Lifted] = &[\n");
     let mut members = Vec::new();
+    // Block 5.5: the direct variants of closed functions, in one crate (they only call each other)
+    let direct_src: Vec<&str> = funcs.iter().filter_map(|f| f.direct.as_deref()).collect();
+    let direct_dep = if direct_src.is_empty() { String::new() } else { "direct = { path = \"../direct\" }\n".to_string() };
+    if !direct_src.is_empty() {
+        let dir = args.out.join("direct");
+        std::fs::create_dir_all(dir.join("src")).map_err(|e| e.to_string())?;
+        put(dir.join("Cargo.toml"), &format!("[package]\nname = \"direct\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n{recomp_dep}\nlayout = {{ path = \"../layout\" }}\n"))?;
+        let mut src = String::from("//! Generated from the user's ROM: raised functions that reach no safe point, called directly with\n//! their registers as Rust arguments and results (Block 5.5, `--timing native`).\n#![allow(non_snake_case, non_upper_case_globals, clippy::all)]\n#[allow(unused_imports)]\nuse layout::*;\n");
+        for d in &direct_src {
+            src.push_str(d);
+        }
+        put(dir.join("src/lib.rs"), &src)?;
+        members.push("direct".to_string());
+        eprintln!("mkds_gen: {} direct functions in crate direct", direct_src.len());
+    }
+    let mut part_of: HashMap<String, String> = HashMap::new();
     let mut deps = String::new();
     let mut bytes = 0usize;
     for (n, chunk) in parts.iter().enumerate().filter(|(_, c)| !c.is_empty()) {
         let name = format!("part_{n:02}");
         let dir = args.out.join(&name);
         std::fs::create_dir_all(dir.join("src")).map_err(|e| e.to_string())?;
-        put(dir.join("Cargo.toml"), &format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n{recomp_dep}\n"))?;
-        let mut src = String::from("//! Generated from the user's ROM (lifted machine code).\n#![allow(non_snake_case, non_upper_case_globals, clippy::all)]\n");
+        put(dir.join("Cargo.toml"), &format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n{recomp_dep}\nlayout = {{ path = \"../layout\" }}\n{direct_dep}"))?;
+        let mut src = String::from("//! Generated from the user's ROM (lifted machine code).\n#![allow(non_snake_case, non_upper_case_globals, clippy::all)]\n#[allow(unused_imports)]\nuse layout::*;\n");
         for f in chunk {
+            part_of.insert(f.id.clone(), name.clone());
             src.push_str(&f.code);
             let t = if f.arm7 { &mut table7 } else { &mut table };
+            if let Ok(t1) = &f.t1 {
+                // listed first: the dispatcher maps a block to the first row that has it, so the
+                // raised version runs at the entry and the translation everywhere else
+                src.push_str(t1);
+                let _ = writeln!(t, "    recomp::mem::Lifted {{ segment: {:?}, entry: {:#X}, blocks: &[{:#X}], insts: {name}::INSTS_{id}, f: {name}::{t1} }},", f.segment, f.entry, f.entry, id = f.id, t1 = f.t1_name);
+            }
             let _ = writeln!(t, "    recomp::mem::Lifted {{ segment: {:?}, entry: {:#X}, blocks: {name}::BLOCKS_{id}, insts: {name}::INSTS_{id}, f: {name}::f_{id} }},", f.segment, f.entry, id = f.id);
         }
         bytes += src.len();
@@ -739,6 +1622,21 @@ fn run() -> Result<ExitCode, String> {
     put(ldir.join("Cargo.toml"), &format!("[package]\nname = \"lifted\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n{recomp_dep}\n{deps}"))?;
     put(ldir.join("src/lib.rs"), &table)?;
     members.push("lifted".into());
+    // struct layouts and the field accessors the raised code calls
+    let used: BTreeSet<(ir::FieldRef, ir::Access)> = funcs.iter().flat_map(|f| f.fields.iter().cloned()).collect();
+    let ydir = args.out.join("layout");
+    std::fs::create_dir_all(ydir.join("src")).map_err(|e| e.to_string())?;
+    put(ydir.join("Cargo.toml"), &format!("[package]
+name = \"layout\"
+version = \"0.1.0\"
+edition = \"2024\"
+
+[dependencies]
+{recomp_dep}
+"))?;
+    put(ydir.join("src/lib.rs"), &layout_crate(&used))?;
+    members.push("layout".into());
+    eprintln!("mkds_gen: {} field accessors in layout", used.len());
     if args.game {
         let builder = recomp_path.parent().unwrap().join("1_build_tool");
         let gdir = args.out.join("game");
@@ -810,11 +1708,24 @@ fn run() -> Result<ExitCode, String> {
     }
     let fallback_sites = fallback_sites + fallback_sites7;
     put(args.out.join("coverage.csv"), &csv_out)?;
+    // block 4B tiers: which functions run raised (T1) and why the others stay exact translations
+    let mut tiers = String::from("segment,entry,tier,name,part,reason
+");
+    let mut tier_counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for f in &funcs {
+        let (tier, reason) = match &f.t1 { Ok(_) => ("T1", ""), Err(r) => ("T0", *r) };
+        *tier_counts.entry(if f.t1.is_ok() { "T1" } else { reason }).or_default() += 1;
+        let part = part_of.get(&f.id).map(|s| s.as_str()).unwrap_or("");
+        let name = if f.t1.is_ok() { f.t1_name.as_str() } else { "" };
+        let _ = writeln!(tiers, "{},{:#010X},{tier},{name},{part},{reason}", f.segment, f.entry);
+    }
+    put(args.out.join("tiers.csv"), &tiers)?;
+    eprintln!("mkds_gen: tiers {tier_counts:?}");
     let lifted_n = counts.get("lifted").unwrap_or(&0) + counts.get("lifted_with_fallback").unwrap_or(&0);
     let unaccounted = rows.len() - lifted_n;
     let complete = unaccounted == 0;
     let status = if !complete { "incomplete" } else if fallback_sites > 0 { "complete_with_interpreter_fallback" } else { "complete" };
-    let report = json!({
+    let mut report = json!({
         "status": status,
         "rom": {"path": info.path, "sha256": rom_sha, "game_code": info.game_code, "revision": info.revision, "arm9_sha256": info.arm9_sha256},
         "metadata": {"path": args.metadata.to_string_lossy(), "sha256": meta_sha, "entries": rows.len()},
@@ -827,6 +1738,7 @@ fn run() -> Result<ExitCode, String> {
         "lifted_functions": lifted_n,
         "named_functions": named,
         "rejected_or_absent_entries": unaccounted,
+        "tiers": tier_counts,
         "undecoded_sites_left_to_interpreter": fallback_sites,
         "fallback_sites": fallback,
         "generated_source_bytes": bytes,
@@ -842,11 +1754,14 @@ fn run() -> Result<ExitCode, String> {
             "per_segment": extra_counts.iter().map(|(k, v)| (k.clone(), json!({"functions": v.0, "instructions": v.1, "undecoded_sites": v.2}))).collect::<BTreeMap<_, _>>(),
         },
     });
+    if lift::timing_native() {
+        report["timing"] = json!("native"); // Block 5.4: ARM9 code without the instruction budget
+    }
     put(args.out.join(MARKER), &serde_json::to_string_pretty(&report).unwrap())?;
     println!(
         "{status}: {lifted_n}/{} entries lifted in {} part crates ({:.1} MB), {fallback_sites} undecoded sites left to the interpreter -> {}",
         rows.len(),
-        members.len() - 1 - args.game as usize,
+        members.len() - 2 - args.game as usize - members.iter().any(|m| m == "direct") as usize,
         bytes as f64 / 1e6,
         args.out.display()
     );

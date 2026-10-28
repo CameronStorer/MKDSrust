@@ -27,11 +27,16 @@ pub struct Native {
     pub f: LiftedFn,
 }
 
+/// Block 5.4: set by a budget-free machine (`MKDS_TIMING=native`, `Machine::budget_free`): natives pay no
+/// instruction budget, like the generated code around them.
+pub static BUDGET_FREE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Charges `cost` instructions; `false` means the slice is out of budget and the caller must return
-/// [`rt::BUDGET_EXHAUSTED`] (the dispatch loop comes back to the same entry later).
+/// [`rt::BUDGET_EXHAUSTED`] (the dispatch loop comes back to the same entry later). In a budget-free build
+/// ([`BUDGET_FREE`]) nothing is charged and the call always proceeds.
 #[inline]
 pub fn enter(c: &mut Cpu, pc: u32, cost: u32) -> bool {
-    if rt::spend(c, cost) {
+    if BUDGET_FREE.load(std::sync::atomic::Ordering::Relaxed) || rt::spend(c, cost) {
         return true;
     }
     c.r[15] = pc;
@@ -47,6 +52,9 @@ pub fn ret(c: &Cpu) -> u32 {
 /// Nintendo SDK / C library leaves (lane B2), each differential-tested against the ROM's code
 /// (`tests/native_sdk.rs`).
 mod sdk;
+
+/// Block 5.1: ROM-archive file reads from the in-memory ROM (`MKDS_HW_FS=native`).
+pub mod fs;
 
 /// Every native function (on trial until it passes the shadow checker), in no particular order.
 pub static NATIVE: &[Native] = &[
@@ -85,11 +93,21 @@ pub static VERIFIED: &[Native] = &[
 /// What a game or tool installs: [`VERIFIED`], or for diagnostics per `MKDS_NATIVES`: `off` = none (the
 /// exact translation everywhere), `all` = every [`NATIVE`] including those on trial.
 pub fn selected() -> &'static [Native] {
-    match std::env::var("MKDS_NATIVES").as_deref() {
+    let base = match std::env::var("MKDS_NATIVES").as_deref() {
         Ok("off") => &[],
         Ok("all") => NATIVE,
         _ => VERIFIED,
+    };
+    if !fs::enabled() {
+        return base;
     }
+    // Block 5 hardware services (`MKDS_HW_<UNIT>=native`) come on top of the selection.
+    let all: Vec<Native> = base
+        .iter()
+        .chain(fs::NATIVES)
+        .map(|n| Native { segment: n.segment, entry: n.entry, name: n.name, f: n.f })
+        .collect();
+    Box::leak(all.into_boxed_slice())
 }
 
 #[cfg(test)]

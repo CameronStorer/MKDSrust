@@ -3,6 +3,9 @@ use super::{Flat, boot_shared_area};
 use crate::rt::Mem;
 use crate::{arm7::Arm7, dispatch::Dispatcher, ds_mem, machine::Machine, rt};
 
+#[path = "fibered.rs"]
+mod fibered;
+
 pub const FRAME_CYCLES: u64 = 263 * 2130;
 
 #[derive(Default, Debug, Clone, Copy)]
@@ -27,12 +30,21 @@ pub struct Session<'a> {
     /// `code_epoch` at the last periodic residency check: unchanged code needs no re-hash.
     residency_epoch: u64,
     pub resident_overlays: Vec<&'static str>,
+    /// Residency checks made because `FS_AfterLoadOverlay` was entered (Block 5.4 condition 4).
+    pub residency_rechecks: u64,
     /// Continue into the next lifted block within a slice (default). Off: every call, return or
     /// computed jump ends the slice, as before 2026-10-15 (finer CPU interleaving, much slower).
     pub chain: bool,
     overlay_windows: Vec<(u32, u64, &'static str)>,
     /// Native functions checked against their translations on every call ([`Session::enable_shadow`]).
     pub shadow: Option<crate::shadow::Shadow>,
+    /// Block 4A.2: the ARM9 runs in fibers with nested calls ([`Session::enable_fibers`],
+    /// or `MKDS_FIBERS=1` when the session is created).
+    fibers: Option<fibered::Fibers>,
+    fiber_error: Option<String>,
+    /// Diagnostics (`MKDS_SLICE_TRACE=<file>`): per frame, a hash of the CPU at every slice end;
+    /// `MKDS_TRACE_FRAME=<n>` also lists that frame's slices. Compares flat and fiber runs.
+    trace: Option<(std::io::BufWriter<std::fs::File>, u64, u64, u64)>,
 }
 
 impl<'a> Session<'a> {
@@ -94,6 +106,11 @@ impl<'a> Session<'a> {
         let arm7 = Arm7::from_rom(rom, &mut hw).ok_or("Cannot load ARM7")?;
         let mut machine = Machine::new(hw, dispatcher);
         machine.arm7 = Some(arm7);
+        if crate::os_hle::enabled() {
+            // Block 5.3: OS time on the host; IRQs at safe points
+            machine.hw.vtime = Some(Box::default());
+            machine.os_gate = Some(crate::os_hle::IrqGate::from_env());
+        }
         let mut cpu = rt::Cpu::default();
         cpu.r[13] = 0x0380_ff00;
         Ok(Self {
@@ -108,9 +125,16 @@ impl<'a> Session<'a> {
             residency_frame: u64::MAX,
             residency_epoch: u64::MAX,
             resident_overlays: Vec::new(),
+            residency_rechecks: 0,
             chain: true,
             overlay_windows: Vec::new(),
             shadow: None,
+            fibers: std::env::var_os("MKDS_FIBERS").map(|_| fibered::Fibers::new(entry)),
+            fiber_error: None,
+            trace: std::env::var_os("MKDS_SLICE_TRACE").map(|p| {
+                let detail = std::env::var("MKDS_TRACE_FRAME").ok().and_then(|v| v.parse().ok()).unwrap_or(u64::MAX);
+                (std::io::BufWriter::new(std::fs::File::create(p).expect("MKDS_SLICE_TRACE file")), 0xcbf2_9ce4_8422_2325, u64::MAX, detail)
+            }),
         })
     }
 
@@ -120,6 +144,17 @@ impl<'a> Session<'a> {
         self.dispatcher.set_natives(natives);
         let d = self.dispatcher;
         self.shadow = Some(crate::shadow::Shadow::new(natives, &|s, e| d.translation(s, e)));
+    }
+
+    /// Runs the ARM9 in fibers from now on (block 4A.2): calls nest, slices end in place, each SDK
+    /// thread has its own fiber. The session must not move afterwards.
+    pub fn enable_fibers(&mut self) {
+        self.fibers = Some(fibered::Fibers::new(self.pc));
+    }
+
+    /// Guest thread switches served by fibers (0 when fibers are off).
+    pub fn fiber_switches(&self) -> u64 {
+        self.fibers.as_ref().map_or(0, |f| f.switches)
     }
 
     pub fn configure_residency(
@@ -161,9 +196,15 @@ impl<'a> Session<'a> {
             self.code_epoch = self.machine.hw.code_epoch;
         }
         let frame = self.frame_number();
+        // Block 5.4 condition 4 (native OS time): an overlay load just finished (`FS_AfterLoadOverlay`
+        // entered): re-check now, whatever the frame.
+        let loaded = self.machine.os_gate.as_mut().is_some_and(|g| std::mem::take(&mut g.overlay_loaded));
+        if loaded {
+            self.residency_rechecks += 1;
+        }
         // Once a frame, and only if overlay code was written since the last check (watched writes
         // bump `code_epoch`; without one the verification result cannot change).
-        if frame != self.residency_frame && self.code_epoch != self.residency_epoch {
+        if loaded || frame != self.residency_frame && self.code_epoch != self.residency_epoch {
             self.residency_epoch = self.code_epoch;
             let before = self.resident_overlays.clone();
             self.resident_overlays = self
@@ -188,13 +229,18 @@ impl<'a> Session<'a> {
             return Ok(0);
         }
         self.update_residency();
-        let hw = &mut self.machine.hw;
-        if rt::irq_ready(
-            &self.cpu,
-            hw.r32(0x0400_0208),
-            hw.r32(0x0400_0210),
-            hw.r32(0x0400_0214),
-        ) {
+        if self.fibers.is_some() {
+            return self.step_fibered(limit);
+        }
+        if self.irq_allowed(self.pc) {
+            let hw = &mut self.machine.hw;
+            if hw.probe.is_some() {
+                let pending = hw.r32(0x0400_0210) & hw.r32(0x0400_0214);
+                hw.probe.as_mut().unwrap().irq(pending);
+                if pending & 1 != 0 {
+                    self.machine.oracle_wait(crate::machine::ORACLE_VBLANK_IRQ);
+                }
+            }
             self.pc = rt::take_irq(&mut self.cpu, self.pc, 0xffff_0000);
             self.stats.irqs += 1;
         }
@@ -207,6 +253,12 @@ impl<'a> Session<'a> {
         if found.is_some() && self.dispatcher.resident_len() != self.resident_overlays.len() {
             // the miss path just verified a freshly loaded overlay
             self.resident_overlays = self.dispatcher.resident();
+        }
+        if let Some(g) = self.machine.os_gate.as_mut() {
+            g.entry(self.pc, self.cpu.r[0]);
+        }
+        if let Some(p) = self.machine.tick_pin.as_mut() {
+            p.entry(self.pc, &mut self.cpu);
         }
         let overlay = in_overlay(&self.overlay_windows, &self.resident_overlays, self.pc);
         let mut bus = Flat {
@@ -243,6 +295,15 @@ impl<'a> Session<'a> {
                     Some(g) => f = g,
                     None => break,
                 }
+                if let Some(g) = bus.m.os_gate.as_mut() {
+                    g.entry(self.pc, self.cpu.r[0]);
+                    if g.overlay_loaded {
+                        break; // re-check residency before the overlay's code runs (next slice start)
+                    }
+                }
+                if let Some(p) = bus.m.tick_pin.as_mut() {
+                    p.entry(self.pc, &mut self.cpu);
+                }
                 overlay = in_overlay(&self.overlay_windows, &self.resident_overlays, self.pc);
                 bus.pc = self.pc;
             }
@@ -257,7 +318,7 @@ impl<'a> Session<'a> {
         let used = limit
             .checked_sub(self.cpu.budget)
             .ok_or("Runtime instruction budget underflow")?;
-        if used == 0 {
+        if used == 0 && !self.machine.budget_free {
             return Err(format!(
                 "No execution progress at ARM9 PC {:#010x}",
                 self.pc
@@ -273,9 +334,15 @@ impl<'a> Session<'a> {
         } else {
             self.stats.interpreted_instructions += used as u64;
         }
+        if self.trace.is_some() {
+            self.trace_slice(self.pc, used);
+        }
+        if let Some(p) = self.machine.hw.probe.as_mut() {
+            p.slice_end(self.pc, used);
+        }
         // Preserve half bus cycles between slices instead of rounding every slice up.
         self.half_cycle += used as u64;
-        self.machine.tick(self.half_cycle / 2);
+        self.machine.slice_end(self.pc, self.half_cycle / 2);
         self.half_cycle %= 2;
         if let Some(a) = &self.machine.arm7 {
             if let Some(reason) = &a.execution_error {
@@ -290,6 +357,100 @@ impl<'a> Session<'a> {
             if a.s.undecodable {
                 let reason = a.s.unhandled.keys().find(|s| s.starts_with("undecodable ")).cloned().unwrap_or_default();
                 return Err(format!("ARM7 stopped: {reason}; ARM9 PC {:#010x}", self.pc));
+            }
+        }
+        Ok(used)
+    }
+
+    /// Block 5.4: runs slices until the next logical frame starts (the SDK V-blank count changes): with
+    /// `MKDS_TIMING=native` the ARM9 runs without an instruction budget, so one frame is a handful of
+    /// slices that end at the frame's waits. Returns the slices run. Works in any mode (exact builds run
+    /// their 32-instruction slices). `max_slices` guards against a frame that never ends.
+    pub fn step_frame(&mut self, max_slices: u64) -> Result<u64, String> {
+        use crate::rt::Mem;
+        let start = self.machine.hw.r32(crate::ds_mem::VBLANK_COUNT);
+        let mut n = 0;
+        while self.machine.hw.r32(crate::ds_mem::VBLANK_COUNT) == start {
+            if n == max_slices {
+                return Err(format!("step_frame: no frame end after {n} slices (ARM9 PC {:#010x})", self.pc));
+            }
+            self.step(32)?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    /// At a slice start at `pc`: is an IRQ ready (IME, IE & IF, CPSR I clear) and, with native OS time
+    /// (`MKDS_HW_TIME=native`), is this a safe point for it ([`crate::os_hle::IrqGate`])?
+    pub(crate) fn irq_allowed(&mut self, pc: u32) -> bool {
+        let hw = &mut self.machine.hw;
+        let (ime, ie, iflag) = (hw.r32(0x0400_0208), hw.r32(0x0400_0210), hw.r32(0x0400_0214));
+        let ready = rt::irq_ready(&self.cpu, ime, ie, iflag);
+        match self.machine.os_gate.as_mut() {
+            None => ready,
+            Some(g) => g.allow(pc, ready, ie & iflag != 0, self.stats.instructions),
+        }
+    }
+
+    /// Diagnostics: records the slice that just ended at `pc` (see `trace`).
+    fn trace_slice(&mut self, pc: u32, used: u32) {
+        use std::io::Write;
+        let frame = self.frame_number();
+        let Some((w, h, last, detail)) = &mut self.trace else { return };
+        let c = &self.cpu;
+        if *last != frame {
+            if *last != u64::MAX {
+                let _ = writeln!(w, "frame {last} instr {} irqs {} hash {h:016x}", self.stats.instructions, self.stats.irqs);
+            }
+            *last = frame;
+        }
+        for v in c.r[..15].iter().copied().chain([pc, used, c.ctl, c.n as u32 | (c.z as u32) << 1 | (c.c as u32) << 2 | (c.v as u32) << 3]) {
+            *h = (*h ^ v as u64).wrapping_mul(0x100_0000_01b3);
+        }
+        if frame == *detail {
+            let why = self.fibers.as_ref().map_or("", |f| f.last_end.1);
+            let _ = writeln!(w, "  slice pc {pc:#010x} used {used} irqs {} r {:x?} epoch {}/{} {why}", self.stats.irqs, &c.r[..15], self.machine.hw.code_epoch, self.code_epoch);
+        }
+    }
+
+    /// [`Session::step`] in fiber mode: the guest takes its own IRQs and slice ends.
+    fn step_fibered(&mut self, limit: u32) -> Result<u32, String> {
+        self.cpu.budget = limit;
+        let called_interp = self.dispatcher.interpreted();
+        fibered::run_slice(self)?;
+        self.pc = self.fibers.as_ref().map_or(self.pc, |f| f.last_end.0); // diagnostics only
+        if let Some(e) = self.dispatcher.take_error() {
+            return Err(e);
+        }
+        let used = limit.checked_sub(self.cpu.budget).ok_or("Runtime instruction budget underflow")?;
+        if used == 0 && !self.machine.budget_free {
+            let f = self.fibers.as_ref().unwrap();
+            return Err(format!("No execution progress in a fiber slice: ended at {:#010x} ({}), thread {:#010x}, {} switches", f.last_end.0, f.last_end.1, f.current, f.switches));
+        }
+        let inner = (self.dispatcher.interpreted() - called_interp).min(used as u64);
+        self.stats.instructions += used as u64;
+        self.stats.lifted_instructions += used as u64 - inner;
+        self.stats.interpreted_instructions += inner;
+        if self.trace.is_some() {
+            let pc = self.fibers.as_ref().unwrap().last_end.0;
+            self.trace_slice(pc, used);
+        }
+        if let Some(p) = self.machine.hw.probe.as_mut() {
+            p.slice_end(self.pc, used);
+        }
+        self.half_cycle += used as u64;
+        let end = self.fibers.as_ref().map_or(self.pc, |f| f.last_end.0);
+        self.machine.slice_end(end, self.half_cycle / 2);
+        self.half_cycle %= 2;
+        if let Some(a) = &self.machine.arm7 {
+            if let Some(reason) = &a.execution_error {
+                return Err(reason.clone());
+            }
+            if a.s.crash.is_some() {
+                return Err(format!("ARM7 left mapped memory at PC {:#010x}", a.pc));
+            }
+            if a.s.undecodable {
+                return Err("ARM7 stopped: undecodable instruction".into());
             }
         }
         Ok(used)
@@ -331,6 +492,14 @@ impl<'a> Session<'a> {
         self.machine.hw.cycles / FRAME_CYCLES
     }
 
+    /// Block 5.0: the logical frame, the SDK's V-blank count (`OS_GetVBlankCount`, `0x027FFC3C`, incremented
+    /// by the OS V-blank handler on the ARM7) instead of hardware time. 0 until the ARM7 has booted.
+    pub fn logical_frame(&self) -> u64 {
+        let mut b = [0u8; 4];
+        self.machine.hw.peek_into(ds_mem::VBLANK_COUNT, &mut b);
+        u32::from_le_bytes(b) as u64
+    }
+
     /// Immutable, Send GPU state for off-thread rendering.
     pub fn render_snapshot(&mut self) -> crate::machine::RenderSnapshot {
         self.machine.render_snapshot()
@@ -341,6 +510,31 @@ impl<'a> Session<'a> {
         self.render_snapshot().screens()
     }
 
+}
+
+impl Drop for Session<'_> {
+    /// `MKDS_HW_TIME=native`: one summary line of the OS time / IRQ gate (nothing otherwise).
+    fn drop(&mut self) {
+        if let (Some(g), Some(v)) = (&self.machine.os_gate, &self.machine.hw.vtime) {
+            eprintln!("MKDS_HW_TIME=native: {g}; {v}; residency re-checks at FS_AfterLoadOverlay {}", self.residency_rechecks);
+        }
+        if self.machine.budget_free {
+            let m = &self.machine;
+            eprintln!(
+                "MKDS_TIMING=native: frame-event time {}; hardware advanced by busy-wait spins {}, by the guard {}; ARM7 CPU cycles {}, plain-call instructions {}",
+                if m.event_time() { "on" } else { "off (ARM7 CPU present)" },
+                m.spin_advances,
+                m.guard_advances,
+                m.arm7.as_ref().map_or(0, |a| a.lifted_cycles + a.interpreted_instructions),
+                m.arm7.as_ref().map_or(0, |a| a.plain_cycles)
+            );
+            if !m.guard_sites.is_empty() {
+                let mut v: Vec<_> = m.guard_sites.iter().map(|(&pc, &n)| (n, pc)).collect();
+                v.sort_unstable_by(|a, b| b.cmp(a));
+                eprintln!("MKDS_TIMING=native: guard advances by slice-end pc (64-byte block): {:x?}", &v[..v.len().min(8)]);
+            }
+        }
+    }
 }
 
 /// Is `pc` inside a resident overlay's address window?

@@ -24,6 +24,10 @@ pub const IRQ_CARD_DONE: u32 = 1 << 19;
 impl Card {
     /// `chip_id`: the value the console reports for this cartridge (0x00001FC2 for the reference card).
     pub fn new(rom: Vec<u8>, chip_id: u32) -> Card {
+        if crate::native::fs::enabled() {
+            // `MKDS_HW_FS=native`: ROM-archive reads come straight from this image
+            crate::native::fs::attach_rom(&rom);
+        }
         Card { rom, chip_id, cmd: [0; 8], ctrl: 0, buf: VecDeque::new(), reads: 0 }
     }
 

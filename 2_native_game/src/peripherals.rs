@@ -320,6 +320,12 @@ impl Rtc {
         }
     }
 
+    /// Date and time as the chip sends them (BCD: year, month, day, weekday, hour, minute, second); the
+    /// native RTC service (`crate::hle7`) answers with these.
+    pub fn datetime_bcd(&self) -> [u8; 7] {
+        self.datetime_bytes()
+    }
+
     fn datetime_bytes(&self) -> [u8; 7] {
         let d = self.datetime;
         [bcd(d[0]), bcd(d[1]), bcd(d[2]), bcd(d[3]), bcd(d[4]), bcd(d[5]), bcd(d[6])]

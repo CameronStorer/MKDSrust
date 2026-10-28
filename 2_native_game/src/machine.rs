@@ -21,6 +21,9 @@ pub enum Hook {
 }
 
 /// Host events polled during a guest interrupt wait. No native UI types enter the runtime.
+/// [`Machine::wait_hook`] event: the ARM9 is taking an IRQ with V-blank pending.
+pub const ORACLE_VBLANK_IRQ: u32 = 0x200;
+
 #[derive(Default)]
 pub struct IdleAction {
     pub quit: bool,
@@ -39,6 +42,9 @@ pub struct Machine<'a> {
     pub hook_hits: HashMap<u32, u32>,
     /// The game's own ARM7 (crate::arm7), run alongside as hardware time passes.
     pub arm7: Option<crate::arm7::Arm7>,
+    /// Native ARM7 services (`MKDS_HW_ARM7=native`, Block 5.2a): the PXI router answers the tags it claims;
+    /// the ARM7 CPU keeps the rest (sound).
+    pub hle7: Option<crate::hle7::Router>,
     /// Audio produced so far (stereo, at the configured SPU rate) and not yet taken by the host; see [`Machine::take_audio`].
     audio: Vec<[i16; 2]>,
     /// Diagnostics over the whole run: frames rendered, non-silent frames, peak amplitude.
@@ -67,14 +73,43 @@ pub struct Machine<'a> {
     /// Arguments are hardware cycles and active-high DS buttons.
     pub input_observer: Option<Box<dyn FnMut(u64, u16) + 'a>>,
     pub host_quit: bool,
+    /// Block 5.0 oracle (`acceptance --record`): called with the BIOS call number when the ARM9 is about to
+    /// wait for an interrupt (SWI 4/5/6; 0x100 for the CP15 wait), and with [`ORACLE_VBLANK_IRQ`] when the
+    /// ARM9 takes an IRQ with V-blank pending (the start of a logical frame). `None` by default.
+    pub wait_hook: Option<Box<dyn FnMut(&mut Machine<'a>, u32) + 'a>>,
+    /// Block 5.3 (`MKDS_HW_TIME=native`): IRQs are delivered only at safe points ([`crate::os_hle::IrqGate`]).
+    /// `None` (the default): at every slice start, as the hardware model always did.
+    pub os_gate: Option<crate::os_hle::IrqGate>,
+    /// Test-only (`MKDS_TICK_PIN`): pins `OS_GetTick` results that seed game randomness ([`crate::os_hle::TickPin`]). `None` by default.
+    pub tick_pin: Option<crate::os_hle::TickPin>,
+    /// Block 5.4 (`MKDS_TIMING=native`, a build generated with `--timing native`): the ARM9 code pays no
+    /// instruction budget, so a wait for an interrupt ends the slice (budget 0) to let the IRQ be taken.
+    pub budget_free: bool,
+    /// Block 5.4 frame-event time: hardware time advanced at slice ends because the ARM9 spun in a listed
+    /// busy-wait loop ([`crate::os_hle::SAFE_LOOPS`]), and by the guard (a long run of slices with no time
+    /// and no wait; target 0). Each advance is [`SPIN_QUANTUM`] bus cycles.
+    pub spin_advances: u64,
+    pub guard_advances: u64,
+    /// Slice-end pcs (by 64-byte block) where the guard advanced time: unlisted busy-waits.
+    pub guard_sites: HashMap<u32, u64>,
+    /// Slice ends since hardware time last moved (guard).
+    quiet_slices: u64,
+    last_slice_cycles: u64,
 }
+
+/// Bus cycles of hardware time one spin in a busy-wait loop is worth under frame-event time (as one step of
+/// [`Machine::wait_for_interrupt`]).
+pub const SPIN_QUANTUM: u64 = 1000;
+/// Slice ends without hardware time after which the guard advances it anyway.
+pub const SPIN_GUARD: u64 = 1 << 16;
 
 /// Longest stretch (in 1000-cycle steps) a wait-for-interrupt may fast-forward before giving up.
 const WFI_LIMIT: u32 = 2_000_000;
 
 impl<'a> Machine<'a> {
-    pub fn new(hw: ds_mem::Bus, disp: &'a Dispatcher) -> Self {
-        Machine {
+    pub fn new(mut hw: ds_mem::Bus, disp: &'a Dispatcher) -> Self {
+        let hle7 = crate::hle7::Router::from_env(&mut hw);
+        let mut m = Machine {
             hw,
             disp,
             hooks: HashMap::new(),
@@ -82,6 +117,7 @@ impl<'a> Machine<'a> {
             unhandled: HashMap::new(),
             hook_hits: HashMap::new(),
             arm7: None,
+            hle7,
             audio: Vec::new(),
             audio_stats: (0, 0, 0),
             keep_all_audio: false,
@@ -99,7 +135,23 @@ impl<'a> Machine<'a> {
             idle_poll: None,
             input_observer: None,
             host_quit: false,
+            wait_hook: None,
+            os_gate: None,
+            tick_pin: crate::os_hle::TickPin::from_env(),
+            budget_free: crate::os_hle::budget_free(),
+            spin_advances: 0,
+            guard_advances: 0,
+            guard_sites: HashMap::new(),
+            quiet_slices: 0,
+            last_slice_cycles: 0,
+        };
+        if m.budget_free {
+            crate::native::BUDGET_FREE.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Some(r) = m.hle7.as_mut() {
+                r.latency = 0; // replies are synchronous (see `pxi_sync`)
+            }
         }
+        m
     }
 
     /// Replace the function at `entry` (bit 0 ignored).
@@ -150,13 +202,37 @@ impl Mem for Machine<'_> {
             .unwrap_or_else(|| self.hw.r32(a))
     }
     fn w8(&mut self, a: u32, v: u8) {
-        self.hw.w8(a, v)
+        self.hw.w8(a, v);
+        if self.budget_free {
+            self.pxi_sync();
+        }
     }
     fn w16(&mut self, a: u32, v: u16) {
-        self.hw.w16(a, v)
+        self.hw.w16(a, v);
+        if self.budget_free {
+            self.pxi_sync();
+        }
     }
     fn w32(&mut self, a: u32, v: u32) {
-        self.hw.w32(a, v)
+        self.hw.w32(a, v);
+        if self.budget_free {
+            self.pxi_sync();
+        }
+    }
+}
+
+impl Machine<'_> {
+    /// Block 5.4 (`MKDS_TIMING=native` with `MKDS_HW_ARM7=native`): a PXI word for a native ARM7 service is
+    /// answered at once, inside the ARM9's FIFO write (the router's reply latency is 0 in this mode), instead
+    /// of at the next slice end, which without a budget may be far away. The reply's IPC-receive IRQ is
+    /// then delivered at the next safe point like every other IRQ.
+    fn pxi_sync(&mut self) {
+        if self.hw.hle7_in.is_empty() {
+            return;
+        }
+        if let Some(r) = self.hle7.as_mut() {
+            r.advance(&mut self.hw, self.arm7.as_mut().map(|a| &mut a.s.periph));
+        }
     }
 }
 
@@ -179,7 +255,13 @@ impl Bus for Machine<'_> {
         match bios::swi(n, &mut c.r, &mut self.hw) {
             bios::Swi::Done => {}
             // Halt / IntrWait / VBlankIntrWait: run the hardware until an interrupt is pending
-            bios::Swi::Wait { .. } => self.wait_for_interrupt(),
+            bios::Swi::Wait { .. } => {
+                self.oracle_wait(n);
+                self.wait_for_interrupt();
+                if self.budget_free {
+                    c.budget = 0; // Block 5.4: the slice ends here, so the IRQ that woke the wait is taken
+                }
+            }
             bios::Swi::Reset => self.note("swi SoftReset".into()),
             bios::Swi::Unsupported(n) => self.note(format!("swi {n:#04x}")),
         }
@@ -197,13 +279,19 @@ impl Bus for Machine<'_> {
         *self.cp15.get(&(crn, crm, op1, op2)).unwrap_or(&0)
     }
 
-    fn mcr(&mut self, _c: &mut Cpu, cp: u8, op1: u8, crn: u8, crm: u8, op2: u8, v: u32) {
+    fn mcr(&mut self, c: &mut Cpu, cp: u8, op1: u8, crn: u8, crm: u8, op2: u8, v: u32) {
         if cp != 15 {
             self.note(format!("mcr p{cp}"));
             return;
         }
         match (crn, crm, op1, op2) {
-            (7, 0, 0, 4) => self.wait_for_interrupt(), // wait for interrupt
+            (7, 0, 0, 4) => {
+                self.oracle_wait(0x100);
+                self.wait_for_interrupt(); // wait for interrupt
+                if self.budget_free {
+                    c.budget = 0; // Block 5.4: the slice ends here, so the IRQ that woke the wait is taken
+                }
+            }
             (7, _, _, _) => {}                         // cache maintenance: memory is coherent
             (9, 1, 0, 0) => self.hw.dtcm_base = Some(v & 0xFFFF_F000),
             _ => {
@@ -241,6 +329,40 @@ impl Machine<'_> {
         self.gx_trace_error.as_deref()
     }
 
+    /// Block 5.4 frame-event time: on in a budget-free build once the ARM7 has no CPU (`MKDS_HW_SND=native`
+    /// booted it natively). Then hardware time (`Bus::advance`: scanlines, V-blank, timers, the ARM7's
+    /// ticks) passes only in waits and listed busy-waits, never by instruction count.
+    pub fn event_time(&self) -> bool {
+        self.budget_free && self.hle7.as_ref().and_then(|r| r.snd.as_ref()).is_some_and(|s| s.booted && s.active)
+    }
+
+    /// A slice of `used` budget units ended at `pc`: the hardware's share. Exact model: `cycles` bus cycles
+    /// (from the instruction count). Frame-event time: none, but GX commands and PXI words are exchanged at
+    /// once (`tick(0)`); a spin in a listed busy-wait loop is worth [`SPIN_QUANTUM`].
+    pub fn slice_end(&mut self, pc: u32, cycles: u64) {
+        if !self.event_time() {
+            return self.tick(cycles);
+        }
+        let start = self.hw.cycles;
+        let spin = crate::os_hle::SAFE_LOOPS.iter().any(|&(lo, hi, _)| (lo..hi).contains(&(pc & !1)));
+        if spin {
+            self.spin_advances += 1;
+            self.tick(SPIN_QUANTUM);
+        } else if self.quiet_slices >= SPIN_GUARD {
+            self.guard_advances += 1;
+            *self.guard_sites.entry(pc & !0x3F).or_insert(0) += 1;
+            self.tick(SPIN_QUANTUM);
+        } else {
+            self.tick(0);
+        }
+        if self.hw.cycles != start || self.hw.cycles != self.last_slice_cycles {
+            self.quiet_slices = 0;
+        } else {
+            self.quiet_slices += 1;
+        }
+        self.last_slice_cycles = self.hw.cycles;
+    }
+
     /// Fast-forward the hardware until an interrupt is pending (or give up and note it).
     /// Advances the hardware (and the ARM7, if running) by `cycles` bus cycles.
     pub fn tick(&mut self, cycles: u64) {
@@ -266,8 +388,15 @@ impl Machine<'_> {
     }
 
     fn run_arm7(&mut self, cycles: u64) {
+        let mut cpu = true;
+        if let Some(r) = self.hle7.as_mut() {
+            // Block 5.2b: false once the event-driven ARM7 (`MKDS_HW_SND=native`) has taken over
+            cpu = r.run(&mut self.hw, self.arm7.as_mut(), cycles);
+        }
         if let Some(a) = self.arm7.as_mut() {
-            a.run(&mut self.hw, cycles as u32);
+            if cpu {
+                a.run(&mut self.hw, cycles as u32);
+            }
             // ARM7::run owns the sound clock. Drain its output; rendering again
             // here advances sample positions twice and discards alternate chunks.
             if !a.s.audio_out.is_empty() {
@@ -378,7 +507,17 @@ impl Machine<'_> {
         std::mem::take(&mut self.audio)
     }
 
+    pub fn oracle_wait(&mut self, what: u32) {
+        if let Some(mut hook) = self.wait_hook.take() {
+            hook(self, what);
+            self.wait_hook = Some(hook);
+        }
+    }
+
     fn wait_for_interrupt(&mut self) {
+        if let Some(g) = self.os_gate.as_mut() {
+            g.wait(); // a safe point: what wakes this wait is delivered at once
+        }
         let mut n = 0;
         while !self.hw.irq_pending() {
             if let Some(action) = self.idle_poll.as_mut().and_then(|poll| poll()) {
@@ -389,6 +528,13 @@ impl Machine<'_> {
             }
             if self.host_quit {
                 return;
+            }
+            // Native OS time: an alarm or tick overflow due in this frame happens now, without running
+            // the hardware; otherwise this is the frame end and the hardware runs to the V-blank (or to an
+            // event of the ARM7 model).
+            if let Some(bits) = self.hw.vtime.as_mut().and_then(|v| v.jump()) {
+                self.hw.raise(bits);
+                continue;
             }
             self.tick(1000);
             n += 1;

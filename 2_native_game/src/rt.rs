@@ -140,6 +140,14 @@ pub trait Bus: Mem {
     fn mrc(&mut self, c: &mut Cpu, cp: u8, op1: u8, crn: u8, crm: u8, op2: u8) -> u32;
     /// MCR: ARM register to coprocessor register.
     fn mcr(&mut self, c: &mut Cpu, cp: u8, op1: u8, crn: u8, crm: u8, op2: u8, v: u32);
+    /// The block at `pc` could not pay its `cost` (the slice's budget is used up). `false` (the
+    /// default): lifted code stores `pc` in r15 and returns [`BUDGET_EXHAUSTED`] to its run loop.
+    /// A fiber runtime (block 4A.2) instead ends the slice in place, takes a pending interrupt,
+    /// charges `cost` from the next slice and returns `true`: the block then runs, and no Rust
+    /// frame is unwound.
+    fn slice_end(&mut self, _c: &mut Cpu, _pc: u32, _cost: u32) -> bool {
+        false
+    }
 }
 
 /// Takes an IRQ before the instruction at `pc` (bit 0 = Thumb): IRQ mode, lr = next + 4, SPSR = the
@@ -572,4 +580,68 @@ mod tests {
         assert_eq!(shift_reg(1, 0x8000_0000, 33, true), (0, false));
         assert_eq!(mul_long(&mut c, true, false, false, (-3i32) as u32, 5, 0, 0), ((-15i32) as u32, u32::MAX));
     }
+}
+
+/// Block 5.5: a direct call (no-spill build) came back to `x` instead of its return address `ret`. A
+/// closed function always returns through the link register it was given, so this means the guest code
+/// broke the calling convention; inside a direct function there is no `c.r` state to continue from.
+#[cold]
+#[inline(never)]
+pub fn bad_return(x: u32, ret: u32) -> ! {
+    panic!("direct call returned to {x:#010x}, not to its return address {ret:#010x} (MKDS_SPILL=keep builds without direct calls)")
+}
+
+/// Block 4B: whether the raised (T1) version of the function at `entry` runs (else its exact T0
+/// translation does). `MKDS_T1` unset or `all`: every T1; `off`: none; otherwise a file of entry
+/// addresses (hex, one per line) for bisecting.
+pub fn t1_enabled(entry: u32) -> bool {
+    use std::sync::OnceLock;
+    static SET: OnceLock<Option<std::collections::HashSet<u32>>> = OnceLock::new();
+    let set = SET.get_or_init(|| match std::env::var("MKDS_T1").ok().as_deref() {
+        None | Some("all") | Some("") => None,
+        Some("off") => Some(Default::default()),
+        Some(path) => Some(
+            std::fs::read_to_string(path)
+                .unwrap_or_else(|e| panic!("MKDS_T1 file {path}: {e}"))
+                .lines()
+                .filter_map(|l| u32::from_str_radix(l.trim().trim_start_matches("0x").trim_start_matches("0X"), 16).ok())
+                .collect(),
+        ),
+    });
+    set.as_ref().is_none_or(|s| s.contains(&entry) || s.contains(&(entry & !1)))
+}
+
+// ---- T1 memory helpers: the exact accesses of the translation, with the alignment the ARM
+// applies made implicit (a word access ignores address bits 0-1, a halfword access bit 0).
+#[inline(always)]
+pub fn ld32<M: Mem + ?Sized>(m: &mut M, a: u32) -> u32 {
+    m.r32(a & !3)
+}
+#[inline(always)]
+pub fn ld16<M: Mem + ?Sized>(m: &mut M, a: u32) -> u32 {
+    m.r16(a & !1) as u32
+}
+#[inline(always)]
+pub fn ld16s<M: Mem + ?Sized>(m: &mut M, a: u32) -> u32 {
+    m.r16(a & !1) as i16 as i32 as u32
+}
+#[inline(always)]
+pub fn ld8<M: Mem + ?Sized>(m: &mut M, a: u32) -> u32 {
+    m.r8(a) as u32
+}
+#[inline(always)]
+pub fn ld8s<M: Mem + ?Sized>(m: &mut M, a: u32) -> u32 {
+    m.r8(a) as i8 as i32 as u32
+}
+#[inline(always)]
+pub fn st32<M: Mem + ?Sized>(m: &mut M, a: u32, v: u32) {
+    m.w32(a & !3, v)
+}
+#[inline(always)]
+pub fn st16<M: Mem + ?Sized>(m: &mut M, a: u32, v: u32) {
+    m.w16(a & !1, v as u16)
+}
+#[inline(always)]
+pub fn st8<M: Mem + ?Sized>(m: &mut M, a: u32, v: u32) {
+    m.w8(a, v as u8)
 }

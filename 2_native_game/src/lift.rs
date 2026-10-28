@@ -10,6 +10,32 @@
 //! before every branch target, so a block always runs to its end.
 use crate::arm::{self, pc_read, Decoded, HalfMul, Inst, Off, Op2};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Block 5.4 (`mkds_gen --timing native`, off by default): ARM9 code is emitted without the per-block
+/// instruction budget. Only loop headers and the blocks inside the census busy-wait loops
+/// ([`crate::os_hle::SAFE_LOOPS`]) keep it, as poll points where a slice may end (the hardware and the ARM7
+/// advance) and a pending IRQ be taken. The ARM7 table (it charges
+/// cycles, `cost` is `Some`) is unchanged: the ARM7 CPU still runs on hardware time.
+static TIMING_NATIVE: AtomicBool = AtomicBool::new(false);
+static POLL_LOOPS: std::sync::OnceLock<&'static [(u32, u32, &'static str)]> = std::sync::OnceLock::new();
+
+/// Sets the generator's timing model (`true`: `--timing native`) and, for `native`, the busy-wait loops
+/// whose blocks keep their budget as poll points (the generator passes `recomp::os_hle::SAFE_LOOPS`).
+pub fn set_timing_native(on: bool, poll_loops: &'static [(u32, u32, &'static str)]) {
+    TIMING_NATIVE.store(on, Ordering::Relaxed);
+    let _ = POLL_LOOPS.set(poll_loops);
+}
+
+/// `--timing native` is in force.
+pub fn timing_native() -> bool {
+    TIMING_NATIVE.load(Ordering::Relaxed)
+}
+
+/// Under `--timing native`, does the ARM9 block at `start` keep its budget (a busy-wait poll point)?
+pub fn polls(start: u32) -> bool {
+    POLL_LOOPS.get().is_some_and(|l| l.iter().any(|&(lo, hi, _)| (lo..hi).contains(&(start & !1))))
+}
 use std::fmt::Write;
 
 /// Code memory for discovery: one or more loaded segments (ARM9 main, ITCM, overlays).
@@ -293,6 +319,33 @@ pub fn discover_seeded(img: &Image, entry: u32, extra: &[u32], inside: &dyn Fn(u
     Ok(Func { entry, insts, blocks: leaders, undecoded })
 }
 
+/// The known targets of the computed jump at `pc` in `f` (a compiled `switch`): the ARM branch
+/// table after `add pc, pc, rX, lsl #n`, or the Thumb halfword table of `ldrh` .. `bx`. Only
+/// block starts of `f` are returned; an empty list means the targets are not known.
+pub fn computed_targets(f: &Func, img: &Image, pc: u32) -> Vec<u32> {
+    let Some(d) = f.insts.get(&pc) else { return Vec::new() };
+    let mut out = Vec::new();
+    if is_switch_add(d) {
+        let mut q = pc.wrapping_add(8);
+        while let Some(e) = f.insts.get(&q) {
+            if e.cond == 14 && matches!(e.inst, Inst::B { .. }) && f.blocks.contains(&q) {
+                out.push(q);
+                q = q.wrapping_add(4);
+            } else {
+                break;
+            }
+        }
+        if out.is_empty() {
+            out = jump_run(img, pc.wrapping_add(8)).into_iter().take_while(|t| f.insts.contains_key(t)).collect();
+        }
+    } else if d.thumb && matches!(d.inst, Inst::Bx { link: false, .. }) {
+        out = thumb_switch_targets(img, &f.insts, pc);
+    }
+    let mut seen = BTreeSet::new();
+    out.retain(|t| f.blocks.contains(t) && seen.insert(*t));
+    out
+}
+
 /// Code addresses a function refers to (bit 0 = Thumb): direct call targets, branches that leave
 /// it (tail calls), and code pointers it materialises (literal-pool words and `adr`). Pointers are
 /// only candidates: [`discover_program`] keeps one when `is_code` accepts it and it lifts cleanly.
@@ -507,9 +560,10 @@ fn ea(rn: usize, o: Off, up: bool, pre: bool, wb: bool, addr: u32, t: bool) -> (
     }
 }
 
-/// Rust for one instruction. `next` is the code address after it; `img` allows folding literal
-/// pool loads (word loads from a constant address inside the function's own image).
-fn body(d: &Decoded, addr: u32, next: u32, img: Option<&Image>) -> String {
+/// The pre-IR string emitter for one instruction, kept as the oracle for the T0 contract
+/// (`tests/ir_t0.rs`): [`crate::ir::print`] of [`crate::ir::lower`] must equal it up to whitespace.
+#[doc(hidden)]
+pub fn legacy_body(d: &Decoded, addr: u32, next: u32, img: Option<&Image>) -> String {
     let t = d.thumb;
     match d.inst {
         Inst::Dp { op, s, rn, rd, op2: o } => {
@@ -726,6 +780,32 @@ pub fn emit_with(f: &Func, id: &str, img: Option<&Image>) -> String {
 /// [`emit_with`] with a per-block budget charge: `cost(inst, ends_block_with_jump)` summed over the
 /// block (the ARM7 table charges cycles, see `rt::arm7_cycles`); `None` charges one per instruction.
 pub fn emit_cost(f: &Func, id: &str, img: Option<&Image>, cost: Option<&dyn Fn(&Decoded, bool) -> u32>) -> String {
+    emit_full(f, id, img, cost, false)
+}
+
+/// [`emit_cost`]; `raise` applies the block 4B passes that keep the function's exact behaviour
+/// (today: dead flag computations are dropped, see [`crate::raise`]).
+pub fn emit_full(f: &Func, id: &str, img: Option<&Image>, cost: Option<&dyn Fn(&Decoded, bool) -> u32>, raise: bool) -> String {
+    let live = if raise { Some(crate::raise::flag_liveness(f, img)) } else { None };
+    // Block 5.4 (`--timing native`, ARM9): loop headers (targets of backward direct branches) keep the budget as
+    // poll points, so a loop waiting on the ARM7 or on time still ends slices
+    let headers: BTreeSet<u32> = if cost.is_none() && timing_native() {
+        let mut h = BTreeSet::new();
+        for &start in &f.blocks {
+            for (a, d) in f.block(start) {
+                for st in crate::ir::lower(&d, a & !1, Func::next(a, &d) & !1, img) {
+                    if let crate::ir::S::Goto(crate::ir::E::Const(t)) = st {
+                        if t & !1 <= a & !1 {
+                            h.insert(t & !1);
+                        }
+                    }
+                }
+            }
+        }
+        h
+    } else {
+        BTreeSet::new()
+    };
     let mut s = format!(
         "#[allow(non_snake_case, unused_variables, unused_assignments, unused_mut, unreachable_code, unused_parens, unused_braces, clippy::all)]\npub fn f_{id}(c: &mut recomp::rt::Cpu, m: &mut dyn recomp::rt::Bus, mut pc: u32) -> u32 {{\n    #[allow(unused_imports)] use recomp::rt as R;\n    #[allow(unused_imports)] use recomp::arm::interwork as iw;\n    #[allow(unused_imports)] use recomp::rt::Mem as _;\n    loop {{\n        match pc {{\n"
     );
@@ -735,11 +815,20 @@ pub fn emit_cost(f: &Func, id: &str, img: Option<&Image>, cost: Option<&dyn Fn(&
             None => insts.len() as u32,
             Some(cost) => insts.iter().enumerate().map(|(i, (_, d))| cost(d, i + 1 == insts.len() && (d.inst.writes_pc() || d.inst.is_call()))).sum(),
         };
-        let _ = writeln!(s, "            {start:#X} => {{ if !R::spend(c, {charge}) {{ c.r[15] = pc; return R::BUDGET_EXHAUSTED; }}");
+        if cost.is_none() && timing_native() && !polls(start) && !headers.contains(&(start & !1)) {
+            // Block 5.4: no budget outside poll points
+            let _ = writeln!(s, "            {start:#X} => {{");
+        } else {
+            let _ = writeln!(s, "            {start:#X} => {{ if !R::spend(c, {charge}) && !m.slice_end(c, pc, {charge}) {{ c.r[15] = pc; return R::BUDGET_EXHAUSTED; }}");
+        }
         let mut end = start;
         for (a, d) in &insts {
             let next = Func::next(*a, d);
-            let code = body(d, *a & !1, next & !1, img);
+            let mut stmts = crate::ir::lower(d, *a & !1, next & !1, img);
+            if let Some(live) = &live {
+                crate::raise::drop_dead_flags(&mut stmts, live[a]);
+            }
+            let code = crate::ir::print(&stmts);
             if code.is_empty() {
             } else if d.cond == 14 {
                 let _ = writeln!(s, "                {{ {code} }}");

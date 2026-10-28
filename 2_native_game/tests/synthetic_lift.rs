@@ -97,6 +97,20 @@ fn generated_edge_cases_match_independent_reference() {
     let source = dir.join("checks.rs");
     let exe = dir.join(format!("checks{}", std::env::consts::EXE_SUFFIX));
     std::fs::write(&source, generated).unwrap();
+    // native library paths Cargo's build scripts added (e.g. the Windows import libraries of the
+    // fiber crate's dependencies): plain rustc does not know them
+    let mut native = Vec::new();
+    if let Ok(builds) = std::fs::read_dir(deps.parent().unwrap().join("build")) {
+        for b in builds.filter_map(Result::ok) {
+            if let Ok(out) = std::fs::read_to_string(b.path().join("output")) {
+                for l in out.lines() {
+                    if let Some(p) = l.strip_prefix("cargo:rustc-link-search=native=").or_else(|| l.strip_prefix("cargo::rustc-link-search=native=")) {
+                        native.push(format!("native={p}"));
+                    }
+                }
+            }
+        }
+    }
     let compile = Command::new("rustc")
         .args(["--edition", "2024"])
         .arg(&source)
@@ -104,6 +118,7 @@ fn generated_edge_cases_match_independent_reference() {
         .arg(format!("recomp={}", library.display()))
         .arg("-L")
         .arg(format!("dependency={}", deps.display()))
+        .args(native.iter().flat_map(|n| ["-L", n.as_str()]))
         .arg("-o")
         .arg(&exe)
         .output()

@@ -1,14 +1,54 @@
-# MKDS Native Builder
+# Driftlift
 
-Turn **your own copy of MKDS** into a **native program**, built on your own Windows, Linux, or macOS computer.
+**Lift the code. Keep the drift.**
 
-This repository contains **no game**: no ROM, no game code, no graphics, sounds or other game files. You supply your own `.nds`
-file; the builder reads it on your machine, translates the game's machine code into Rust source code, compiles it and gives you a
-`play.exe` on Windows or `play` on Linux/macOS. Nothing from the game ever leaves your computer.
+Driftlift turns your own legally dumped **Mario Kart DS (USA, revision 0)** ROM into a native Windows game and a Rust source workspace you can inspect and rebuild. Static recompilation translates the game's ARM9 and ARM7 programs on your computer before play. Linux has limited validation; macOS has an untested build path.
 
----
+The aim is to preserve playability beyond the original hardware, make the game's behavior easier to study, create room for modding, and improve performance and presentation while retaining the original driving behavior. Generated source has structured control flow, research names and inferred field accessors; readability is still improving rather than being a finished hand-written decompilation.
 
-## Quick start (Windows 10/11, 64-bit)
+> [!IMPORTANT]
+> You must own the game and dump your cartridge yourself. This repository supplies no Nintendo code, assets or ROMs and does not fetch them for you. Translation and extraction happen locally. Generated source, extracted assets and built games are for personal use and must not be shared.
+
+> [!WARNING]
+> This is a work in progress. Verification covers recorded scenarios, not every possible game state. Leave experimental native hardware options off for the established baseline.
+
+Driftlift is not affiliated with or endorsed by Nintendo. Nintendo, Mario Kart DS and other trademarks belong to their respective owners.
+
+## What you get
+
+- **Native execution:** the normal game build contains compiled translations, without a CPU instruction interpreter or JIT. Windows races have run at real-time speed with clean audio on a 6-core PC; performance depends on your machine.
+- **Sharper 3D:** GPU rendering, automatic resolution scaling, fullscreen, filtering and stacked or side-by-side screens. The 2D presentation retains the original pixel resolution.
+- **Flexible input:** keyboard and controller rebinding, plus mouse input on the touch screen.
+- **Source to explore:** a locally generated Rust workspace with structured functions, comments and inferred field accessors. Some names and types remain tentative.
+- **A verified faithful baseline:** a recorded full race matches the project's exact baseline bit for bit in telemetry, inputs and screenshots. The verification scope is explained below.
+- **Texture replacement today; more later:** GPU texture dumping/replacement is available. Widescreen camera/HUD changes, HD model hooks and interpolated high-refresh presentation are planned.
+
+## Requirements
+
+- A clean, self-dumped USA ROM: game code **AMCE**, revision **0**. Normal builds reject other regions, revisions and altered dumps.
+- **Windows 10/11, 64-bit** for the primary supported experience. Desktop Linux has limited testing; macOS is untested.
+- Stable Rust and Visual Studio C++ Build Tools on Windows, as described below.
+- About **2 GB free disk space** and **8 GB RAM recommended**. Compilation can consume substantial memory; reduce `--jobs N` if necessary.
+- Internet for the initial dependency download; cached dependencies can be used offline later.
+
+Existing executable names, output paths and configuration folders still use **MKDS Native Builder** / `mkds`. This README name does not rename those interfaces.
+
+## Quick start: graphical Windows launcher
+
+After installing Rust's MSVC toolchain and the C++ build tools, open a terminal at the repository root:
+
+~~~powershell
+cargo build --release --locked --manifest-path launcher/Cargo.toml
+.\launcher\target\release\mkds_launcher.exe
+~~~
+
+On **Home**, select your own supported ROM, inspect its compatibility result, select an output folder and choose **Build game**. Keep the launcher open while building or playing. Logs appear below setup and on **Advanced**. Choose **Play** when ready; the launcher verifies the bundle first.
+
+**Settings** and **Controls** have explicit Save buttons; changes apply on the next game launch. Controller bindings use menus, without physical controller capture. A rebuild into a nonempty destination creates a sibling directory and changes the active output only after success, preserving the old bundle. Keep the source checkout available for future builds.
+
+Preferences and the last completed build log live in `%APPDATA%\MKDS Native Builder\launcher.json` and `launcher-build.log` beside it. **Outdated** compares local source timestamps and the selected ROM hash; it is not an online update check. The three Advanced native FS/ARM7/time toggles are experimental and initially off. See [launcher documentation](launcher/README.md).
+
+## Quick start: Windows scripts
 
 **1. Install Rust** (one time)
 - Download and run `rustup-init.exe` from **https://rustup.rs** and accept the defaults.
@@ -35,8 +75,6 @@ That's it.
 
 **The menu:** double-click **`mkds.bat`** any time to play, rebuild, or change the controls and display settings, all
 from one place.
-
----
 
 ## Quick start (Linux and macOS)
 
@@ -188,20 +226,9 @@ versions:
 A replacement with the wrong size is ignored with a message naming the file. Dumped textures come from your copy of the game:
 do not share them.
 
----
-
-## What you need
-
-- **Your own ROM** of MKDS, USA version: game code `AMCE`, revision 0. Make it from a cartridge you own. Other versions are refused
-  with a clear message (they are not supported yet).
-- Windows 10 or 11 (64-bit), desktop Linux, or macOS (untested); about **2 GB** free disk space and **8 GB RAM** recommended.
-- Rust (step 1). An internet connection for the **first** build only.
-
----
-
 ## What the build produces
 
-Everything goes into `builds\mkds\` (ignored by git, so it can never be uploaded by accident):
+Everything goes into `builds\mkds\` (ignored by git; manual copying and forced uploads are still possible):
 
 | Item | What it is |
 |---|---|
@@ -250,23 +277,27 @@ Game options (after `play.exe` or `play`): `--mute`, `--stats` (prints speed and
 | Linker / `link.exe` errors | Install the Visual Studio C++ Build Tools (step 1) and try again. |
 | The build fails with a Cargo error | Run it again with an internet connection; if it still fails, open an issue with the message. |
 
----
+## How it works
 
-## How it works (short version)
+1. **Validate:** identify the ROM and check its SHA-256 against the supported dump.
+2. **Extract:** unpack your local game files and record their fingerprints.
+3. **Translate and raise:** use function boundaries to translate ARM9 and ARM7 machine code into Rust, then improve control flow, names and field access using the research dictionary. Game instructions come from your ROM, not this checkout.
+4. **Compile:** build the translations with the runtime and native window, graphics, audio and input backends. Incomplete generation fails the normal build.
+5. **Package and verify:** stage the game, launch verifier, assets, source and manifest. The play executable checks the bundle before launching it.
 
-1. **Check** - your ROM is identified by its fingerprint; unsupported or changed files are refused.
-2. **Unpack** - the game's files are copied out of the ROM into `assets\` with a fingerprint list.
-3. **Translate** - every function of the game's two processors (ARM9 and ARM7) is translated from ARM machine code into Rust. The
-   list of where functions start (`4_docs/FUNCTION_BOUNDARIES.csv`, addresses only) guides this; the code itself comes from your ROM.
-4. **Compile** - Rust compiles the generated code together with a small runtime that provides the DS hardware (screens, sound,
-   input, timers) on your PC.
-5. **Package** - `play.exe`, `game.exe`, `assets\`, `source\` and the fingerprints are placed in the output folder.
+Static recompilation removes runtime CPU instruction interpretation; the current baseline still uses a DS hardware compatibility model for cycle budgets, timers, DMA, interrupts, memory and the translated ARM7 program. Host graphics and audio provide native presentation, and ten verified leaf functions have native Rust replacements. Native FS, ARM7 PXI services, event-driven sound and OS time/IRQ replacements have merged behind opt-in `MKDS_HW_*` switches. A separate `MKDS_TIMING=native` build removes most ARM9 instruction budgets; the exact baseline remains the default.
 
-No instruction is emulated at run time: the shipped game contains no interpreter. The 3D graphics and the final screens are drawn
-by your graphics card at a higher resolution, and the sound channels are mixed straight at your audio device's rate. The 2D
-layers (backgrounds and sprites) are still decoded on the CPU at the DS's resolution, as the game's code drives them.
+The [function dictionary](dictionary/README.md) contains research metadata rather than game code. Only verified native replacements are enabled by default. For developers, `MKDS_NATIVES=all` includes trial replacements and `MKDS_NATIVES=off` selects translations throughout.
 
-Research notes and progress: **https://docs.cameronstorer.com/MKDS-Decomp-Docs/**
+Research notes: [MKDS Decomp Docs](https://docs.cameronstorer.com/MKDS-Decomp-Docs/).
+
+## Verification and source progress
+
+The [Block 4 report](4_docs/BLOCK4_SOURCE_PLAN.md) records a Figure-8 acceptance race finishing first at frame **11,462**. Fiber and flat dispatch produced the same **1,707,950,080 ARM9 instructions**, **581,521 IRQs**, byte-identical telemetry over **12,362 frames**, identical inputs and all **40 screenshots**. Raised code and type/accessor passes are also reported race-identical. This proves regression equivalence for the recorded run against the project's exact baseline, rather than universal agreement with real hardware across all modes.
+
+All ARM9 and ARM7 functions have raised T1 output (12,736 functions in the whole-program IR check). The source package includes README.txt and tiers.csv. Flags as locals are implemented (81,372 of 107,472 compares); type coverage reached 26,370 accessor sites, 810 functions with typed arguments and 1,003 with renamed registers (`6b267ef`, `0a4351f`). The latest [name review](NAMES_REPORT.md) changed 109 of 1,532 reviewed uncertain names (87 confirmed, 22 reworded), leaving 1,445 names ending exactly in `_maybe`. The [field review](FIELDS_REPORT.md) renamed 204 of 595 placeholders (58 confident, 146 uncertain), leaving 391. Names, inferred types and accessors are still being refined; names ending in _maybe indicate uncertainty. Exact T0 translations remain available for transfers requiring their dispatch behavior. Shadow checks compare replacement functions against translations.
+
+The [Block 5 census](4_docs/BLOCK5_CENSUS.md) adds recording/replay evidence: exact-vs-exact and flat-vs-fiber runs compare equal. Its route covers boot, menus, one three-lap race and results. There were 19 skipped V-blanks during loading and none in the race loop. Battle, missions and menus outside that route are not yet covered by this census.
 
 ## Status
 
@@ -296,7 +327,59 @@ Some ROM-dependent tests skip unless their documented environment variables are 
 test is Windows-only. For a bounded smoke test of an actual Unix bundle, run `./play --frames 300 --stats`
 from its output folder (add `--mute` if no audio device is available).
 
-## Legal
+### Roadmap
 
-This project is not affiliated with or endorsed by Nintendo. It contains no copyrighted game data and does not download any. You need
-a ROM you made from a cartridge you own. Do not distribute ROMs, unpacked game files, generated source or built games.
+- **Working:** static translation, native host presentation/input/audio, raised code generation, dictionary-driven names and field access, and ten verified native helpers.
+- **In progress (Block 4):** clearer types, names, expressions and source organization. Full source readability remains a goal.
+- **Done and merged (Block 5.0-5.3):** recording/replay harness and census; native FS (`MKDS_HW_FS`), ARM7 PXI services (`MKDS_HW_ARM7`), event-driven sound (`MKDS_HW_SND`) and OS time/IRQs (`MKDS_HW_TIME`). Native modes are opt-in; the corpus still needs battle, missions and more menus.
+- **Working experiment (Block 5.4):** a budget-free `MKDS_TIMING=native` build finishes 1st and measures about 20% less CPU per frame. Finish work and 5.5 spill/reload removal are in progress. The graphical [launcher](launcher/) provides ROM inspection, building, verified play, settings, controls and experimental FS/ARM7/time toggles; it does not expose every native mode.
+- **Optional future presentation:** direct graphics submission, HD model hooks, widescreen projection/HUD adjustments and 120/144 Hz interpolation. Today's side-by-side screen layout does not change the game camera's aspect ratio.
+
+The [Block 5 status](4_docs/BLOCK5_PLAN.md#status-2026-10-28) tracks merged work and remaining conditions. Its [seed-equalized proof](4_docs/masks/native_seed_equalized.md) reports all compared race frames equal in every unmasked region: TIME 10,079, ARM7 10,082, FS 10,077, all three 10,081, and budget-free 10,078. This requires test-only tick pinning, documented masks, re-keyed inputs and loading offsets (4 frames for FS/all three, 18 for budget-free); it does not cover the separate SND switch. Without tick pinning the all-three control diverges and does not finish. The proof build still runs the ARM7 sound CPU and advances cycle-driven hardware in waits; full frame-event scheduling and default promotion remain. WiFi is stubbed; multiplayer support is separate future work.
+
+## FAQ
+
+**Is this an emulator?**
+
+The game CPUs are statically compiled before launch, so the normal bundle does not interpret instructions. A DS hardware model still supplies memory, timing and peripheral behavior. A reference interpreter exists for tests and optional diagnostics.
+
+**Where can I download a ROM or a ready-to-play game?**
+
+Neither is supplied. Dump a cartridge you own and build locally. Do not share ROM-derived bundles or source.
+
+**Why does the first build take so long?**
+
+Your machine translates and compiles the game, and initially downloads and compiles dependencies too. Subsequent builds benefit from caching.
+
+**Can I mod it?**
+
+You can study and rebuild your generated source and use the GPU texture replacement workflow. Direct edits to packaged files can fail manifest verification. Do not distribute original game material or ROM-derived output. More native modding hooks are planned.
+
+**Does higher resolution change physics or unlock the frame rate?**
+
+Resolution settings change presentation while retaining established game behavior. High-refresh interpolation and widescreen camera changes are future work.
+
+**Will other games or regions work?**
+
+The supported pipeline is specific to the clean USA AMCE revision 0 dump. Diagnostic bypasses do not establish compatibility for modified ROMs or other versions.
+
+**How do I report failures?**
+
+Include your OS, error text, the scenario and relevant logs. The graphical launcher saves launcher-build.log. Do not attach a ROM, extracted assets, generated game source or a built game. See Status for known limitations.
+
+## Credits and public references
+
+- [Wiicompiled](https://github.com/patchzyy/Wiicompiled): inspiration for these README topics and static recompilation/platform-layer design. Its supplied README is GPL-3.0 reference material; no sentences, logo or images were reused here.
+- [Wheel Wizard](https://github.com/TeamWheelWizard/WheelWizard): broad launcher workflow inspiration, as documented by the launcher; no implementation or assets are included.
+- [GBATEK](https://problemkaputt.de/gbatek.htm), [melonDS](https://github.com/melonDS-emu/melonDS) and [DeSmuME](https://github.com/TASEmulators/desmume): public hardware-behavior and architecture references listed in the project plans.
+- [N64Recomp](https://github.com/N64Recomp/N64Recomp), [N64ModernRuntime](https://github.com/N64Recomp/N64ModernRuntime), [RT64](https://github.com/rt64/rt64) and [aurora](https://github.com/encounter/aurora): design references for static translation, native services and presentation, not claims of bundled backends.
+- [ds-decomp](https://github.com/AetiasHax/ds-decomp) and public MKDS mapping/decompilation research: references discussed with import restrictions in the [source plan](4_docs/BLOCK4_SOURCE_PLAN.md). Reference status does not grant permission to copy code.
+- Rust and dependency authors, including wgpu, eframe/egui and corosensei, and contributors to the function dictionary and verification tools.
+
+## License and legal status
+
+**This checkout has no top-level LICENSE file or project license declaration in the reviewed Cargo manifests.** The owner needs to specify redistribution terms for this project's code. Do not infer GPL-3.0 for Driftlift from Wiicompiled's license. Dependencies and public reference projects retain their own licenses.
+
+The repository contains no Nintendo code, assets or ROMs. You must own the game and make your own lawful cartridge dump. ROMs, extracted files, generated source and compiled game bundles are for personal use and must not be redistributed. Texture dumps are also game-derived material. Access to the tools does not grant rights to distribute the game.
+
+Driftlift is independent of Nintendo and is neither affiliated with nor endorsed by it. All trademarks remain the property of their respective owners.

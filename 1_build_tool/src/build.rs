@@ -407,6 +407,16 @@ pub fn recompile(
     for names in dictionary_tables(&opts.source) {
         gen_cmd.arg("--names").arg(&names);
     }
+    // Block 5.4 (opt-in, `MKDS_TIMING=native` when building): ARM9 code without the instruction budget. Such a
+    // build needs the native hardware services, so its executables turn them on (see NATIVE_TIMING_MAIN).
+    let timing_native = std::env::var("MKDS_TIMING").as_deref() == Ok("native");
+    if timing_native {
+        gen_cmd.arg("--timing").arg("native");
+        log("Timing: native (Block 5.4): ARM9 code without the instruction budget; MKDS_HW_*=native at run time.".into());
+    }
+    let with_timing = |main: String| {
+        if timing_native { main.replacen("fn main() {\n", &format!("fn main() {{\n{NATIVE_TIMING_MAIN}"), 1) } else { main }
+    };
     let out = gen_cmd.output()?;
     for l in String::from_utf8_lossy(&out.stderr)
         .lines()
@@ -472,10 +482,12 @@ pub fn recompile(
         .ok_or_else(|| BuildError("Rip manifest lacks assets_sha256.".into()))?;
     std::fs::write(
         gdir.join("src/main.rs"),
-        GAME_MAIN
-            .replace("@ASSETS_SHA256@", assets_sha)
-            .replace("@ARM7@", arm7_entry)
-            .replace("@INTERPRETED@", if opts.with_interpreter { INTERPRETED_ARM7 } else { NO_INTERPRETER }),
+        with_timing(
+            GAME_MAIN
+                .replace("@ASSETS_SHA256@", assets_sha)
+                .replace("@ARM7@", arm7_entry)
+                .replace("@INTERPRETED@", if opts.with_interpreter { INTERPRETED_ARM7 } else { NO_INTERPRETER }),
+        ),
     )?;
     let deps = recomp_without_defaults(&ws, opts.with_interpreter)?;
     log(format!(
@@ -492,7 +504,7 @@ pub fn recompile(
         std::fs::create_dir_all(gdir.join("src/bin"))?;
         std::fs::write(
             gdir.join("src/bin/acceptance.rs"),
-            format!(
+            with_timing(format!(
                 "//! Acceptance driver on this build's generated code (verification only).\n\
                  //! `acceptance <rom.nds> <route.csv> <new-output-dir> [max-frames]`\n\
                  #[path = {:?}]\n#[allow(dead_code)]\nmod race_check;\n\n\
@@ -501,7 +513,7 @@ pub fn recompile(
                  eprintln!(\"{{e}}\");\n        std::process::exit(1);\n    }}\n}}\n",
                 driver.trim_start_matches(r"\\?\"),
                 if has_arm7 { "lifted::LIFTED7" } else { "&[]" }
-            ),
+            )),
         )?;
     }
     let ws_toml = std::fs::read_to_string(ws.join("Cargo.toml"))?;
@@ -635,14 +647,30 @@ pub fn recompile(
 
 /// Placed in the bundle's `source/`: how to read and rebuild the generated code.
 const SOURCE_README: &str = "This is the Rust generated on your machine from your own ROM by mkds_builder.
-part_NN/  the game's machine code, lifted to Rust (one function per ROM function)
-lifted/   the table of lifted functions and the ROM/metadata hashes they came from
-game/     the program: checks your ROM, then runs the lifted code on the native host
+
+part_NN/  the game's code, one Rust function per ROM function, in two versions:
+          - the readable version (named after the function, e.g. `os_sleep_thread`, or `sub_<segment>_<address>`):
+            registers as local variables, if/loop/match control flow, calls commented with the names the
+            project's research found, and known struct fields read through named accessors
+            (`kart::racer_index(m, r4)`). This is the version that runs at each function's entry.
+          - the exact translation `f_<segment>_<address>` (a loop over the ARM blocks): the readable version
+            continues there when control does something unusual (a thread switch, a computed jump).
+          Both behave identically; each charges the same instruction budget at every original block.
+layout/   the research structs: each a module with its field offsets and the accessors the code uses
+          (each accessor is exactly the memory access it replaces)
+lifted/   the table of all functions (both versions) and the ROM/metadata hashes they came from
+game/     the program: checks your files, then runs the code on the native host
+tiers.csv  every function: address, tier (T1 readable / T0 exact only), Rust name, crate, reason
 coverage.csv / generation.json  every function the generator was given and what happened to it
+
+How to read it: open tiers.csv, find a function by name, then its crate part_NN/src/lib.rs.
+`budget!(..)` lines keep the console's timing; `spill!()`/`reload!()` keep the CPU registers exact around
+calls; `R::ld32`/`R::st32` etc. are the game's memory accesses (DS addresses).
 
 Rebuild (from this folder, with the project checkout still where it was when you built):
     cargo build --release --locked --offline
 The runtime crates (recomp, mkds_native, mkds_builder) are referenced by absolute path into that checkout.
+Environment switches when running: MKDS_T1=off (exact translations only), MKDS_FLAT=1 (no fibers).
 This code is derived from copyrighted game data: keep it for your own use and do not distribute it.
 ";
 
@@ -684,6 +712,17 @@ fn main() {
     }
 }
 "#;
+
+/// Start of `main` in a `MKDS_TIMING=native` build (Block 5.4): the ARM9 code has no instruction budget, so
+/// time may only come from the native services; they are switched on unless the caller chose otherwise.
+const NATIVE_TIMING_MAIN: &str = "    // Block 5.4: built with --timing native
+    unsafe { std::env::set_var(\"MKDS_TIMING\", \"native\") };
+    for k in [\"MKDS_HW_TIME\", \"MKDS_HW_ARM7\", \"MKDS_HW_FS\"] {
+        if std::env::var_os(k).is_none() {
+            unsafe { std::env::set_var(k, \"native\") };
+        }
+    }
+";
 
 /// `--arm7-interpreted` in a diagnostics build (`--with-interpreter`).
 const INTERPRETED_ARM7: &str = "eprintln!(\"Diagnostics: ARM7 interpreted (not the shipped configuration).\");\n        mkds_native::run_from_assets(&assets, lifted::ROM_SHA256, ASSETS_SHA256, lifted::LIFTED, lifted::SEGMENT_SIGS, options)?";
@@ -820,6 +859,15 @@ pub fn build(
 
 /// Launcher mode: verify the ROM hash recorded in the bundle, then run the game.
 pub fn launch(bundle: &Path, extra: &[String]) -> Result<i32, BuildError> {
+    launch_with_env(bundle, extra, &[])
+}
+
+/// Launch with child-only environment overrides; None removes an inherited variable.
+pub fn launch_with_env(
+    bundle: &Path,
+    extra: &[String],
+    env: &[(&str, Option<&str>)],
+) -> Result<i32, BuildError> {
     let m: serde_json::Value =
         serde_json::from_slice(&std::fs::read(bundle.join("manifest.json"))?)
             .map_err(|e| BuildError(format!("Bad manifest: {e}")))?;
@@ -853,7 +901,15 @@ pub fn launch(bundle: &Path, extra: &[String]) -> Result<i32, BuildError> {
     if exe.contains(['/', '\\']) {
         return err("Manifest executable must be a plain file name.");
     }
-    let status = launch_command(bundle, &m, exe, rom, extra).status()?;
+    let mut command = launch_command(bundle, &m, exe, rom, extra);
+    for (key, value) in env {
+        if let Some(value) = value {
+            command.env(key, value);
+        } else {
+            command.env_remove(key);
+        }
+    }
+    let status = command.status()?;
     Ok(status.code().unwrap_or(1))
 }
 
@@ -892,7 +948,11 @@ fn dictionary_tables(source: &Path) -> Vec<PathBuf> {
         .into_iter()
         .flatten()
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|e| e == "csv") && *p != base && !p.ends_with("structs.csv"))
+        // name tables only: `sdk_*.csv` and `game_*.csv` (fields, field uses and globals are layout tables)
+        .filter(|p| {
+            let n = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            n.ends_with(".csv") && (n.starts_with("sdk_") || n.starts_with("game_"))
+        })
         .collect();
     refined.sort();
     let mut tables: Vec<PathBuf> = [base].into_iter().filter(|p| p.is_file()).chain(refined).collect();
@@ -916,7 +976,7 @@ mod tests {
         assert_eq!(dictionary_tables(d.path()), [d.path().join("4_docs/FUNCTION_TABLE.csv")]);
         let dict = d.path().join("dictionary");
         std::fs::create_dir(&dict).unwrap();
-        for f in ["sdk_functions.csv", "functions.csv", "game_karts.csv", "structs.csv", "export.py"] {
+        for f in ["sdk_functions.csv", "functions.csv", "game_karts.csv", "structs.csv", "fields.csv", "globals.csv", "export.py"] {
             std::fs::write(dict.join(f), "").unwrap();
         }
         let names: Vec<_> = dictionary_tables(d.path()).iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
