@@ -18,6 +18,10 @@ winit = "=0.30.13"
 gilrs = "=0.11.2"
 bytemuck = { version = "=1.25.2", features = ["derive"] }
 
+egui = { version = "=0.37.0", features = ["default_fonts"] }
+egui-winit = { version = "=0.37.0", default-features = false }
+egui-wgpu = { version = "=0.37.0", default-features = false }
+
 [features]
 # The reference interpreter (diagnostics and `mkds_runtime_probe`). Generated games depend on mkds_native with
 # `default-features = false`, so the interpreter is not compiled into the shipped game.

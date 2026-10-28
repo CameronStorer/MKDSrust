@@ -716,7 +716,21 @@ impl Launcher {
             );
         });
         ui.checkbox(&mut self.settings.smooth, "Smooth filtering");
-        ui.checkbox(&mut self.settings.fullscreen, "Start fullscreen");
+        ui.checkbox(&mut self.settings.fullscreen, "Start fullscreen / borderless");
+        ui.checkbox(&mut self.settings.vsync, "Vsync");
+        ui.checkbox(&mut self.settings.single_screen, "Single screen");
+        ui.checkbox(&mut self.settings.swap_screens, "Swap screens");
+        ui.add(egui::Slider::new(&mut self.settings.gap, 0..=192).text("Screen gap"));
+        ui.add(egui::Slider::new(&mut self.settings.window_size, 1..=4).text("Window size (DS multiples)"));
+        ui.checkbox(&mut self.settings.fps, "Show FPS counter");
+        egui::ComboBox::from_label("FPS position").selected_text(["Top left", "Top right", "Bottom left", "Bottom right"][self.settings.fps_position as usize]).show_ui(ui, |ui| {
+            for (n, label) in ["Top left", "Top right", "Bottom left", "Bottom right"].iter().enumerate() { ui.selectable_value(&mut self.settings.fps_position, n as u32, *label); }
+        });
+        ui.checkbox(&mut self.settings.frame_limiter, "Limit game speed");
+        ui.add(egui::Slider::new(&mut self.settings.speed, 25..=400).text("Speed (%)"));
+        ui.add(egui::Slider::new(&mut self.settings.volume, 0..=100).text("Master volume (%)"));
+        ui.checkbox(&mut self.settings.mute, "Mute");
+        ui.checkbox(&mut self.settings.verbose, "Verbose performance logging");
         ui.separator();
         ui.heading("Textures & customization");
         folder(ui, "Texture pack", &mut self.settings.texture_pack);
@@ -730,6 +744,9 @@ impl Launcher {
     }
     fn controls_page(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.heading("Controls");
+        ui.checkbox(&mut self.settings.touch_mouse, "Left mouse button controls touch screen");
+        ui.add(egui::Slider::new(&mut self.settings.deadzone, 5..=95).text("Controller deadzone (%)"));
+        ui.label("Rumble: off. Controller capture wizard is available in-game with F10.");
         ui.label("Capture replaces a keyboard binding. Use the menus to add multiple keys or controller bindings.");
         if let Some(action) = self.capture {
             ui.label(format!(
@@ -789,6 +806,7 @@ impl Launcher {
             }
         });
         if ui.button("Save controls").clicked() {
+            if let Err(e) = self.settings.save(&self.dir.join("settings.txt")) { self.message = e; return; }
             self.message = self
                 .controls
                 .save(&self.dir.join("controls.txt"))
