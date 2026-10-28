@@ -30,6 +30,7 @@ fn build_checks_cost(funcs: &[(String, u32, Func)], image: &[u8], base: u32, see
     let img = Image::new(base, image);
     let mut src = String::from("#![allow(non_upper_case_globals, unused)]\nstatic IMAGE: &[u8] = include_bytes!(\"image.bin\");\n");
     let mut checks = String::new();
+    let mut check_calls = String::new();
     let mut raised = 0;
     for (name, entry, f) in funcs {
         let none = |_: u32| None;
@@ -45,6 +46,8 @@ fn build_checks_cost(funcs: &[(String, u32, Func)], image: &[u8], base: u32, see
 ", rows.join(", ")));
         checks.push_str(&format!(
             r#"
+#[inline(never)]
+fn check_{name}() {{
     for seed in 0..{seeds}u64 {{
         let mut a = recomp::rt::Cpu::default();
         a.budget = [7u32, 23, 61, 150, 400, 5000][(seed % 6) as usize];
@@ -70,10 +73,13 @@ fn build_checks_cost(funcs: &[(String, u32, Func)], image: &[u8], base: u32, see
         assert_eq!(a.budget, b.budget, "{name} budget, seed {{seed}}");
         assert_eq!(x.writes, y.writes, "{name} writes, seed {{seed}}");
         assert_eq!(x.events, y.events, "{name} calls, seed {{seed}}");
-    }}"#
+    }}
+}}"#
         ));
+        check_calls.push_str(&format!("check_{name}();\n"));
     }
-    src.push_str(&format!("fn main() {{{checks}\n    println!(\"ok\");\n}}\n"));
+    src.push_str(&checks);
+    src.push_str(&format!("fn main() {{{check_calls}\n    println!(\"ok\");\n}}\n"));
     (src, raised)
 }
 
@@ -234,6 +240,97 @@ impl Drop for NativeTiming {
     }
 }
 
+#[test]
+fn constant_veneer_chain_calls_directly_and_matches_translation() {
+    use recomp::raise_emit::{set_current, set_direct, take_direct, take_facts, DirectSig};
+    let _lock = emit_lock();
+    let _native = NativeTiming::on();
+    let base = 0x0200_0000;
+    // ldr r3, [pc]; bx r3; .word veneer
+    // ldr ip, [pc]; bx ip; .word leaf
+    // Thumb: add r0, #1; bx lr (also checks interworking and the Thumb bit).
+    let words: [u32; 8] = [0xE59F_3000, 0xE12F_FF13, base + 12,
+        0xE59F_C000, 0xE12F_FF1C, base + 25, 0x4770_3001, 0];
+    let image: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let img = Image::new(base, &image);
+    let entries = [base, base + 12, base + 25];
+    let funcs: Vec<_> = entries.iter().map(|&e| discover(&img, e, Some((e & !1, (e & !1) + if e & 1 != 0 { 4 } else { 8 })), 100).unwrap()).collect();
+    // Deliberately return every register: this also checks the scratch register
+    // loaded by each veneer survives the tail call.
+    let sigs: Vec<_> = (0..3).map(|i| DirectSig { params: 0x7fff, rets: 0x7fff, name: format!("d_v{i}") }).collect();
+    set_direct(entries.iter().zip(&sigs).map(|(&e, d)| (e, vec![("arm9_main".into(), d.clone())])).collect());
+    let mut src = String::from("#![allow(unused)]\nmod direct { pub use super::*; }\n");
+    for i in 0..3 {
+        set_current("arm9_main", Some(sigs[i].clone()));
+        let t1 = emit_t1(&funcs[i], &format!("v{i}"), Some(&img)).unwrap();
+        let facts = take_facts().unwrap();
+        assert_eq!(facts.escape, None);
+        assert_eq!(facts.calls, if i < 2 { vec![entries[i + 1]] } else { vec![] });
+        let d = take_direct().unwrap();
+        assert!(!d.contains("spill!();"));
+        if i < 2 { assert!(d.contains(&format!("d_v{}(c, m", i + 1))); }
+        src.push_str(&emit_full(&funcs[i], &format!("v{i}"), Some(&img), None, true));
+        src.push_str(&t1);
+        src.push_str(&d);
+    }
+    src.push_str(r#"
+fn main() {
+    for seed in 0..200u64 {
+        let mut a = recomp::rt::Cpu::default();
+        for r in 0..15 { a.r[r] = (seed as u32).wrapping_mul(0x9e3779b9).rotate_left(r as u32); }
+        a.r[14] = 0x02000401; a.budget = 1 << 22;
+        let mut b = a.clone();
+        let mut x = recomp::mem::Ram::new(&[], 0x02000000, seed);
+        let mut y = recomp::mem::Ram::new(&[], 0x02000000, seed);
+        let p = f_v0(&mut a, &mut x, 0x02000000);
+        assert_eq!(p, 0x0200000c);
+        let p = f_v1(&mut a, &mut x, p);
+        assert_eq!(p, 0x02000019);
+        let p = f_v2(&mut a, &mut x, p);
+        let q = f_v0_t1(&mut b, &mut y, 0x02000000);
+        assert_eq!(p, q);
+        a.budget = 0; b.budget = 0;
+        assert_eq!(a.state(), b.state());
+        assert_eq!(x.writes, y.writes);
+        assert_eq!(x.events, y.events);
+    }
+}
+"#);
+    compile_and_run(&src, &image, "veneer_chain");
+}
+
+#[test]
+fn veneer_proof_keeps_unproven_and_overlay_targets_on_dispatcher() {
+    use recomp::raise_emit::{set_current, set_direct, take_facts, DirectSig};
+    let _lock = emit_lock();
+    let _native = NativeTiming::on();
+    let base = 0x0200_0000;
+    // A conditional overwrite must invalidate the literal even on the other path.
+    let words: [u32; 4] = [0xE59F_3004, 0x11A0_3000, 0xE12F_FF13, base + 0x101];
+    let image: Vec<_> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let img = Image::new(base, &image);
+    let f = discover(&img, base, Some((base, base + 12)), 100).unwrap();
+    set_current("arm9_main", None);
+    let code = emit_t1(&f, "conditional_veneer", Some(&img)).unwrap();
+    let facts = take_facts().unwrap();
+    assert!(facts.escape.is_some());
+    assert!(facts.calls.is_empty());
+    assert!(code.contains("exit!(iw(r3))"));
+
+    let words: [u32; 3] = [0xE59F_C000, 0xE12F_FF1C, base + 0x101];
+    let image: Vec<_> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let img = Image::new(base, &image);
+    let f = discover(&img, base, Some((base, base + 8)), 100).unwrap();
+    set_direct([(base + 0x101, vec![("ov9_other".into(), DirectSig {
+        params: 1 << 14, rets: 1, name: "unavailable".into(),
+    })])].into_iter().collect());
+    let code = emit_t1(&f, "overlay_veneer", Some(&img)).unwrap();
+    let facts = take_facts().unwrap();
+    assert_eq!(facts.calls, vec![base + 0x101]);
+    assert!(code.contains("exit!(iw(r12))"));
+    assert!(!code.contains("direct::unavailable"));
+}
+
 /// No-spill checks: T1 emitted without spills (block transfers on the locals, `msr` syncing only the banked
 /// registers, no budget lines) and, for closed functions that call nothing, the direct variant (registers as
 /// arguments and results) behind its T1 wrapper, against the translation with a budget so large no slice
@@ -261,7 +358,34 @@ fn build_nospill_checks(funcs: &[(String, u32, Func)], image: &[u8], base: u32, 
     }
     set_direct(sigs.iter().map(|(&e, d)| (e, vec![("arm9_main".to_string(), d.clone())])).collect());
     let mut src = String::from("#![allow(non_upper_case_globals, unused)]\nstatic IMAGE: &[u8] = include_bytes!(\"image.bin\");\nmod direct { pub use super::*; }\n");
+    // A direct call executes the guest leaf, whereas Ram::call deliberately
+    // simulates an unknown callee with random clobbers. Give T0 the same real
+    // leaves; otherwise larger samples fail when they contain both a caller
+    // and its direct callee. External calls still use the adversarial stub.
+    let leaf_cases: String = funcs.iter().filter(|(_, e, _)| sigs.contains_key(e))
+        .map(|(name, e, _)| format!("{e:#X} => return f_{name}(c, self, target),\n")).collect();
+    src.push_str(&format!(r#"
+use recomp::rt::{{Bus as _, Mem as _}};
+struct CheckBus(recomp::mem::Ram<'static>);
+impl recomp::rt::Mem for CheckBus {{
+    fn r8(&mut self, a:u32)->u8 {{ self.0.r8(a) }}
+    fn r16(&mut self, a:u32)->u16 {{ self.0.r16(a) }}
+    fn r32(&mut self, a:u32)->u32 {{ self.0.r32(a) }}
+    fn w8(&mut self, a:u32,v:u8) {{ self.0.w8(a,v) }}
+    fn w16(&mut self, a:u32,v:u16) {{ self.0.w16(a,v) }}
+    fn w32(&mut self, a:u32,v:u32) {{ self.0.w32(a,v) }}
+}}
+impl recomp::rt::Bus for CheckBus {{
+    fn call(&mut self,c:&mut recomp::rt::Cpu,target:u32,ret:u32)->u32 {{
+        match target {{ {leaf_cases} _ => self.0.call(c,target,ret) }}
+    }}
+    fn swi(&mut self,c:&mut recomp::rt::Cpu,n:u32) {{ self.0.swi(c,n) }}
+    fn mrc(&mut self,c:&mut recomp::rt::Cpu,cp:u8,op1:u8,crn:u8,crm:u8,op2:u8)->u32 {{ self.0.mrc(c,cp,op1,crn,crm,op2) }}
+    fn mcr(&mut self,c:&mut recomp::rt::Cpu,cp:u8,op1:u8,crn:u8,crm:u8,op2:u8,v:u32) {{ self.0.mcr(c,cp,op1,crn,crm,op2,v) }}
+}}
+"#));
     let mut checks = String::new();
+    let mut check_calls = String::new();
     let (mut raised, mut direct) = (0, 0);
     for (name, entry, f) in funcs {
         set_current("arm9_main", sigs.get(entry).cloned());
@@ -277,6 +401,8 @@ fn build_nospill_checks(funcs: &[(String, u32, Func)], image: &[u8], base: u32, 
         src.push_str(&t1);
         checks.push_str(&format!(
             r#"
+#[inline(never)]
+fn check_{name}() {{
     for seed in 0..{seeds}u64 {{
         let mut a = recomp::rt::Cpu::default();
         a.budget = 1 << 22;
@@ -285,8 +411,8 @@ fn build_nospill_checks(funcs: &[(String, u32, Func)], image: &[u8], base: u32, 
         a.r[13] = 0x027E_3000; a.r[14] = 0x0200_0401;
         a.n = seed & 1 != 0; a.z = seed & 2 != 0; a.c = seed & 4 != 0; a.v = seed & 8 != 0;
         let mut b = a.clone();
-        let mut x = recomp::mem::Ram::new(IMAGE, {base:#X}, seed);
-        let mut y = recomp::mem::Ram::new(IMAGE, {base:#X}, seed);
+        let mut x = CheckBus(recomp::mem::Ram::new(IMAGE, {base:#X}, seed));
+        let mut y = CheckBus(recomp::mem::Ram::new(IMAGE, {base:#X}, seed));
         let p = f_{name}(&mut a, &mut x, {entry:#X});
         let q = f_{name}_t1(&mut b, &mut y, {entry:#X});
         // a long loop can still run out (polls and budgets charge differently): no common end to compare
@@ -294,12 +420,15 @@ fn build_nospill_checks(funcs: &[(String, u32, Func)], image: &[u8], base: u32, 
         assert_eq!(p, q, "{name} exit, seed {{seed}}");
         a.budget = 0; b.budget = 0;
         assert_eq!(a.state(), b.state(), "{name} state, seed {{seed}}");
-        assert_eq!(x.writes, y.writes, "{name} writes, seed {{seed}}");
-        assert_eq!(x.events, y.events, "{name} calls, seed {{seed}}");
-    }}"#
+        assert_eq!(x.0.writes, y.0.writes, "{name} writes, seed {{seed}}");
+        assert_eq!(x.0.events, y.0.events, "{name} calls, seed {{seed}}");
+    }}
+}}"#
         ));
+        check_calls.push_str(&format!("check_{name}();\n"));
     }
-    src.push_str(&format!("fn main() {{{checks}\n    println!(\"ok\");\n}}\n"));
+    src.push_str(&checks);
+    src.push_str(&format!("fn main() {{{check_calls}\n    println!(\"ok\");\n}}\n"));
     (src, raised, direct)
 }
 
@@ -317,14 +446,19 @@ fn nospill_synthetic_functions_match_their_translation() {
     image.extend(a.iter().flat_map(|w| w.to_le_bytes()));
     image.resize(0x40, 0);
     image.extend(l.iter().flat_map(|w| w.to_le_bytes()));
+    // push {lr}; bl arm_leaf; pop {pc}. Both sides must execute the real
+    // leaf, rather than comparing a direct call against Ram's call stub.
+    image.resize(0x70, 0);
+    image.extend([0xE92D_4000u32, 0xEBFF_FFF1, 0xE8BD_8000].iter().flat_map(|w| w.to_le_bytes()));
     let img = Image::new(base, &image);
     let funcs = vec![
         ("thumb_loop".to_string(), base + 1, discover(&img, base + 1, Some((base, base + 14)), 100).unwrap()),
         ("arm_if".to_string(), base + 0x20, discover(&img, base + 0x20, Some((base + 0x20, base + 0x38)), 100).unwrap()),
         ("arm_leaf".to_string(), base + 0x40, discover(&img, base + 0x40, Some((base + 0x40, base + 0x60)), 100).unwrap()),
+        ("arm_caller".to_string(), base + 0x70, discover(&img, base + 0x70, Some((base + 0x70, base + 0x7c)), 100).unwrap()),
     ];
     let (src, raised, direct) = build_nospill_checks(&funcs, &image, base, 200);
-    assert_eq!(raised, 3, "all three are raised");
+    assert_eq!(raised, 4, "all four are raised");
     assert_eq!(direct, 2, "the two leaves get a direct variant (the loop polls)");
     compile_and_run(&src, &image, "nospill_synthetic");
 }

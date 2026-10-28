@@ -52,6 +52,8 @@ struct Ctx<'a> {
     nospill: bool,
     /// Emitting a closed function's direct variant: exits return, nothing may spill.
     selfn: bool,
+    /// Original computed jumps, retained for the exact dispatcher fallback.
+    tail_fallback: BTreeMap<(u32, u32), E>,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -63,7 +65,7 @@ struct Ctx<'a> {
 // - block transfers (`push`/`pop`/`ldm`/`stm`) work on the locals directly (no `c.r` involved);
 // - `msr` syncs only the banked registers (r8-r14) around the mode switch;
 // - a call to a *closed* function (one that can reach no safe point and never leaves raised code: no
-//   loops (they poll), no SWI, no coprocessor access, no computed call or tail jump, no exception return,
+//   loops (they poll), no SWI, no coprocessor access, no unproven computed call or tail jump, no exception return,
 //   and calls only closed functions) is a direct Rust call of its direct variant (`direct::name`), which
 //   takes the registers it reads before writing them as arguments and returns the pc it returns to plus
 //   every register it writes. Nothing can observe `c.r` while it runs, so nothing is spilled.
@@ -189,7 +191,7 @@ fn regs_ext(s: &S, all: u16, used: &mut BTreeSet<u8>, written: &mut BTreeSet<u8>
         }
         return;
     }
-    if let S::Call { target: E::Const(t), .. } = s {
+    if let S::Call { target: E::Const(t), .. } | S::Goto(E::Const(t)) = s {
         if let Some(d) = direct_for(*t) {
             used.extend(mask_regs(d.params));
             written.extend(mask_regs(d.rets));
@@ -342,6 +344,12 @@ fn preserved_regs(blocks: &BTreeMap<u32, Block>, order: &[u32], entry: u32, all:
             if dbg { eprintln!("retdbg {b:#X} pop pc {v:?} regs {:?}", x.regs); }
         }
         if let S::Goto(e) = s {
+            if let E::Const(t) = e {
+                if !internal(*t) {
+                    // A tail callee returns using our current lr, without setting a new one.
+                    *ret_ok &= matches!(x.regs[14], Sym::Entry(14) | Sym::Banked(14));
+                }
+            }
             if !matches!(e, E::Const(_)) && !switches.contains_key(&b) {
                 let t = match e {
                     E::Iw(y) => &**y,
@@ -352,7 +360,13 @@ fn preserved_regs(blocks: &BTreeMap<u32, Block>, order: &[u32], entry: u32, all:
                 if dbg { eprintln!("retdbg {b:#X} goto {:?} = {:?} regs {:?} slots {:?}", t, x.eval(t), x.regs, x.slots); }
             }
         }
-        step_sym(x, s, all, kept);
+        if let S::Goto(E::Const(t)) = s {
+            if !internal(*t) {
+                step_sym(x, &S::Call { target: E::Const(*t), ret: 0 }, all, kept);
+            }
+        } else {
+            step_sym(x, s, all, kept);
+        }
         match s {
             S::Goto(E::Const(t)) if internal(*t) => {
                 let t = (t & !1) | thumb;
@@ -553,12 +567,12 @@ fn step_sym(st: &mut SymState, s: &S, all: u16, kept: &dyn Fn(u32) -> Option<u16
 }
 
 /// Why a statement keeps the function from being closed (no-spill mode), if it does.
-fn stmt_escape(s: &S, internal: &dyn Fn(u32) -> bool) -> Option<&'static str> {
+fn stmt_escape(s: &S) -> Option<&'static str> {
     let bad = |h: H| matches!(h, H::Swi | H::BlockUser | H::Mrc | H::Mcr);
     match s {
         S::Call { target: E::Const(_), .. } => None,
         S::Call { .. } => Some("computed call"),
-        S::Goto(E::Const(t)) => (!internal(*t)).then_some("tail jump"),
+        S::Goto(E::Const(_)) => None,
         S::Goto(e) => has_helper(e, &bad).then_some("helper"),
         S::ExcReturn(_) => Some("exception return"),
         S::IfSome(..) => block_return(s).is_none().then_some("exception return"),
@@ -1932,6 +1946,56 @@ pub fn emit_t1_annotated(f: &Func, id: &str, img: Option<&Image>, notes: &Notes)
 /// [`crate::lift::emit_cost`] (the ARM7 charges cycles); `None` charges one per instruction.
 pub type Cost<'a> = Option<&'a dyn Fn(&crate::arm::Decoded, bool) -> u32>;
 
+/// Prove block-local constant BX targets. Never carry values across a call, helper,
+/// conditional write or block boundary. Literal-pool loads have already been folded
+/// by lowering; arbitrary memory reads are deliberately not evaluated here.
+fn constant_tails(insts: &mut [ir::Ins], f: &Func, thumb: u32, block: u32, fallback: &mut BTreeMap<(u32, u32), E>) {
+    fn value(e: &E, regs: &HashMap<u8, u32>, temps: &HashMap<ir::Tmp, u32>) -> Option<u32> {
+        match e {
+            E::Const(v) => Some(*v),
+            E::Reg(r) => regs.get(r).copied(),
+            E::Tmp(t) => temps.get(t).copied(),
+            E::Iw(e) => value(e, regs, temps).map(|v| if v & 1 != 0 { v } else { v & !3 }),
+            _ => None,
+        }
+    }
+    let mut regs = HashMap::new();
+    for ins in insts {
+        let unconditional = ins.cond == 14 && ins.guard.is_none();
+        let mut temps = HashMap::new();
+        for s in &mut ins.stmts {
+            if let S::Goto(e) = s {
+                if let Some(t) = value(e, &regs, &temps) {
+                    if !f.blocks.contains(&((t & !1) | thumb)) {
+                        fallback.insert((block, t), e.clone());
+                        *e = E::Const(t);
+                    }
+                }
+            }
+            match s {
+                S::Let(t, e) => {
+                    if let Some(v) = value(e, &regs, &temps) { temps.insert(*t, v); }
+                    else { temps.remove(t); }
+                }
+                S::Let2(a, b, _) => {
+                    temps.remove(a);
+                    temps.remove(b);
+                }
+                S::SetReg(r, e) => {
+                    let v = unconditional.then(|| value(e, &regs, &temps)).flatten();
+                    if let Some(v) = v { regs.insert(*r, v); }
+                    else { regs.remove(r); }
+                }
+                S::Call { .. } | S::Do(_) | S::IfSome(..) | S::ExcReturn(_) => {
+                    regs.clear();
+                    temps.clear();
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
 /// [`emit_t1_annotated`] with the translation's budget cost model.
 pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost: Cost) -> Result<String, Reason> {
     let names = notes.call;
@@ -1939,6 +2003,7 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
     // blocks reachable from the entry through internal edges
     let mut blocks: BTreeMap<u32, Block> = BTreeMap::new();
     let mut switches: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
+    let mut tail_fallback = BTreeMap::new();
     let mut work = vec![f.entry];
     while let Some(b) = work.pop() {
         if blocks.contains_key(&b) || !f.blocks.contains(&b) {
@@ -1954,6 +2019,9 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
         for ins in &mut insts {
             crate::raise::drop_dead_flags(&mut ins.stmts, live[&ins.addr]);
             ir::fold_temps(&mut ins.stmts);
+        }
+        if cost.is_none() && nospill_enabled() {
+            constant_tails(&mut insts, f, thumb, b, &mut tail_fallback);
         }
         fold_compares(&mut insts, &live);
         join_runs(&mut insts);
@@ -2130,11 +2198,14 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
             for ins in &b.insts {
                 for s in &ins.stmts {
                     regs_ext(s, all0, &mut u2, &mut w2);
-                    if let Some(e) = stmt_escape(s, &internal) {
+                    if let Some(e) = stmt_escape(s) {
                         escape.get_or_insert(e);
                     }
                     if let S::Call { target: E::Const(t), .. } = s {
                         calls.push(*t);
+                    }
+                    if let S::Goto(E::Const(t)) = s {
+                        if !internal(*t) { calls.push(*t); }
                     }
                 }
                 if let Some(g) = &ins.guard {
@@ -2214,7 +2285,7 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
         Some(n) => format!("r{r} = `{n}` (a `{st}`)"),
         None => format!("r{r} points to a `{st}`"),
     }).collect();
-    let ctx = Ctx { blocks: &blocks, rpo, idom, merge, header, children, names, notes, switches: &switches, fields: typed.fields, budget_flags, native_timing: cost.is_none() && crate::lift::timing_native(), nospill, selfn: own.is_some() };
+    let ctx = Ctx { blocks: &blocks, rpo, idom, merge, header, children, names, notes, switches: &switches, fields: typed.fields, budget_flags, native_timing: cost.is_none() && crate::lift::timing_native(), nospill, selfn: own.is_some(), tail_fallback };
     ir::set_reg_names(reg_names);
     LAST_TYPES.with(|t| *t.borrow_mut() = (typed.args.clone(), typed.calls.clone()));
     ir::take_field_uses();
@@ -2449,7 +2520,19 @@ fn stmt_code(c: &Ctx, x: u32, s: &S, depth: usize, out: &mut String) {
             line(out, "    t => exit!(t),");
             line(out, "}");
         }
-        S::Goto(e) => line(out, &format!("exit!({});", ir::expr_locals(e))),
+        S::Goto(E::Const(t)) if c.selfn && direct_for(*t).is_some() => {
+            let d = direct_for(*t).unwrap();
+            let args: String = mask_regs(d.params).map(|i| format!(", {}", ir::reg_name(i))).collect();
+            let call = format!("{}(c, m{args})", d.name);
+            let rets: Vec<String> = mask_regs(d.rets).map(ir::reg_name).collect();
+            let stmt = if rets.is_empty() { format!("let x = {call};") }
+                else { format!("let x: u32; (x, {}) = {call};", rets.join(", ")) };
+            line(out, &format!("{stmt} exit!(x);"));
+        }
+        S::Goto(e) => {
+            let original = match e { E::Const(t) => c.tail_fallback.get(&(x, *t)).unwrap_or(e), _ => e };
+            line(out, &format!("exit!({});", ir::expr_locals(original)));
+        }
         S::ExcReturn(e) => {
             let v = ir::expr_locals(e);
             line(out, &format!("spill!(); let v = {v}; let th = c.restore_spsr(); leave!(if th {{ v | 1 }} else {{ v & !3 }});"))
