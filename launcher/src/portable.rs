@@ -6,19 +6,29 @@ use std::{
     process::{Command, Stdio},
 };
 pub const VERSION: &str = "1.96.0";
-pub const TARGET: &str = "x86_64-pc-windows-gnu";
+pub const TARGET: &str = mkds_builder::build::PORTABLE_GNU_TARGET;
+/// llvm-mingw (github.com/mstorsjo/llvm-mingw) supplies the dlltool for raw-dylib imports. Pinned release and the
+/// SHA-256 GitHub publishes for `llvm-mingw-<release>-ucrt-x86_64.zip`.
+pub const LLVM_MINGW: &str = "20261020";
+pub const LLVM_MINGW_SHA256: &str = "fd5462b7f5d93b2ff981fcd3f9c7e427e47f3203c64ea91c27bcc444eebd74cd";
 pub fn root(data: &Path) -> PathBuf {
     data.join("toolchain").join(format!("{VERSION}-{TARGET}"))
 }
+fn llvm_mingw(dir: &Path) -> PathBuf {
+    dir.join("llvm-mingw")
+}
 pub fn ready(data: &Path) -> bool {
-    [
-        "complete",
-        "bin/rustc.exe",
-        "bin/cargo.exe",
-        "lib/rustlib/x86_64-pc-windows-gnu/lib",
-    ]
-    .iter()
-    .all(|p| root(data).join(p).exists())
+    let complete = std::fs::read_to_string(root(data).join("complete")).unwrap_or_default();
+    complete.trim() == format!("{VERSION} llvm-mingw-{LLVM_MINGW}")
+        && [
+            "bin/rustc.exe",
+            "bin/cargo.exe",
+            "lib/rustlib/x86_64-pc-windows-gnu/lib",
+            "lib/rustlib/x86_64-pc-windows-gnu/bin/rust-lld.exe",
+            "llvm-mingw/bin/x86_64-w64-mingw32-dlltool.exe",
+        ]
+        .iter()
+        .all(|p| root(data).join(p).exists())
 }
 fn forward(reader: impl std::io::Read, tx: std::sync::mpsc::Sender<String>) {
     use std::io::Read;
@@ -90,6 +100,34 @@ mod tests {
         );
     }
     #[test]
+    fn portable_toolchain_uses_llvm_mingw_and_lld() {
+        let data = tempfile::tempdir().unwrap();
+        let dir = root(data.path());
+        let t = toolchain(&dir);
+        assert_eq!(t.cargo, dir.join("bin/cargo.exe"));
+        let flags = t.rustflags.join(" ");
+        assert!(flags.contains("llvm-mingw") && flags.contains("dlltool.exe"));
+        assert!(flags.contains("rust-lld.exe") && !flags.contains("--target"));
+        assert!(t.path.contains(&dir.join("llvm-mingw/bin")));
+        assert!(!ready(data.path()));
+        for p in [
+            "bin/rustc.exe",
+            "bin/cargo.exe",
+            "lib/rustlib/x86_64-pc-windows-gnu/lib/x",
+            "lib/rustlib/x86_64-pc-windows-gnu/bin/rust-lld.exe",
+            "llvm-mingw/bin/x86_64-w64-mingw32-dlltool.exe",
+        ] {
+            std::fs::create_dir_all(dir.join(p).parent().unwrap()).unwrap();
+            std::fs::write(dir.join(p), "").unwrap();
+        }
+        // An older install (Rust only) is completed again with llvm-mingw.
+        std::fs::write(dir.join("complete"), VERSION).unwrap();
+        assert!(!ready(data.path()));
+        std::fs::write(dir.join("complete"), format!("{VERSION} llvm-mingw-{LLVM_MINGW}\r\n")).unwrap();
+        assert!(ready(data.path()));
+        assert_eq!(LLVM_MINGW_SHA256.len(), 64);
+    }
+    #[test]
     fn progress_splits_carriage_returns_and_newlines() {
         let (tx, rx) = std::sync::mpsc::channel();
         forward(&b"10%\r20%\r\nverified\ncomplete"[..], tx);
@@ -142,13 +180,18 @@ pub fn install(data: &Path, log: &mut dyn FnMut(String)) -> Result<Toolchain, St
                 .arg("-Destination")
                 .arg(&dir)
                 .arg("-Version")
-                .arg(VERSION),
+                .arg(VERSION)
+                .arg("-LlvmMingw")
+                .arg(LLVM_MINGW)
+                .arg("-LlvmMingwSha256")
+                .arg(LLVM_MINGW_SHA256),
             log,
         )?;
     }
-    Ok(Toolchain {
-        cargo: dir.join("bin/cargo.exe"),
-        rustc: dir.join("bin/rustc.exe"),
-        target: TARGET.into(),
-    })
+    Ok(toolchain(&dir))
+}
+/// GNU build: llvm-mingw's dlltool, rust-lld as the linker (GNU ld mislinks raw-dylib imports and the game
+/// crashes at start-up), no `--target`; see `Toolchain::portable_gnu`.
+fn toolchain(dir: &Path) -> Toolchain {
+    Toolchain::portable_gnu(dir, &llvm_mingw(dir))
 }

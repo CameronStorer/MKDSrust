@@ -350,7 +350,46 @@ pub fn recompile(
 pub struct Toolchain {
     pub cargo: PathBuf,
     pub rustc: PathBuf,
-    pub target: String,
+    /// Passed to every rustc (build scripts and proc-macros too) as `CARGO_ENCODED_RUSTFLAGS`.
+    pub rustflags: Vec<String>,
+    /// Prepended to the child PATH (linker helpers and the DLLs they load).
+    pub path: Vec<PathBuf>,
+}
+
+/// Host triple of the portable toolchain. It is the host, so Cargo gets no `--target`: the flags below then
+/// reach build scripts and proc-macros as well.
+pub const PORTABLE_GNU_TARGET: &str = "x86_64-pc-windows-gnu";
+
+impl Toolchain {
+    /// The portable Rust `x86_64-pc-windows-gnu` toolchain at `root` (rustc, cargo, rust-std, rust-mingw) plus an
+    /// extracted llvm-mingw at `llvm_mingw`.
+    /// - `-Cdlltool`: raw-dylib imports (windows-link) need a dlltool; Rust's bundled one needs `as.exe`,
+    ///   which isn't shipped, so llvm-mingw's llvm-dlltool makes the import libraries.
+    /// - `rust-lld`: GNU ld (Rust's self-contained `ld.exe`) mislinks those llvm-dlltool import libraries.
+    ///   Some imports (e.g. kernel32 `GetCurrentThreadId`) end up in the IAT without an import descriptor, so
+    ///   the loader never binds them and the first call (winit's start-up initializer) jumps to a hint/name RVA
+    ///   and crashes before `main`. lld builds the import table itself and links them correctly.
+    /// - `-Clink-self-contained=yes`: rust-mingw's CRT objects and import libraries (no system MinGW needed).
+    pub fn portable_gnu(root: &Path, llvm_mingw: &Path) -> Toolchain {
+        let rustlib = root.join("lib/rustlib").join(PORTABLE_GNU_TARGET).join("bin");
+        let flag = |name: &str, p: PathBuf| format!("-C{name}={}", p.display());
+        Toolchain {
+            cargo: root.join("bin/cargo.exe"),
+            rustc: root.join("bin/rustc.exe"),
+            rustflags: vec![
+                flag("dlltool", llvm_mingw.join("bin/x86_64-w64-mingw32-dlltool.exe")),
+                flag("linker", rustlib.join("rust-lld.exe")),
+                "-Clinker-flavor=ld.lld".into(),
+                "-Clink-self-contained=yes".into(),
+            ],
+            path: vec![
+                root.join("bin"),
+                rustlib.clone(),
+                rustlib.join("self-contained"),
+                llvm_mingw.join("bin"),
+            ],
+        }
+    }
 }
 
 pub fn recompile_with_toolchain(
@@ -411,14 +450,13 @@ pub fn recompile_with_toolchain(
         if let Some(t) = toolchain {
             c.env("RUSTC", &t.rustc)
                 .env("RUSTDOC", t.rustc.with_file_name("rustdoc.exe"));
-            c.env("CARGO_BUILD_TARGET", &t.target);
-            // Only child PATH: DLLs and rust-mingw linker tools need to be discoverable.
-            let root = t.rustc.parent().unwrap();
-            let mut paths = vec![
-                root.to_path_buf(),
-                root.join(format!("../lib/rustlib/{}/bin", t.target)),
-                root.join(format!("../lib/rustlib/{}/bin/self-contained", t.target)),
-            ];
+            // No `--target`/CARGO_BUILD_TARGET: the toolchain's host is its target, so the flags apply to
+            // build scripts and proc-macros too. The encoded form keeps paths with spaces intact.
+            c.env_remove("CARGO_BUILD_TARGET")
+                .env_remove("RUSTFLAGS")
+                .env("CARGO_ENCODED_RUSTFLAGS", t.rustflags.join("\u{1f}"));
+            // Only child PATH: DLLs and linker tools need to be discoverable.
+            let mut paths = t.path.clone();
             paths.extend(std::env::split_paths(
                 &std::env::var_os("PATH").unwrap_or_default(),
             ));
@@ -463,9 +501,6 @@ pub fn recompile_with_toolchain(
         .env_remove("MKDS_FUNCTIONS")
         .env_remove("MKDS_LIFT_CAP");
     offline(&mut gen_build);
-    if let Some(t) = toolchain {
-        gen_build.args(["--target", &t.target]);
-    }
     let generator = run_cargo(gen_build, log)?
         .remove("mkds_gen")
         .ok_or_else(|| BuildError("Cargo did not report the mkds_gen executable.".into()))?;
@@ -667,9 +702,6 @@ pub fn recompile_with_toolchain(
         .arg(&target_dir)
         .current_dir(stage.path());
     offline(&mut build_cmd);
-    if let Some(t) = toolchain {
-        build_cmd.args(["--target", &t.target]);
-    }
     let mut built = run_cargo(build_cmd, log)?;
     let exe = built
         .remove("game")
@@ -1107,6 +1139,19 @@ fn dictionary_tables(source: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portable_gnu_links_with_lld_and_llvm_dlltool() {
+        let t = Toolchain::portable_gnu(Path::new("C:/tc dir"), Path::new("C:/tc dir/llvm-mingw"));
+        assert_eq!(t.rustc, Path::new("C:/tc dir/bin/rustc.exe"));
+        let f = &t.rustflags;
+        assert!(f.iter().all(|a| !a.contains("--target")));
+        assert!(f[0].starts_with("-Cdlltool=C:/tc dir/llvm-mingw") && f[0].ends_with("x86_64-w64-mingw32-dlltool.exe"));
+        assert!(f[1].starts_with("-Clinker=C:/tc dir") && f[1].contains("x86_64-pc-windows-gnu") && f[1].ends_with("rust-lld.exe"));
+        assert_eq!(f[2..], ["-Clinker-flavor=ld.lld", "-Clink-self-contained=yes"]);
+        assert!(t.path.iter().any(|p| p.ends_with("self-contained")));
+        assert!(t.path.contains(&Path::new("C:/tc dir/llvm-mingw").join("bin")));
+    }
 
     #[test]
     fn dictionary_tables_come_in_override_order() {

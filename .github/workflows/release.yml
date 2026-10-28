@@ -16,14 +16,21 @@ jobs:
         shell: pwsh
         run: |
           $toolchain = Join-Path $env:RUNNER_TEMP 'mkds-portable-rust'
-          & ./launcher/install-toolchain.ps1 -Destination $toolchain -Version '1.96.0'
+          # Same pins as the launcher (launcher/src/portable.rs).
+          $portable = Get-Content -Raw launcher/src/portable.rs
+          $llvm = [regex]::Match($portable, 'LLVM_MINGW: &str = "([^"]+)"').Groups[1].Value
+          $llvmSha = [regex]::Match($portable, 'LLVM_MINGW_SHA256: &str = "([^"]+)"').Groups[1].Value
+          & ./launcher/install-toolchain.ps1 -Destination $toolchain -Version '1.96.0' -LlvmMingw $llvm -LlvmMingwSha256 $llvmSha
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # The builder's portable GNU setup (Toolchain::portable_gnu): llvm-mingw dlltool, rust-lld, no --target.
+          $rustlib = "$toolchain/lib/rustlib/x86_64-pc-windows-gnu/bin"
           $env:RUSTC = Join-Path $toolchain 'bin/rustc.exe'
           $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP 'mkds-gnu-target'
-          $env:PATH = "$toolchain/bin;$toolchain/lib/rustlib/x86_64-pc-windows-gnu/bin;$toolchain/lib/rustlib/x86_64-pc-windows-gnu/bin/self-contained;$env:PATH"
-          & "$toolchain/bin/cargo.exe" build --release --locked --target x86_64-pc-windows-gnu --manifest-path 2_native_game/Cargo.toml --features gen --bin mkds_gen
+          $env:CARGO_ENCODED_RUSTFLAGS = @("-Cdlltool=$toolchain/llvm-mingw/bin/x86_64-w64-mingw32-dlltool.exe", "-Clinker=$rustlib/rust-lld.exe", '-Clinker-flavor=ld.lld', '-Clink-self-contained=yes') -join [char]0x1f
+          $env:PATH = "$toolchain/bin;$rustlib;$rustlib/self-contained;$toolchain/llvm-mingw/bin;$env:PATH"
+          & "$toolchain/bin/cargo.exe" build --release --locked --manifest-path 2_native_game/Cargo.toml --features gen --bin mkds_gen
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          & "$toolchain/bin/cargo.exe" build --release --locked --target x86_64-pc-windows-gnu --manifest-path 2_native_game/native/Cargo.toml --bin mkds_runtime_probe
+          & "$toolchain/bin/cargo.exe" build --release --locked --manifest-path 2_native_game/native/Cargo.toml --bin mkds_runtime_probe
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Test builder and launcher
         shell: pwsh
