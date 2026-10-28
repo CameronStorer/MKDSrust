@@ -2421,10 +2421,12 @@ name = "mkds_launcher"
 version = "0.1.0"
 dependencies = [
  "eframe",
+ "image",
  "mkds_builder",
  "rfd",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "tempfile",
 ]
 

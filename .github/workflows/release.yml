@@ -1,0 +1,53 @@
+name: Release launcher
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.96.0'
+      - name: Verify portable GNU generator and native runtime (no ROM)
+        shell: pwsh
+        run: |
+          $toolchain = Join-Path $env:RUNNER_TEMP 'mkds-portable-rust'
+          & ./launcher/install-toolchain.ps1 -Destination $toolchain -Version '1.96.0'
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $env:RUSTC = Join-Path $toolchain 'bin/rustc.exe'
+          $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP 'mkds-gnu-target'
+          $env:PATH = "$toolchain/bin;$toolchain/lib/rustlib/x86_64-pc-windows-gnu/bin;$toolchain/lib/rustlib/x86_64-pc-windows-gnu/bin/self-contained;$env:PATH"
+          & "$toolchain/bin/cargo.exe" build --release --locked --target x86_64-pc-windows-gnu --manifest-path 2_native_game/Cargo.toml --features gen --bin mkds_gen
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          & "$toolchain/bin/cargo.exe" build --release --locked --target x86_64-pc-windows-gnu --manifest-path 2_native_game/native/Cargo.toml --bin mkds_runtime_probe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Test builder and launcher
+        shell: pwsh
+        run: |
+          cargo test --release --locked --manifest-path 1_build_tool/Cargo.toml
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo test --release --locked --manifest-path launcher/Cargo.toml
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cargo build --release --locked --manifest-path launcher/Cargo.toml
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Package only launcher and notices
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory package
+          Copy-Item launcher/target/release/MKDSrust.exe package/
+          Copy-Item LICENSE package/
+          Copy-Item launcher/README.txt package/
+          Compress-Archive -Path package/* -DestinationPath MKDSrust-windows-x64.zip
+      - name: Publish tag artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh release view $env:GITHUB_REF_NAME
+          if ($LASTEXITCODE) { gh release create $env:GITHUB_REF_NAME --verify-tag --generate-notes }
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          gh release upload $env:GITHUB_REF_NAME MKDSrust-windows-x64.zip --clobber
