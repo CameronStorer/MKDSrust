@@ -6,7 +6,7 @@ address,segment,name
 0x037F81C4,arm7_auto_037F8000,os_is_debug_unit_maybe
 0x037F81E8,arm7_auto_037F8000,nvram_is_ds_lite_maybe
 0x037F8228,arm7_auto_037F8000,os_load_user_settings
-0x037F83C0,arm7_auto_037F8000,os_init_main_heap_maybe
+0x037F83C0,arm7_auto_037F8000,arm7_init_main_heap
 0x037F846C,arm7_auto_037F8000,arm7_main
 0x037F8528,arm7_auto_037F8000,svc_halt_veneer
 0x037F8534,arm7_auto_037F8000,os_irq_handler
@@ -29,16 +29,16 @@ address,segment,name
 0x037F88F8,arm7_auto_037F8000,os_set_timer_irq_handler
 0x037F8944,arm7_auto_037F8000,os_set_irq_function
 0x037F89EC,arm7_auto_037F8000,os_clear_irq_check_flags
-0x037F8A10,arm7_auto_037F8000,veneer_maybe
+0x037F8A10,arm7_auto_037F8000,os_unlock_cartridge_thunk
 0x037F8A1C,arm7_auto_037F8000,os_get_lock_id
 0x037F8AB4,arm7_auto_037F8000,os_release_lock_id
-0x037F8AE4,arm7_auto_037F8000,os_spin_wait_4096_maybe
+0x037F8AE4,arm7_auto_037F8000,os_spin_wait_4096
 0x037F8AF4,arm7_auto_037F8000,os_read_owner_of_lock
 0x037F8AFC,arm7_auto_037F8000,empty_function_7f8afc
 0x037F8B00,arm7_auto_037F8000,empty_function_7f8b00
 0x037F8B04,arm7_auto_037F8000,os_try_lock_cartridge
 0x037F8B24,arm7_auto_037F8000,os_unlock_cartridge
-0x037F8B44,arm7_auto_037F8000,os_lock_cartridge_maybe
+0x037F8B44,arm7_auto_037F8000,os_lock_cartridge
 0x037F8B64,arm7_auto_037F8000,os_try_lock_common
 0x037F8BE8,arm7_auto_037F8000,os_unlock_common
 0x037F8C74,arm7_auto_037F8000,os_lock_common
@@ -48,7 +48,7 @@ address,segment,name
 0x037F8D40,arm7_auto_037F8000,os_enable_scheduler
 0x037F8D78,arm7_auto_037F8000,os_disable_scheduler
 0x037F8DB0,arm7_auto_037F8000,os_set_switch_thread_callback
-0x037F8DE4,arm7_auto_037F8000,os_wakeup_thread_from_queue_maybe
+0x037F8DE4,arm7_auto_037F8000,os_wakeup_thread_from_queue
 0x037F8E04,arm7_auto_037F8000,os_sleep
 0x037F8E98,arm7_auto_037F8000,os_set_thread_priority
 0x037F8F48,arm7_auto_037F8000,os_reschedule_thread
@@ -74,7 +74,7 @@ address,segment,name
 0x037F96DC,arm7_auto_037F8000,os_save_context
 0x037F970C,arm7_auto_037F8000,empty_function_7f970c
 0x037F9710,arm7_auto_037F8000,os_load_context
-0x037F973C,arm7_auto_037F8000,os_read_message_maybe
+0x037F973C,arm7_auto_037F8000,OS_ReadMessage
 0x037F97B4,arm7_auto_037F8000,os_receive_message
 0x037F9854,arm7_auto_037F8000,os_send_message
 0x037F98E8,arm7_auto_037F8000,os_init_message_queue
@@ -121,7 +121,7 @@ address,segment,name
 0x037FA9BC,arm7_auto_037F8000,os_valarm_irq_handler
 0x037FAB44,arm7_auto_037F8000,os_cancel_valarms_by_tag
 0x037FABC0,arm7_auto_037F8000,os_cancel_valarm
-0x037FAC14,arm7_auto_037F8000,os_valarm_set_tag_maybe
+0x037FAC14,arm7_auto_037F8000,os_valarm_set_tag
 0x037FAC40,arm7_auto_037F8000,os_valarm_set_vcount_irq
 0x037FAC9C,arm7_auto_037F8000,os_set_valarm
 0x037FAD34,arm7_auto_037F8000,os_set_periodic_valarm
@@ -162,7 +162,7 @@ address,segment,name
 0x037FB698,arm7_auto_037F8000,pxi_is_remote_callback_ready
 0x037FB6C0,arm7_auto_037F8000,pxi_set_fifo_recv_callback
 0x037FB72C,arm7_auto_037F8000,pxi_init
-0x037FB808,arm7_auto_037F8000,os_set_rcnt_mode_maybe
+0x037FB808,arm7_auto_037F8000,os_set_rcnt_mode
 0x037FB824,arm7_auto_037F8000,os_set_rcnt_bits
 0x037FB844,arm7_auto_037F8000,pad_update_xy_hinge_buttons
 0x037FB884,arm7_auto_037F8000,start_periodic_poll_alarm_maybe
@@ -227,7 +227,7 @@ address,segment,name
 0x037FCC24,arm7_auto_037F8000,snd_ex_channel_release
 0x037FCC30,arm7_auto_037F8000,snd_ex_channel_set_release_rate
 0x037FCC4C,arm7_auto_037F8000,snd_ex_channel_set_decay
-0x037FCC54,arm7_auto_037F8000,snd_ex_channel_set_sustain_rate_maybe
+0x037FCC54,arm7_auto_037F8000,snd_channel_set_converted_rate_maybe
 0x037FCC70,arm7_auto_037F8000,snd_ex_channel_set_attack
 0x037FCC94,arm7_auto_037F8000,snd_ex_channel_update_envelope
 0x037FCD48,arm7_auto_037F8000,snd_ex_channel_start_noise
@@ -419,7 +419,7 @@ address,segment,name
 0x03803E7C,arm7_auto_037F8000,ctrdg_pxi_receive_callback
 0x03803EB4,arm7_auto_037F8000,ctrdg_check_cartridge_maybe
 0x03803F9C,arm7_auto_037F8000,ctrdg_init
-0x03803FF8,arm7_auto_037F8000,nvram_is_write_enabled_maybe
+0x03803FF8,arm7_auto_037F8000,nvram_is_ready_for_write
 0x03804030,arm7_auto_037F8000,nvram_is_ready
 0x0380405C,arm7_auto_037F8000,nvram_execute_command
 0x03804338,arm7_auto_037F8000,nvram_pxi_receive
@@ -447,8 +447,8 @@ address,segment,name
 0x03805584,arm7_auto_037F8000,rtc_pxi_receive
 0x038056C0,arm7_auto_037F8000,rtc_init
 0x038057B4,arm7_auto_037F8000,rtc_transfer
-0x03805818,arm7_auto_037F8000,rtc_check_date_fields_maybe
-0x03805930,arm7_auto_037F8000,rtc_check_time_fields_maybe
+0x03805818,arm7_auto_037F8000,rtc_convert_hour_to_24h
+0x03805930,arm7_auto_037F8000,rtc_convert_hour_to_12h
 0x03805A58,arm7_auto_037F8000,rtc_write_free_register
 0x03805A84,arm7_auto_037F8000,rtc_read_free_register
 0x03805AB0,arm7_auto_037F8000,rtc_write_clock_adjust
@@ -502,14 +502,14 @@ address,segment,name
 0x0380706C,arm7_auto_037F8000,data_words_not_code_80706c
 0x03807070,arm7_auto_037F8000,data_words_not_code_807070
 0x03807120,arm7_auto_037F8000,os_reset_system_jump
-0x03807194,arm7_auto_037F8000,os_reset_system_tail_maybe
+0x03807194,arm7_auto_037F8000,os_reset_system_tail
 0x038071B0,arm7_auto_037F8000,data_words_not_code_8071b0
 0x03807254,arm7_auto_037F8000,data_words_not_code_807254
 0x038072F8,arm7_auto_037F8000,wm_pick_channel_maybe
 0x03807424,arm7_auto_037F8000,wm_lock_send_buffer
 0x03807480,arm7_auto_037F8000,wm_wait_send_buffer_free
 0x038074CC,arm7_auto_037F8000,wm_send_and_unlock
-0x06000000,arm7_auto_06000000,wm_take_free_buffer_slot_maybe
+0x06000000,arm7_auto_06000000,wm_take_free_buffer_slot
 0x06000070,arm7_auto_06000000,os_disable_interrupts_veneer
 0x06000078,arm7_auto_06000000,os_restore_interrupts_veneer
 0x06000080,arm7_auto_06000000,wm_send_simple_callback
@@ -761,7 +761,7 @@ address,segment,name
 0x06009860,arm7_auto_06000000,wl_start_timeout_alarm_us
 0x060098D4,arm7_auto_06000000,wl_start_timeout_alarm
 0x0600993C,arm7_auto_06000000,wl_retry_alarm_handler_maybe
-0x060099BC,arm7_auto_06000000,wl_cancel_retry_alarm_maybe
+0x060099BC,arm7_auto_06000000,wl_cancel_retry_alarm
 0x060099E0,arm7_auto_06000000,wl_start_retry_alarm_periodic
 0x06009A60,arm7_auto_06000000,os_set_periodic_alarm_veneer
 0x06009A68,arm7_auto_06000000,wifi_delay_us
@@ -1102,7 +1102,7 @@ address,segment,name
 0x06019080,arm7_auto_06000000,data_words_not_code_019080
 0x02380000,arm7_main,crt0_start
 0x02380100,arm7_main,crt0_do_autoload
-0x0238015C,arm7_main,crt0_detect_main_memory_size_maybe
+0x0238015C,arm7_main,crt0_detect_main_memory_size
 0x02380198,arm7_main,data_words_not_code
 0x01FF9048,arm9_autoload1_itcm,gx_send_geometry_commands
 0x01FF9C40,arm9_autoload1_itcm,kart_integrate_motion_maybe_ff9c40
@@ -1125,7 +1125,7 @@ address,segment,name
 0x01FFBE04,arm9_autoload1_itcm,kart_update_speed_limit
 0x01FFBE70,arm9_autoload1_itcm,kart_update_speed_ffbe70
 0x01FFC008,arm9_autoload1_itcm,kart_calc_collision_sphere_center
-0x01FFC064,arm9_autoload1_itcm,kart_transform_matrix_maybe
+0x01FFC064,arm9_autoload1_itcm,kart_add_radius_scaled_vector
 0x01FFC090,arm9_autoload1_itcm,kart_update_steering_ffc090
 0x01FFC158,arm9_autoload1_itcm,kart_update_steering_ffc158
 0x01FFC27C,arm9_autoload1_itcm,kart_update_steering_ffc27c
@@ -1231,12 +1231,12 @@ address,segment,name
 0x0200C657,arm9_main,return_with_stack_cleanup_maybe_00c657
 0x0200C659,arm9_main,return_from_function_maybe_00c659
 0x0200C6AD,arm9_main,return_with_stack_cleanup_maybe_00c6ad
-0x0200C914,arm9_main,os_set_irq_callback_7_maybe
-0x0200C924,arm9_main,os_set_irq_callback_6_maybe
-0x0200C934,arm9_main,os_set_irq_callback_5_maybe
-0x0200C954,arm9_main,os_set_irq_callback_3_maybe
-0x0200C964,arm9_main,set_mode_two_maybe
-0x0200C974,arm9_main,set_mode_one_maybe
+0x0200C914,arm9_main,os_dispatch_irq_callback_seven
+0x0200C924,arm9_main,os_dispatch_irq_callback_six
+0x0200C934,arm9_main,os_dispatch_irq_callback_five
+0x0200C954,arm9_main,os_dispatch_irq_callback_three
+0x0200C964,arm9_main,os_dispatch_irq_callback_two
+0x0200C974,arm9_main,os_dispatch_irq_callback_one
 0x0200CBE8,arm9_main,os_get_first_irq_handler
 0x0200E1A0,arm9_main,return_from_function_maybe_00e1a0
 0x0200E1A8,arm9_main,restore_masked_status_maybe_00e1a8
@@ -1337,7 +1337,7 @@ address,segment,name
 0x02017770,arm9_main,mem_free_heap_block
 0x020177B0,arm9_main,mem_resize_heap_block
 0x02017938,arm9_main,mem_alloc_heap_block
-0x0201797C,arm9_main,mem_call_heap_handler_maybe
+0x0201797C,arm9_main,mem_unlink_arena_thunk
 0x02017988,arm9_main,mem_create_subheap_if_fits
 0x020179D4,arm9_main,mem_coalesce_free_range
 0x02017ACC,arm9_main,mem_alloc_from_heap_back
@@ -1451,7 +1451,7 @@ address,segment,name
 0x020208D8,arm9_main,sound_send_all_channel_command24
 0x02020904,arm9_main,sound_send_channel_command24
 0x02020930,arm9_main,sound_send_command25
-0x02020964,arm9_main,sound_set_master_volume_maybe
+0x02020964,arm9_main,sound_send_master_volume_maybe
 0x02020990,arm9_main,sound_send_command32
 0x020209BC,arm9_main,sound_send_command31
 0x020209E8,arm9_main,sound_send_command30
@@ -1586,7 +1586,7 @@ address,segment,name
 0x02024974,arm9_main,sound_select_effect_id_maybe
 0x020249B8,arm9_main,sound_play_emitter_effect
 0x02024A28,arm9_main,sound_restart_emitter
-0x02024A88,arm9_main,sound_update_kart_engine_maybe
+0x02024A88,arm9_main,sound_update_kart_engine
 0x02024EEC,arm9_main,sound_ease_pitch
 0x02024FC0,arm9_main,sound_play_record_emitter_clamped
 0x02024FE8,arm9_main,sound_play_surface_brake_emitter
@@ -1666,7 +1666,7 @@ address,segment,name
 0x0202808C,arm9_main,menu_exit_select_screen
 0x020280DC,arm9_main,menu_query_select_mode_maybe
 0x02028110,arm9_main,os_get_boot_type_address
-0x0202811C,arm9_main,menu_get_object_state_maybe
+0x0202811C,arm9_main,menu_read_game_part_state
 0x020286F4,arm9_main,menu_check_racer_record_maybe
 0x02028724,arm9_main,menu_get_slot_record_value_maybe_028724
 0x0202874C,arm9_main,menu_get_slot_record_value_maybe_02874c
@@ -1682,7 +1682,7 @@ address,segment,name
 0x02028E00,arm9_main,menu_call_entry_handler_maybe
 0x02028E38,arm9_main,menu_fill_stat_bars_maybe
 0x02028EC0,arm9_main,computes
-0x02028F08,arm9_main,menu_call_reversed_handler_maybe
+0x02028F08,arm9_main,menu_get_cell_entry_reversed
 0x02028F20,arm9_main,menu_draw_ranking_text_maybe
 0x02028F84,arm9_main,menu_is_selection_ready
 0x02028FAC,arm9_main,menu_update_entry_positions_maybe
@@ -1752,7 +1752,7 @@ address,segment,name
 0x0202993C,arm9_main,race_reset_racer_entries
 0x020299E4,arm9_main,invoke_callback_maybe_0299e4
 0x02029A18,arm9_main,get_global_word_maybe_029a18
-0x02029A24,arm9_main,race_get_config_field_maybe
+0x02029A24,arm9_main,race_read_game_part_state
 0x02029A38,arm9_main,invoke_callback_maybe_029a38
 0x02029A70,arm9_main,race_alloc_config_029a70
 0x02029A90,arm9_main,invoke_callback_maybe_029a90
@@ -1950,7 +1950,7 @@ address,segment,name
 0x020329DC,arm9_main,menu_set_indexed_cell_attr
 0x02032A20,arm9_main,menu_commit_selection
 0x02032AA8,arm9_main,invoke_callback_maybe_032aa8
-0x02032AB0,arm9_main,menu_set_state_and_callback_maybe
+0x02032AB0,arm9_main,menu_mark_history_and_destroy_ui
 0x02032AC4,arm9_main,menu_update_countdown
 0x02032F94,arm9_main,battle_init_results_screen
 0x020336EC,arm9_main,menu_refresh_cell_list_maybe_0336ec
@@ -2012,7 +2012,7 @@ address,segment,name
 0x02036108,arm9_main,menu_init_tile_screen
 0x02036258,arm9_main,invoke_callback_maybe_036258
 0x02036264,arm9_main,invoke_callback_maybe_036264
-0x0203629C,arm9_main,text_draw_aligned_maybe
+0x0203629C,arm9_main,text_draw_aligned_wrapper
 0x020362C4,arm9_main,init_four_word_record_0362c4
 0x020362DC,arm9_main,menu_init_tile_screen_variant
 0x02036438,arm9_main,menu_setup_screen_object
@@ -2158,8 +2158,8 @@ address,segment,name
 0x0203BEC0,arm9_main,menu_clear_selection
 0x0203BEDC,arm9_main,menu_alloc_selection
 0x0203BF04,arm9_main,race_copy_profile_and_emblem
-0x0203BFC4,arm9_main,os_clear_check_result_maybe
-0x0203BFEC,arm9_main,os_set_check_result_maybe
+0x0203BFC4,arm9_main,rtc_read_calendar_or_zero
+0x0203BFEC,arm9_main,rtc_read_time_or_default
 0x0203C018,arm9_main,race_start_scene_callbacks
 0x0203C060,arm9_main,race_update_scene_callback
 0x0203C07C,arm9_main,thunk_03c07c
@@ -2447,7 +2447,7 @@ address,segment,name
 0x0204AA04,arm9_main,alloc_buffer_slot
 0x0204AA28,arm9_main,sound_set_control_flag
 0x0204AA60,arm9_main,sound_get_mode_buffer
-0x0204AAB4,arm9_main,sound_set_channel_values_maybe
+0x0204AAB4,arm9_main,system_set_backlights
 0x0204AB64,arm9_main,sound_stop_player_handle
 0x0204ABA8,arm9_main,sound_release_player_04aba8
 0x0204AC10,arm9_main,sound_restore_master_volume
@@ -2490,7 +2490,7 @@ address,segment,name
 0x0204BC88,arm9_main,invoke_broken_thunk_maybe_04bc88
 0x0204BC94,arm9_main,mask_register_flags_maybe_04bc94
 0x0204BCA0,arm9_main,invoke_callback_maybe_04bca0
-0x0204BCB4,arm9_main,stream_set_current_pointer_maybe
+0x0204BCB4,arm9_main,stream_set_aligned_pointer_maybe
 0x0204BCDC,arm9_main,stream_get_state_word
 0x0204BCEC,arm9_main,stream_stop_session
 0x0204BE0C,arm9_main,stream_start_transfer
@@ -2577,8 +2577,8 @@ address,segment,name
 0x0204F5E4,arm9_main,net_init_channel_slots
 0x0204F644,arm9_main,stream_pump_blocks_maybe
 0x0204F770,arm9_main,stream_finalize_last_slot_maybe
-0x0204F7F4,arm9_main,invoke_callback_zero_maybe
-0x0204F804,arm9_main,invoke_callback_fifteen_maybe
+0x0204F7F4,arm9_main,pm_set_amp_zero_thunk_maybe
+0x0204F804,arm9_main,pm_set_amp_fifteen_thunk_maybe
 0x0204F814,arm9_main,net_select_lowest_latency_slot
 0x0204F8A0,arm9_main,stream_filter_current_pointer_maybe
 0x0204F938,arm9_main,net_build_session_record
@@ -2783,7 +2783,7 @@ address,segment,name
 0x02057CA4,arm9_main,record_submit_header_write
 0x02057CFC,arm9_main,record_copy_read_result
 0x02057D10,arm9_main,flow_register_callbacks_maybe
-0x02057D58,arm9_main,flow_invoke_tick_hook_maybe
+0x02057D58,arm9_main,menu_flow_update_thunk
 0x02057D64,arm9_main,flow_tick
 0x02057D70,arm9_main,flow_enter_state
 0x02057D7C,arm9_main,flow_init
@@ -2887,7 +2887,7 @@ address,segment,name
 0x0205A5B0,arm9_main,net_start_idle_slot_request
 0x0205A630,arm9_main,net_poll_slot_request
 0x0205A6B4,arm9_main,net_reset_slot_requests
-0x0205A71C,arm9_main,net_invoke_slot_request_hook_maybe
+0x0205A71C,arm9_main,item_reset_mapped_racer_slot
 0x0205A750,arm9_main,net_init_current_slot_request
 0x0205A7AC,arm9_main,net_clear_packed_slot_status
 0x0205A7DC,arm9_main,net_pack_slot_status
@@ -3067,7 +3067,7 @@ address,segment,name
 0x02061F90,arm9_main,race_get_shared_update_slot
 0x02061FA4,arm9_main,kart_get_tick_slot
 0x02061FB8,arm9_main,getter_061fb8
-0x02061FCC,arm9_main,race_set_flag_dispatch_maybe
+0x02061FCC,arm9_main,race_mark_render_and_results_active
 0x02061FEC,arm9_main,getter_061fec
 0x02062004,arm9_main,race_free_scene
 0x02062078,arm9_main,race_draw_scene
@@ -3411,7 +3411,7 @@ address,segment,name
 0x0207A7EC,arm9_main,kart_get_global_value_maybe_07a7ec
 0x0207A7FC,arm9_main,kart_test_flag_1
 0x0207A828,arm9_main,kart_invoke_record_hook_maybe_07a828
-0x0207A84C,arm9_main,kart_query_record_hook_maybe
+0x0207A84C,arm9_main,kart_get_finish_flags_by_index
 0x0207A870,arm9_main,kart_get_global_value_maybe_07a870
 0x0207A880,arm9_main,kart_get_record_halfword
 0x0207A8A4,arm9_main,kart_get_record_word
@@ -3432,8 +3432,8 @@ address,segment,name
 0x0207AFA8,arm9_main,obj_init_draw_state_07afa8
 0x0207B000,arm9_main,obj_init_draw_state_07b000
 0x0207B054,arm9_main,kart_play_driver_one_shot
-0x0207B0D0,arm9_main,kart_hide_model_objects_maybe
-0x0207B13C,arm9_main,kart_show_model_objects_maybe
+0x0207B0D0,arm9_main,kart_hide_model_objects
+0x0207B13C,arm9_main,kart_show_model_objects
 0x0207B1A8,arm9_main,kart_detach_select_animations
 0x0207B284,arm9_main,kart_attach_select_animations
 0x0207B354,arm9_main,kart_update_win_drive_animation
@@ -3625,8 +3625,8 @@ address,segment,name
 0x02084FB0,arm9_main,obj_init_draw_modes
 0x020850C4,arm9_main,obj_create_animation_components
 0x0208526C,arm9_main,obj_init_resource_components
-0x0208533C,arm9_main,obj_invoke_default_resource_hook_maybe
-0x02085354,arm9_main,obj_invoke_resource_hook_maybe
+0x0208533C,arm9_main,obj_init_default_list
+0x02085354,arm9_main,obj_g3d_draw_thunk
 0x02085360,arm9_main,obj_query_resource_state_maybe
 0x0208537C,arm9_main,race_get_state_word_maybe_08537c
 0x02085390,arm9_main,race_get_state_word_maybe_085390
@@ -3898,7 +3898,7 @@ address,segment,name
 0x02090838,arm9_main,kart_cpu_update_target_slot
 0x0209086C,arm9_main,kart_cpu_init_driver
 0x020908D0,arm9_main,race_record_is_better
-0x02090920,arm9_main,scene_load_resource_wrapper_maybe
+0x02090920,arm9_main,scene_read_resource_record_maybe
 0x02090940,arm9_main,menu_has_all_gold_cup_records
 0x020909CC,arm9_main,menu_check_current_cup_completion
 0x02090B24,arm9_main,menu_unlock_special_cup_rewards
@@ -4046,7 +4046,7 @@ address,segment,name
 0x02097E84,arm9_main,obj_load_flipper_resources
 0x02097ED0,arm9_main,obj_test_flipper_collision
 0x020980EC,arm9_main,obj_handle_flipper_kart_hit_maybe
-0x02098268,arm9_main,obj_apply_global_flags_maybe
+0x02098268,arm9_main,obj_merge_flags_and_align_terrain
 0x0209828C,arm9_main,obj_create_large_piranha
 0x020982D4,arm9_main,obj_register_piranha_body_draw
 0x02098328,arm9_main,obj_register_piranha_head_draw
@@ -4314,7 +4314,7 @@ address,segment,name
 0x020A1218,arm9_main,battle_adjust_live_shines
 0x020A1238,arm9_main,battle_count_live_shines
 0x020A1250,arm9_main,getter_0a1250
-0x020A126C,arm9_main,battle_is_manager_active_maybe
+0x020A126C,arm9_main,battle_has_first_finisher_maybe
 0x020A128C,arm9_main,battle_is_score_mode_pending
 0x020A12B8,arm9_main,mission_handle_racer_kill_maybe
 0x020A1520,arm9_main,battle_eliminate_lowest_scores
@@ -4364,7 +4364,7 @@ address,segment,name
 0x020A2FE4,arm9_main,battle_balloon_use_spare
 0x020A305C,arm9_main,effect_followers_init
 0x020A3114,arm9_main,register_callback_maybe_0a3114
-0x020A3130,arm9_main,register_callback_triple_maybe
+0x020A3130,arm9_main,obj_create_draw_descriptor_triple
 0x020A3154,arm9_main,effect_follower_update
 0x020A35B0,arm9_main,effect_follower_face_camera
 0x020A3690,arm9_main,getter_0a3690
@@ -4374,7 +4374,7 @@ address,segment,name
 0x020A3948,arm9_main,battle_tick_balloon
 0x020A3E38,arm9_main,battle_draw_balloon
 0x020A3EB8,arm9_main,battle_load_balloon_resources
-0x020A3F18,arm9_main,obj_reset_handle_wrapper_maybe
+0x020A3F18,arm9_main,obj_clear_handle_and_delete
 0x020A3F2C,arm9_main,register_callback_maybe_0a3f2c
 0x020A3F48,arm9_main,battle_create_balloon_class
 0x020A3FA8,arm9_main,battle_get_racer_balloon_state_maybe
@@ -4430,7 +4430,7 @@ address,segment,name
 0x020A8ED8,arm9_main,obj_compute_target_position_maybe
 0x020A91C0,arm9_main,register_callback_pair_maybe_0a91c0
 0x020A91E0,arm9_main,obj_call_pair_hook_maybe_0a91e0
-0x020A9204,arm9_main,obj_call_global_hook_maybe
+0x020A9204,arm9_main,obj_alloc_fixed_class_maybe
 0x020A9224,arm9_main,obj_alloc_fixed_record
 0x020A9268,arm9_main,obj_iron_ball_update
 0x020A9A5C,arm9_main,obj_iron_ball_init
@@ -4484,7 +4484,7 @@ address,segment,name
 0x020AB194,arm9_main,menu_set_position_context
 0x020AB1A8,arm9_main,menu_set_control_values
 0x020AB1D0,arm9_main,menu_map_button_code
-0x020AB2A1,arm9_main,test_argument_zero_maybe
+0x020AB2A1,arm9_main,fallthrough_fragment_maybe
 0x020AB2A4,arm9_main,menu_get_record_code
 0x020AB338,arm9_main,menu_find_code_entry
 0x020AB3EC,arm9_main,menu_update_toggle_state_maybe
@@ -4535,7 +4535,7 @@ address,segment,name
 0x020AC588,arm9_main,obj_create_spawner
 0x020AC5E4,arm9_main,obj_alloc_class_record
 0x020AC63C,arm9_main,obj_alloc_class_maybe
-0x020AC658,arm9_main,obj_get_draw_descriptor_maybe
+0x020AC658,arm9_main,obj_create_fixed_draw_descriptor
 0x020AC67C,arm9_main,obj_alloc_default_class
 0x020AC6A8,arm9_main,obj_update_state_animation_maybe
 0x020AC890,arm9_main,obj_draw_billboard_above_kart
@@ -4771,7 +4771,7 @@ address,segment,name
 0x020B46D0,arm9_main,g2d_copy_tile_rect
 0x020B478C,arm9_main,resource_init_optional_reader_maybe
 0x020B47B4,arm9_main,g2d_dispatch_resource_load
-0x020B47C0,arm9_main,g2d_dispatch_callback_maybe
+0x020B47C0,arm9_main,fs_lookup_flagged_resource_thunk
 0x020B47CC,arm9_main,text_dispatch_message_load
 0x020B47D8,arm9_main,g2d_get_screen_block
 0x020B4810,arm9_main,g2d_load_screen_data
@@ -4997,7 +4997,7 @@ address,segment,name
 0x020C7D70,arm9_main,race_minimap_load_marker_list_0c7d70
 0x020C7D8C,arm9_main,menu_minimap_draw_marker_set_eight
 0x020C7F70,arm9_main,menu_minimap_get_marker_resource_maybe_0c7f70
-0x020C7F84,arm9_main,menu_minimap_get_marker_pair_maybe
+0x020C7F84,arm9_main,results_fill_fixed_entry_maybe
 0x020C7FA0,arm9_main,menu_minimap_setup_marker_set_nine
 0x020C7FBC,arm9_main,menu_minimap_draw_marker_set_nine
 0x020C8084,arm9_main,menu_minimap_get_marker_resource_maybe_0c8084
@@ -5272,7 +5272,7 @@ address,segment,name
 0x020CEFC0,arm9_main,menu_call_icon_hook_maybe_0cefc0
 0x020CEFDC,arm9_main,race_build_world_marker_lists
 0x020CF2FC,arm9_main,menu_call_icon_hook_maybe_0cf2fc
-0x020CF310,arm9_main,menu_call_icon_count_hook_maybe
+0x020CF310,arm9_main,results_alloc_list_from_item_tables
 0x020CF340,arm9_main,large_0cf340
 0x020CFCA4,arm9_main,g2d_save_mode_palettes
 0x020CFFA0,arm9_main,g2d_alloc_palette_state
@@ -5698,7 +5698,7 @@ address,segment,name
 0x020E3584,arm9_main,obj_mole_update_initial_wait
 0x020E35A0,arm9_main,reset_0e35a0
 0x020E35E4,arm9_main,obj_init_embedded_state_maybe_0e35e4
-0x020E35F4,arm9_main,obj_clear_embedded_state_maybe
+0x020E35F4,arm9_main,obj_submit_embedded_transform_maybe
 0x020E360C,arm9_main,thunk_0e360c
 0x020E3618,arm9_main,obj_dispatch_collision_render
 0x020E3724,arm9_main,obj_release_global_maybe_0e3724
@@ -5720,7 +5720,7 @@ address,segment,name
 0x020E410C,arm9_main,obj_update_type_distances
 0x020E4184,arm9_main,obj_init_collision_physics
 0x020E4320,arm9_main,obj_is_turning_platform
-0x020E435C,arm9_main,obj_call_table_hook_maybe
+0x020E435C,arm9_main,obj_visit_active_items_with_callback
 0x020E4380,arm9_main,obj_turning_platform_update_rest
 0x020E43A8,arm9_main,obj_turning_platform_decelerate
 0x020E4428,arm9_main,obj_turning_platform_enter_decelerate
@@ -5901,7 +5901,7 @@ address,segment,name
 0x020EC3CC,arm9_main,obj_alloc_template_0ec3cc
 0x020EC41C,arm9_main,obj_handle_collision_event_0ec41c
 0x020EC450,arm9_main,obj_knock_handle_kart_contact
-0x020EC484,arm9_main,obj_dispatch_callback_maybe
+0x020EC484,arm9_main,obj_delete_self_thunk
 0x020EC490,arm9_main,obj_knock_update_state
 0x020EC504,arm9_main,obj_knock_enter_state
 0x020EC538,arm9_main,obj_calc_collision_direction
@@ -5945,7 +5945,7 @@ address,segment,name
 0x020EEC48,arm9_main,item_release_group_members
 0x020EECDC,arm9_main,item_update_held_chain
 0x020EF1CC,arm9_main,obj_reset_source_transform
-0x020EF340,arm9_main,forward_third_argument_maybe
+0x020EF340,arm9_main,obj_decrement_members_forward_arg
 0x020EF350,arm9_main,obj_update_owner_transform
 0x020EF4A0,arm9_main,item_update_held_item
 0x020EF65C,arm9_main,item_update_hold_spring
@@ -6057,7 +6057,7 @@ address,segment,name
 0x020F5B84,arm9_main,item_shell_search_target
 0x020F5CC4,arm9_main,obj_enter_record_state
 0x020F5D00,arm9_main,item_shell_fly_free
-0x020F5D5C,arm9_main,item_dispatch_subobject_maybe
+0x020F5D5C,arm9_main,item_dispatch_embedded_state
 0x020F5D6C,arm9_main,item_red_shell_launch
 0x020F5F7C,arm9_main,obj_enter_active_state
 0x020F5FB8,arm9_main,obj_play_timed_sound_0f5fb8
@@ -6085,7 +6085,7 @@ address,segment,name
 0x020F7104,arm9_main,item_request_explosion_0f7104
 0x020F7184,arm9_main,item_dispatch_movement_0f7184
 0x020F73A4,arm9_main,obj_alloc_global_record
-0x020F73D4,arm9_main,item_dispatch_racer_entry_maybe
+0x020F73D4,arm9_main,item_remove_from_racer_list
 0x020F73FC,arm9_main,obj_enable_handler
 0x020F7430,arm9_main,item_update_active_state
 0x020F758C,arm9_main,item_update_racer_countdown
@@ -6259,7 +6259,7 @@ address,segment,name
 0x020FF3C4,arm9_main,effect_set_normalized_direction
 0x020FF438,arm9_main,item_dispatch_movement_0ff438
 0x020FF538,arm9_main,item_init_subobject
-0x020FF638,arm9_main,obj_dispatch_subobject_params_maybe
+0x020FF638,arm9_main,effect_set_transform_from_object
 0x020FF654,arm9_main,obj_activate_subobject
 0x020FF67C,arm9_main,effect_init_pose_vectors
 0x020FF6D8,arm9_main,kart_integrate_effect_physics
@@ -6432,10 +6432,10 @@ address,segment,name
 0x02108E6C,arm9_main,getter_108e6c
 0x02108E7C,arm9_main,getter_108e7c
 0x02108E88,arm9_main,getter_108e88
-0x02108E94,arm9_main,sound_dispatch_handle_update_maybe
+0x02108E94,arm9_main,sound_init_thunk
 0x02108EA0,arm9_main,getter_108ea0
 0x02108EB4,arm9_main,setter_108eb4
-0x02108EC4,arm9_main,sound_restore_interrupts_maybe
+0x02108EC4,arm9_main,sound_use_scene_archive
 0x02108EDC,arm9_main,sound_handle_count_advance_maybe
 0x02109038,arm9_main,sound_set_object_parameter_109038
 0x02109054,arm9_main,sound_free_emitter_109054
@@ -6572,7 +6572,7 @@ address,segment,name
 0x0210E434,arm9_main,sound_unload_old_wave_data
 0x0210E4C8,arm9_main,sound_store_heap_alloc_id
 0x0210E4EC,arm9_main,sound_get_default_wave_groups
-0x0210E50C,arm9_main,sound_dispatch_archive_operation_maybe
+0x0210E50C,arm9_main,sound_preload_work_group
 0x0210E524,arm9_main,sound_load_saved_wave_groups
 0x0210E5E4,arm9_main,sound_load_record_wave_groups
 0x0210E680,arm9_main,sound_open_archive_and_init_players
@@ -6636,7 +6636,7 @@ address,segment,name
 0x021105A0,arm9_main,sound_clear_event_tables
 0x021105D8,arm9_main,sound_alloc_event_tables
 0x02110640,arm9_main,sound_step_volume_fade
-0x02110698,arm9_main,sound_reset_mode_maybe
+0x02110698,arm9_main,sound_play_once_zero
 0x021106A8,arm9_main,sound_play_announcer_jingle
 0x02110720,arm9_main,pushes
 0x02110754,arm9_main,sound_update_jingle_queue
@@ -7052,7 +7052,7 @@ address,segment,name
 0x0212137C,arm9_main,net_is_phase_two
 0x021213A0,arm9_main,net_is_task_ready_maybe
 0x021213E8,arm9_main,net_call_callback_maybe_1213e8
-0x021213F4,arm9_main,net_has_sample_entries_maybe
+0x021213F4,arm9_main,net_has_type_four_entries
 0x02121418,arm9_main,race_get_slot_count
 0x02121434,arm9_main,net_is_slot_ready_maybe
 0x0212145C,arm9_main,race_check_slot_consistency
@@ -7549,7 +7549,7 @@ address,segment,name
 0x021814E9,ov9_000,net_prepare_error_lookup_maybe
 0x021814F1,ov9_000,net_copy_error_lookup_table
 0x02181509,ov9_000,net_classify_error
-0x02181641,ov9_000,net_control_wrapper_maybe
+0x02181641,ov9_000,race_get_negated_state_thunk
 0x02181649,ov9_000,net_get_friend_status_maybe
 0x02181651,ov9_000,net_friend_missing_local_code
 0x0218166D,ov9_000,menu_noop
@@ -7638,14 +7638,14 @@ address,segment,name
 0x02184579,ov9_000,menu_init_cell_transforms
 0x0218463D,ov9_000,menu_build_screen_draw_objects
 0x02184895,ov9_000,menu_register_screen_callbacks_maybe_184895
-0x021848B9,ov9_000,menu_draw_select_screen_maybe
+0x021848B9,ov9_000,menu_setup_select_display_thunk
 0x021848C1,ov9_000,menu_update_network_select_screen
 0x02184905,ov9_000,menu_destroy_select_screen_wrapper
 0x0218491D,ov9_000,menu_create_network_select_screen
 0x021849AD,ov9_000,menu_register_screen_callbacks_maybe_1849ad
 0x02184A21,ov9_000,menu_exit_select_screen_wrapper
 0x02184A71,ov9_000,menu_register_screen_callbacks_maybe_184a71
-0x02184A95,ov9_000,menu_draw_slot_screen_maybe
+0x02184A95,ov9_000,menu_update_slider_regs_thunk
 0x02184A9D,ov9_000,menu_update_network_slot_screen
 0x02184B1D,ov9_000,menu_close_screen_wrapper
 0x02184B35,ov9_000,menu_create_network_slot_screen
@@ -7895,7 +7895,7 @@ address,segment,name
 0x0218B40D,ov9_000,net_compare_string_keys_18b40d
 0x0218B419,ov9_000,net_hash_string_key_18b419
 0x0218B425,ov9_000,net_browser_get_error_maybe
-0x0218B431,ov9_000,net_browser_get_server_count_maybe
+0x0218B431,ov9_000,net_browser_sort_servers_maybe
 0x0218B441,ov9_000,net_browser_get_server_list_maybe
 0x0218B44D,ov9_000,net_browser_get_server
 0x0218B459,ov9_000,net_browser_clear
@@ -7952,7 +7952,7 @@ address,segment,name
 0x0218D16D,ov9_000,net_clear_server_list
 0x0218D1A9,ov9_000,net_free_retired_servers
 0x0218D1E5,ov9_000,net_get_server_at_index
-0x0218D1F9,ov9_000,call_with_inner_object_thunk_maybe
+0x0218D1F9,ov9_000,deref_inner_object_thunk
 0x0218D205,ov9_000,net_remove_server_and_notify
 0x0218D245,ov9_000,net_retire_server
 0x0218D275,ov9_000,net_find_server_by_address
@@ -8037,7 +8037,7 @@ address,segment,name
 0x0218E84D,ov9_000,text_duplicate_string
 0x0218E881,ov9_000,noop_maybe_18e881
 0x0218E885,ov9_000,noop_maybe_18e885
-0x0218E889,ov9_000,os_wrapper_maybe
+0x0218E889,ov9_000,os_thread_alarm_wait_thunk_maybe
 0x0218E891,ov9_000,os_get_time_milliseconds_18e891
 0x0218E8D5,ov9_000,net_send_profile_message
 0x0218E941,ov9_000,net_http_start_request_maybe
@@ -8141,7 +8141,7 @@ address,segment,name
 0x02194841,ov9_000,net_invoke_peer_callback
 0x02194859,ov9_000,net_find_peer_by_names
 0x02194889,ov9_000,net_match_peer_names
-0x021948C5,ov9_000,net_remove_peer_entry_maybe
+0x021948C5,ov9_000,net_remove_peer_hash_entry
 0x021948D9,ov9_000,net_remove_peer_by_id
 0x02194901,ov9_000,net_find_peer_by_id
 0x02194939,ov9_000,net_get_or_create_peer
@@ -8353,7 +8353,7 @@ address,segment,name
 0x0219B1A1,ov9_000,net_close_connection_maybe_19b1a1
 0x0219B1C5,ov9_000,net_find_connection_by_id
 0x0219B20D,ov9_000,net_handle_socket_closed
-0x0219B241,ov9_000,net_dispatch_event_wrapper_maybe
+0x0219B241,ov9_000,net_invoke_send_callback_thunk
 0x0219B249,ov9_000,net_handle_socket_event_maybe
 0x0219B471,ov9_000,net_dispatch_received_packet_wrapper
 0x0219B481,ov9_000,net_parse_peer_identifier_maybe
@@ -8620,7 +8620,7 @@ address,segment,name
 0x021A36E5,ov9_000,net_alloc_callback
 0x021A36F9,ov9_000,net_alloc_aligned
 0x021A3711,ov9_000,net_set_memory_callbacks
-0x021A3725,ov9_000,net_dispatch_wrapper_maybe
+0x021A3725,ov9_000,net_get_link_level_thunk
 0x021A372D,ov9_000,net_is_connection_complete_maybe
 0x021A3749,ov9_000,net_poll_shutdown_maybe_1a3749
 0x021A37A9,ov9_000,net_wait_for_shutdown
@@ -8922,7 +8922,7 @@ address,segment,name
 0x021ACE95,ov9_000,bigint_get_used_length
 0x021ACEAD,ov9_000,memory_copy_wrapper
 0x021ACEB5,ov9_000,memory_fill_wrapper
-0x021ACEBD,ov9_000,memory_compare_wrapper_maybe
+0x021ACEBD,ov9_000,dgt_md5_reset_thunk
 0x021ACEC5,ov9_000,net_resolve_hostname_maybe
 0x021ACFA5,ov9_000,net_dns_resolve
 0x021ACFE5,ov9_000,net_parse_ipv4_1acfe5
@@ -9091,7 +9091,7 @@ address,segment,name
 0x021813E1,ov9_001,code_fragment_not_function_maybe_1813e1
 0x021813F0,ov9_001,obj_collect_unflagged_entries
 0x021814DC,ov9_001,mission_results_clear_list_thunk_1814dc
-0x021814F0,ov9_001,dispatch_fixed_callback_maybe
+0x021814F0,ov9_001,results_fill_grid_entry_maybe
 0x02181508,ov9_001,obj_classify_id
 0x0218153C,ov9_001,obj_advance_animation_timer_18153c
 0x021815B0,ov9_001,obj_advance_animation_timer_1815b0
@@ -10266,12 +10266,12 @@ address,segment,name
 0x021B7C1D,ov9_003,swap_bytes_u32_1b7c1d
 0x021B7C55,ov9_003,swap_bytes_u16_1b7c55
 0x021B7C6D,ov9_003,swap_bytes_u32_1b7c6d
-0x021B7CA5,ov9_003,net_socket_wrapper_maybe
-0x021B7CAD,ov9_003,net_bind_wrapper_maybe
-0x021B7CB9,ov9_003,net_socket_create_thunk_maybe
-0x021B7CC5,ov9_003,net_sendto_wrapper_maybe
+0x021B7CA5,ov9_003,net_close_socket_thunk
+0x021B7CAD,ov9_003,net_bind_wrapper
+0x021B7CB9,ov9_003,net_socket_create_thunk
+0x021B7CC5,ov9_003,net_sendto_wrapper
 0x021B7CDD,ov9_003,net_select_timeout_maybe
-0x021B7D29,ov9_003,net_recvfrom_wrapper_maybe
+0x021B7D29,ov9_003,net_recvfrom_wrapper
 0x021B7D45,ov9_003,mem_fill_bytes
 0x021B7D51,ov9_003,mem_copy_bytes
 0x021B7D61,ov9_003,mem_compare_bytes
@@ -10813,7 +10813,7 @@ address,segment,name
 0x021C7D4D,ov9_003,menu_has_editable_settings_maybe
 0x021C7DE1,ov9_003,menu_start_option_feedback
 0x021C7E4D,ov9_003,menu_update_option_feedback
-0x021C7E85,ov9_003,menu_set_selection_animation_maybe
+0x021C7E85,ov9_003,menu_upload_selection_palette_maybe
 0x021C7EAD,ov9_003,menu_get_navigation_target_maybe
 0x021C80C1,ov9_003,menu_set_selected_option
 0x021C80ED,ov9_003,menu_fix_selection_after_scroll
@@ -11077,11 +11077,11 @@ address,segment,name
 0x021CDB2D,ov9_003,net_get_edit_profile
 0x021CDB41,ov9_003,net_free_settings
 0x021CDB51,ov9_003,net_init_settings
-0x021CDB89,ov9_003,sound_update_wrapper_maybe
-0x021CDB91,ov9_003,sound_stop_sequence_maybe
-0x021CDBA5,ov9_003,sound_set_sequence_volume_maybe
-0x021CDBBD,ov9_003,sound_play_sequence_maybe
-0x021CDBD1,ov9_003,sound_set_sequence_pan_maybe
+0x021CDB89,ov9_003,menu_update_sound_system
+0x021CDB91,ov9_003,menu_stop_sound_sequence
+0x021CDBA5,ov9_003,menu_set_sequence_track_param_maybe
+0x021CDBBD,ov9_003,menu_set_secondary_volume_maybe
+0x021CDBD1,ov9_003,menu_play_sound_sequence
 0x021CDBE9,ov9_003,sound_free_menu_audio
 0x021CDC0D,ov9_003,sound_init_menu_audio
 0x021CDC79,ov9_003,gxs_upload_bg1_screen_and_free
@@ -11147,7 +11147,7 @@ address,segment,name
 0x021CFA69,ov9_003,net_disconnect_wireless_maybe_1cfa69
 0x021CFB41,ov9_003,net_reset_wireless_state_maybe
 0x021CFB59,ov9_003,net_update_data_sharing
-0x021CFBDD,ov9_003,net_get_shared_data_maybe
+0x021CFBDD,ov9_003,net_get_shared_data
 0x021CFC01,ov9_003,net_set_shared_data_buffer_maybe
 0x021CFC0D,ov9_003,net_start_wireless_parent_maybe
 0x021CFD05,ov9_003,net_handle_wireless_init
@@ -11212,7 +11212,7 @@ address,segment,name
 0x021D1451,ov9_003,fs_free_loaded_file_maybe
 0x021D1479,ov9_003,fs_load_file_alloc_maybe
 0x021D1525,ov9_003,return_true
-0x021D1529,ov9_003,fs_complete_async_read_maybe
+0x021D1529,ov9_003,fs_return_async_success
 0x021D1535,ov9_003,fs_read_archive_async_maybe
 0x021D1565,ov9_003,fs_handle_archive_command_maybe
 0x021D15B5,ov9_003,fs_unmount_archive
@@ -11290,7 +11290,7 @@ address,segment,name
 0x021D2D65,ov9_003,os_vblank_task_handler
 0x021D2D8D,ov9_003,os_restore_irq_state
 0x021D2DBD,ov9_003,os_install_vblank_handler
-0x021D2E11,ov9_003,list_process_node_maybe
+0x021D2E11,ov9_003,list_insert_after_inner_node
 0x021D2E1D,ov9_003,list_insert_tail
 0x021D2E29,ov9_003,list_insert_after
 0x021D2E51,ov9_003,list_remove
@@ -11306,7 +11306,7 @@ address,segment,name
 0x021D305D,ov9_003,g2d_alloc_obj_vram_block
 0x021D3171,ov9_003,g2d_init_obj_vram_allocator
 0x021D3215,ov9_003,strnlen
-0x021D322D,ov9_003,os_set_mode_one_maybe
+0x021D322D,ov9_003,pm_set_amp_one_thunk_maybe
 0x021D3239,ov9_003,os_ensure_mode_fifteen_maybe
 0x021D3259,ov9_003,gx_clear_vram_oam_palettes
 0x021D32ED,ov9_003,gx_restore_vram_banks
