@@ -47,6 +47,8 @@ fn main() {
     for name in ["1_build_tool", "2_native_game", "dictionary"] {
         files(&root, &root.join(name), &mut paths);
     }
+    // Project branding (not game assets): the game window embeds the icon.
+    paths.push(PathBuf::from("assets/branding/icon.png"));
     paths.sort();
     fs::write(
         out.join("source-files.txt"),
