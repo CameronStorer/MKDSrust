@@ -407,6 +407,16 @@ pub fn recompile(
     for names in dictionary_tables(&opts.source) {
         gen_cmd.arg("--names").arg(&names);
     }
+    // Block 5.4 (opt-in, `MKDS_TIMING=native` when building): ARM9 code without the instruction budget. Such a
+    // build needs the native hardware services, so its executables turn them on (see NATIVE_TIMING_MAIN).
+    let timing_native = std::env::var("MKDS_TIMING").as_deref() == Ok("native");
+    if timing_native {
+        gen_cmd.arg("--timing").arg("native");
+        log("Timing: native (Block 5.4): ARM9 code without the instruction budget; MKDS_HW_*=native at run time.".into());
+    }
+    let with_timing = |main: String| {
+        if timing_native { main.replacen("fn main() {\n", &format!("fn main() {{\n{NATIVE_TIMING_MAIN}"), 1) } else { main }
+    };
     let out = gen_cmd.output()?;
     for l in String::from_utf8_lossy(&out.stderr)
         .lines()
@@ -472,10 +482,12 @@ pub fn recompile(
         .ok_or_else(|| BuildError("Rip manifest lacks assets_sha256.".into()))?;
     std::fs::write(
         gdir.join("src/main.rs"),
-        GAME_MAIN
-            .replace("@ASSETS_SHA256@", assets_sha)
-            .replace("@ARM7@", arm7_entry)
-            .replace("@INTERPRETED@", if opts.with_interpreter { INTERPRETED_ARM7 } else { NO_INTERPRETER }),
+        with_timing(
+            GAME_MAIN
+                .replace("@ASSETS_SHA256@", assets_sha)
+                .replace("@ARM7@", arm7_entry)
+                .replace("@INTERPRETED@", if opts.with_interpreter { INTERPRETED_ARM7 } else { NO_INTERPRETER }),
+        ),
     )?;
     let deps = recomp_without_defaults(&ws, opts.with_interpreter)?;
     log(format!(
@@ -492,7 +504,7 @@ pub fn recompile(
         std::fs::create_dir_all(gdir.join("src/bin"))?;
         std::fs::write(
             gdir.join("src/bin/acceptance.rs"),
-            format!(
+            with_timing(format!(
                 "//! Acceptance driver on this build's generated code (verification only).\n\
                  //! `acceptance <rom.nds> <route.csv> <new-output-dir> [max-frames]`\n\
                  #[path = {:?}]\n#[allow(dead_code)]\nmod race_check;\n\n\
@@ -501,7 +513,7 @@ pub fn recompile(
                  eprintln!(\"{{e}}\");\n        std::process::exit(1);\n    }}\n}}\n",
                 driver.trim_start_matches(r"\\?\"),
                 if has_arm7 { "lifted::LIFTED7" } else { "&[]" }
-            ),
+            )),
         )?;
     }
     let ws_toml = std::fs::read_to_string(ws.join("Cargo.toml"))?;
@@ -700,6 +712,17 @@ fn main() {
     }
 }
 "#;
+
+/// Start of `main` in a `MKDS_TIMING=native` build (Block 5.4): the ARM9 code has no instruction budget, so
+/// time may only come from the native services; they are switched on unless the caller chose otherwise.
+const NATIVE_TIMING_MAIN: &str = "    // Block 5.4: built with --timing native
+    unsafe { std::env::set_var(\"MKDS_TIMING\", \"native\") };
+    for k in [\"MKDS_HW_TIME\", \"MKDS_HW_ARM7\", \"MKDS_HW_FS\"] {
+        if std::env::var_os(k).is_none() {
+            unsafe { std::env::set_var(k, \"native\") };
+        }
+    }
+";
 
 /// `--arm7-interpreted` in a diagnostics build (`--with-interpreter`).
 const INTERPRETED_ARM7: &str = "eprintln!(\"Diagnostics: ARM7 interpreted (not the shipped configuration).\");\n        mkds_native::run_from_assets(&assets, lifted::ROM_SHA256, ASSETS_SHA256, lifted::LIFTED, lifted::SEGMENT_SIGS, options)?";

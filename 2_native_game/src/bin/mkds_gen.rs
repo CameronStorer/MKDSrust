@@ -86,6 +86,12 @@ fn parse_args() -> Result<Args, String> {
             }
             "--no-game" => game = false,
             "--allow-incomplete" => allow_incomplete = true,
+            // Block 5.4: `native` emits ARM9 code without the per-block budget (see `recomp::lift::timing_native`)
+            "--timing" => match value("--timing")?.as_str() {
+                "native" => lift::set_timing_native(true, recomp::os_hle::SAFE_LOOPS),
+                "exact" => lift::set_timing_native(false, &[]),
+                t => return Err(format!("--timing must be exact or native, not {t}")),
+            },
             other => return Err(format!("unknown argument {other}")),
         }
     }
@@ -1546,7 +1552,7 @@ edition = \"2024\"
     let unaccounted = rows.len() - lifted_n;
     let complete = unaccounted == 0;
     let status = if !complete { "incomplete" } else if fallback_sites > 0 { "complete_with_interpreter_fallback" } else { "complete" };
-    let report = json!({
+    let mut report = json!({
         "status": status,
         "rom": {"path": info.path, "sha256": rom_sha, "game_code": info.game_code, "revision": info.revision, "arm9_sha256": info.arm9_sha256},
         "metadata": {"path": args.metadata.to_string_lossy(), "sha256": meta_sha, "entries": rows.len()},
@@ -1575,6 +1581,9 @@ edition = \"2024\"
             "per_segment": extra_counts.iter().map(|(k, v)| (k.clone(), json!({"functions": v.0, "instructions": v.1, "undecoded_sites": v.2}))).collect::<BTreeMap<_, _>>(),
         },
     });
+    if lift::timing_native() {
+        report["timing"] = json!("native"); // Block 5.4: ARM9 code without the instruction budget
+    }
     put(args.out.join(MARKER), &serde_json::to_string_pretty(&report).unwrap())?;
     println!(
         "{status}: {lifted_n}/{} entries lifted in {} part crates ({:.1} MB), {fallback_sites} undecoded sites left to the interpreter -> {}",

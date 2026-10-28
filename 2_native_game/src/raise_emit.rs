@@ -45,6 +45,9 @@ struct Ctx<'a> {
     switches: &'a BTreeMap<u32, Vec<u32>>,
     /// Block start -> the flag writes a slice end there needs (flags held in locals).
     budget_flags: BTreeMap<u32, Vec<S>>,
+    /// Block 5.4 (`--timing native`, ARM9 only): blocks pay no budget except poll points (loop headers and
+    /// [`crate::lift::polls`]), which use `poll!` (the budget's slice-end check).
+    native_timing: bool,
 }
 
 /// Needs the locals written to `c.r` first (and read back after): the helper uses `c.r` itself.
@@ -1594,7 +1597,7 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
         Some(n) => format!("r{r} = `{n}` (a `{st}`)"),
         None => format!("r{r} points to a `{st}`"),
     }).collect();
-    let ctx = Ctx { blocks: &blocks, rpo, idom, merge, header, children, names, notes, switches: &switches, fields: typed.fields, budget_flags };
+    let ctx = Ctx { blocks: &blocks, rpo, idom, merge, header, children, names, notes, switches: &switches, fields: typed.fields, budget_flags, native_timing: cost.is_none() && crate::lift::timing_native() };
     ir::set_reg_names(reg_names);
     LAST_TYPES.with(|t| *t.borrow_mut() = (typed.args.clone(), typed.calls.clone()));
     ir::take_field_uses();
@@ -1635,7 +1638,15 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
     let _ = writeln!(s, "    macro_rules! exit {{ ($e:expr) => {{{{ let t: u32 = $e; spill!(); return f_{id}(c, m, t); }}}} }}");
     // the same when `c.r` is already newer than the locals (after a call, a block load or a mode switch)
     let _ = writeln!(s, "    macro_rules! leave {{ ($e:expr) => {{{{ let t: u32 = $e; return f_{id}(c, m, t); }}}} }}");
-    let _ = writeln!(s, "    macro_rules! budget {{ ($pc:expr, $n:expr) => {{ if !R::spend(c, $n) {{ spill!(); if !m.slice_end(c, $pc, $n) {{ c.r[15] = $pc; return R::BUDGET_EXHAUSTED; }} reload!(); }} }}; ($pc:expr, $n:expr, $f:block) => {{ if !R::spend(c, $n) {{ spill!(); $f if !m.slice_end(c, $pc, $n) {{ c.r[15] = $pc; return R::BUDGET_EXHAUSTED; }} reload!(); }} }} }}");
+    let ctx_native_timing = ctx.native_timing;
+    let charge_body = "($pc:expr, $n:expr) => { if !R::spend(c, $n) { spill!(); if !m.slice_end(c, $pc, $n) { c.r[15] = $pc; return R::BUDGET_EXHAUSTED; } reload!(); } }; ($pc:expr, $n:expr, $f:block) => { if !R::spend(c, $n) { spill!(); $f if !m.slice_end(c, $pc, $n) { c.r[15] = $pc; return R::BUDGET_EXHAUSTED; } reload!(); } }";
+    if ctx_native_timing {
+        // Block 5.4 (`--timing native`): no instruction budget; busy-wait loops keep a poll point
+        let _ = writeln!(s, "    macro_rules! budget {{ ($pc:expr, $n:expr) => {{}}; ($pc:expr, $n:expr, $f:block) => {{}} }}");
+        let _ = writeln!(s, "    macro_rules! poll {{ {charge_body} }}");
+    } else {
+        let _ = writeln!(s, "    macro_rules! budget {{ {charge_body} }}");
+    }
     s.push_str(&body);
     s.push_str("}\n");
     ir::set_reg_names(Default::default());
@@ -1695,12 +1706,14 @@ fn branch(c: &Ctx, x: u32, y: u32, depth: usize, out: &mut String) {
 fn block_code(c: &Ctx, x: u32, depth: usize, out: &mut String) {
     let b = &c.blocks[&x];
     indent(out, depth);
+    // Block 5.4 (`--timing native`): poll points keep the slice-end check, every other block's `budget!` is empty
+    let mac = if c.native_timing && (crate::lift::polls(b.start) || c.header.contains(&x)) { "poll" } else { "budget" };
     match c.budget_flags.get(&x) {
         Some(fl) => {
-            let _ = writeln!(out, "budget!({:#X}, {}, {{ {} }}); // {:#X}", b.start, b.charge, ir::print_locals(fl).replace(char::from(10), " "), b.start & !1);
+            let _ = writeln!(out, "{mac}!({:#X}, {}, {{ {} }}); // {:#X}", b.start, b.charge, ir::print_locals(fl).replace(char::from(10), " "), b.start & !1);
         }
         None => {
-            let _ = writeln!(out, "budget!({:#X}, {}); // {:#X}", b.start, b.charge, b.start & !1);
+            let _ = writeln!(out, "{mac}!({:#X}, {}); // {:#X}", b.start, b.charge, b.start & !1);
         }
     }
     for ins in &b.insts {

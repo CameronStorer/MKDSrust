@@ -80,6 +80,11 @@ pub struct Machine<'a> {
     /// Block 5.3 (`MKDS_HW_TIME=native`): IRQs are delivered only at safe points ([`crate::os_hle::IrqGate`]).
     /// `None` (the default): at every slice start, as the hardware model always did.
     pub os_gate: Option<crate::os_hle::IrqGate>,
+    /// Test-only (`MKDS_TICK_PIN`): pins `OS_GetTick` results that seed game randomness ([`crate::os_hle::TickPin`]). `None` by default.
+    pub tick_pin: Option<crate::os_hle::TickPin>,
+    /// Block 5.4 (`MKDS_TIMING=native`, a build generated with `--timing native`): the ARM9 code pays no
+    /// instruction budget, so a wait for an interrupt ends the slice (budget 0) to let the IRQ be taken.
+    pub budget_free: bool,
 }
 
 /// Longest stretch (in 1000-cycle steps) a wait-for-interrupt may fast-forward before giving up.
@@ -88,7 +93,7 @@ const WFI_LIMIT: u32 = 2_000_000;
 impl<'a> Machine<'a> {
     pub fn new(mut hw: ds_mem::Bus, disp: &'a Dispatcher) -> Self {
         let hle7 = crate::hle7::Router::from_env(&mut hw);
-        Machine {
+        let mut m = Machine {
             hw,
             disp,
             hooks: HashMap::new(),
@@ -116,7 +121,15 @@ impl<'a> Machine<'a> {
             host_quit: false,
             wait_hook: None,
             os_gate: None,
+            tick_pin: crate::os_hle::TickPin::from_env(),
+            budget_free: crate::os_hle::budget_free(),
+        };
+        if m.budget_free {
+            if let Some(r) = m.hle7.as_mut() {
+                r.latency = 0; // replies are synchronous (see `pxi_sync`)
+            }
         }
+        m
     }
 
     /// Replace the function at `entry` (bit 0 ignored).
@@ -167,13 +180,37 @@ impl Mem for Machine<'_> {
             .unwrap_or_else(|| self.hw.r32(a))
     }
     fn w8(&mut self, a: u32, v: u8) {
-        self.hw.w8(a, v)
+        self.hw.w8(a, v);
+        if self.budget_free {
+            self.pxi_sync();
+        }
     }
     fn w16(&mut self, a: u32, v: u16) {
-        self.hw.w16(a, v)
+        self.hw.w16(a, v);
+        if self.budget_free {
+            self.pxi_sync();
+        }
     }
     fn w32(&mut self, a: u32, v: u32) {
-        self.hw.w32(a, v)
+        self.hw.w32(a, v);
+        if self.budget_free {
+            self.pxi_sync();
+        }
+    }
+}
+
+impl Machine<'_> {
+    /// Block 5.4 (`MKDS_TIMING=native` with `MKDS_HW_ARM7=native`): a PXI word for a native ARM7 service is
+    /// answered at once, inside the ARM9's FIFO write (the router's reply latency is 0 in this mode), instead
+    /// of at the next slice end, which without a budget may be far away. The reply's IPC-receive IRQ is
+    /// then delivered at the next safe point like every other IRQ.
+    fn pxi_sync(&mut self) {
+        if self.hw.hle7_in.is_empty() {
+            return;
+        }
+        if let Some(r) = self.hle7.as_mut() {
+            r.advance(&mut self.hw, self.arm7.as_mut().map(|a| &mut a.s.periph));
+        }
     }
 }
 
@@ -198,7 +235,10 @@ impl Bus for Machine<'_> {
             // Halt / IntrWait / VBlankIntrWait: run the hardware until an interrupt is pending
             bios::Swi::Wait { .. } => {
                 self.oracle_wait(n);
-                self.wait_for_interrupt()
+                self.wait_for_interrupt();
+                if self.budget_free {
+                    c.budget = 0; // Block 5.4: the slice ends here, so the IRQ that woke the wait is taken
+                }
             }
             bios::Swi::Reset => self.note("swi SoftReset".into()),
             bios::Swi::Unsupported(n) => self.note(format!("swi {n:#04x}")),
@@ -217,7 +257,7 @@ impl Bus for Machine<'_> {
         *self.cp15.get(&(crn, crm, op1, op2)).unwrap_or(&0)
     }
 
-    fn mcr(&mut self, _c: &mut Cpu, cp: u8, op1: u8, crn: u8, crm: u8, op2: u8, v: u32) {
+    fn mcr(&mut self, c: &mut Cpu, cp: u8, op1: u8, crn: u8, crm: u8, op2: u8, v: u32) {
         if cp != 15 {
             self.note(format!("mcr p{cp}"));
             return;
@@ -225,7 +265,10 @@ impl Bus for Machine<'_> {
         match (crn, crm, op1, op2) {
             (7, 0, 0, 4) => {
                 self.oracle_wait(0x100);
-                self.wait_for_interrupt() // wait for interrupt
+                self.wait_for_interrupt(); // wait for interrupt
+                if self.budget_free {
+                    c.budget = 0; // Block 5.4: the slice ends here, so the IRQ that woke the wait is taken
+                }
             }
             (7, _, _, _) => {}                         // cache maintenance: memory is coherent
             (9, 1, 0, 0) => self.hw.dtcm_base = Some(v & 0xFFFF_F000),
