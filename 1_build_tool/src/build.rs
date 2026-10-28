@@ -836,6 +836,15 @@ pub fn build(
 
 /// Launcher mode: verify the ROM hash recorded in the bundle, then run the game.
 pub fn launch(bundle: &Path, extra: &[String]) -> Result<i32, BuildError> {
+    launch_with_env(bundle, extra, &[])
+}
+
+/// Launch with child-only environment overrides; None removes an inherited variable.
+pub fn launch_with_env(
+    bundle: &Path,
+    extra: &[String],
+    env: &[(&str, Option<&str>)],
+) -> Result<i32, BuildError> {
     let m: serde_json::Value =
         serde_json::from_slice(&std::fs::read(bundle.join("manifest.json"))?)
             .map_err(|e| BuildError(format!("Bad manifest: {e}")))?;
@@ -869,7 +878,15 @@ pub fn launch(bundle: &Path, extra: &[String]) -> Result<i32, BuildError> {
     if exe.contains(['/', '\\']) {
         return err("Manifest executable must be a plain file name.");
     }
-    let status = launch_command(bundle, &m, exe, rom, extra).status()?;
+    let mut command = launch_command(bundle, &m, exe, rom, extra);
+    for (key, value) in env {
+        if let Some(value) = value {
+            command.env(key, value);
+        } else {
+            command.env_remove(key);
+        }
+    }
+    let status = command.status()?;
     Ok(status.code().unwrap_or(1))
 }
 
