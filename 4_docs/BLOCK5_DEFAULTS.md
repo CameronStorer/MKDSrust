@@ -51,7 +51,28 @@ entered once per route. The epoch-based check (watched code writes) stays as the
 Exact build and budget-free build of branch `b5-finish`; races run one at a time.
 
 ### Proof races (closed loop, `acceptance rom.nds route.csv OUT 15000`)
-{RACES}
+Branch `b5-finish` at b061f40 (before merging `block4`'s 5.5 work). "ARM7 CPU" = cycles the ARM7 CPU ran (lifted +
+interpreted); "plain" = ARM7 code run as plain calls (boot, sound driver, ARM7 interrupt work).
+
+| build / mode | finish | frames run | IRQs | ARM7 CPU | plain | race_diff vs main |
+|---|---|---:|---:|---:|---:|---|
+| exact build, default, fiber | 11,462, 1st | 12,362 | 581,521 | 923,441,005 | 0 | **IDENTICAL** |
+| exact build, default, flat | 11,462, 1st | 12,362 | 581,521 | 923,441,005 | 0 | **IDENTICAL** |
+| exact build, all four `MKDS_HW_*=native` | 11,930, 1st | 12,830 | 602,899 | **0** | 734,309,526 | (different by design) |
+| budget-free build, 3 switches (ARM7 CPU still there) | 11,717, 1st | 12,617 | 577,699 | 739,831,720 | 0 | |
+| budget-free build, all native, fiber | 11,336, 1st | 12,236 | 580,267 | **0** | 663,070,005 | |
+| budget-free build, all native, flat | 11,951, 1st | 12,851 | 604,897 | **0** | 726,651,830 | |
+
+ms per frame (whole acceptance run incl. its captures, back-to-back pairs on a machine shared with other lanes):
+exact fiber 27.26 s / 12,362 = **2.21 ms** (31.24 s = 2.53 ms in the other pair); budget-free all native fiber
+19.41 s / 12,236 = **1.59 ms** (19.63 s = 1.60 ms). About 28% less CPU per frame than exact (b5-native's
+budget-free build with the ARM7 CPU: 1.84 ms). The CPU-less ARM7 still runs the lifted sound driver (663 M plain
+instructions per race, about 54 K per frame); that is the next cost to remove.
+
+After merging `block4` (with b5-spill's 5.5 emitter work), same races on the merged tree (machine busy, so only
+the relative numbers matter): exact fiber and flat **IDENTICAL** (1,707,950,080 instructions, 581,521 IRQs,
+finish 11,462 1st); all four switches finish 11,930 1st with ARM7 CPU 0; budget-free all native finishes
+11,260 (fiber) / 11,533 (flat), 1st, ARM7 CPU 0, 96 / 94 busy-wait time steps and 15 guard steps each.
 
 ### Open-loop equality with the exact model (seed-pinned, `MKDS_TICK_PIN`)
 Masks in `masks/` (`native_all.txt` plus per-mode files; kart entries are now kart-relative,
