@@ -9,3 +9,7 @@ source/
 *.srl
 *.sav
 8_scratch/
+
+# Python caches
+__pycache__/
+*.pyc
