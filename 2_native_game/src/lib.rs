@@ -1,6 +1,7 @@
 //! ROM-driven recompiler (4_docs/RECOMP_PLAN.md): decode ARM/Thumb, lift to Rust, run with a DS
 //! service layer. Contains no game code or data.
 pub mod arm;
+pub mod save;
 pub mod arm7;
 pub mod bios;
 pub mod boot;
@@ -33,3 +34,12 @@ pub mod signature;
 pub mod spu;
 pub mod texture;
 pub mod thumb;
+
+/// Set player hardware defaults before constructing hardware or starting threads.
+pub fn player_defaults() {
+    for key in ["MKDS_HW_FS", "MKDS_HW_ARM7", "MKDS_HW_TIME", "MKDS_HW_SND"] {
+        if std::env::var_os(key).is_none() {
+            unsafe { std::env::set_var(key, "native"); }
+        }
+    }
+}

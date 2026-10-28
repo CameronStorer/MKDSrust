@@ -2,7 +2,7 @@
 name = "mkds_native"
 version = "0.1.0"
 edition = "2024"
-description = "Native window, audio and input host for locally generated MKDS Rust code"
+description = "Native window, audio and input host for locally generated MKDSrust code"
 
 [dependencies]
 recomp = { path = "..", default-features = false }

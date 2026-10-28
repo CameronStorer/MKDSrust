@@ -2,7 +2,8 @@
 target/
 target_*/
 builds/
-assets/
+assets/*
+!assets/branding/
 source/
 *.nds
 *.srl

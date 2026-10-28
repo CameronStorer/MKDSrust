@@ -99,8 +99,56 @@ fn run(r: &mut Router, hw: &mut Bus, p: &mut Peripherals, cmd: u32) {
         }
         _ => result::UNSUPPORTED,
     };
+    if matches!(cmd, 7 | 8 | 11) && res == result::OK {
+        p.backup.changed();
+        p.backup.poll_save();
+    }
     if res != result::OK {
         hw.w32(block, res);
     }
     r.reply(pack(tag::FS, 1, true));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backup_service_persists_and_reloads_flat_image() {
+        let dir = std::env::temp_dir().join(format!("mkdsrust-save-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("service.sav");
+        let _ = std::fs::remove_file(&path);
+        let mut r = Router::new();
+        let mut hw = Bus::new();
+        let mut p = Peripherals::new();
+        p.backup.attach_save(path.clone(), None).unwrap();
+        r.backup.block = 0x02000100;
+        hw.w32(r.backup.block + 0xc, 0x02000200);
+        hw.w32(r.backup.block + 0x10, 0x123);
+        hw.w32(r.backup.block + 0x14, 3);
+        for (i, b) in [0x12, 0x34, 0x56].into_iter().enumerate() { hw.w8(0x02000200 + i as u32, b); }
+        run(&mut r, &mut hw, &mut p, 7);
+        drop(p); // exit flush, including writes within the debounce interval
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0x40000);
+        let mut p = Peripherals::new();
+        p.backup.attach_save(path.clone(), None).unwrap();
+        hw.w32(r.backup.block + 0xc, 0x123);
+        hw.w32(r.backup.block + 0x10, 0x02000300);
+        run(&mut r, &mut hw, &mut p, 6);
+        assert_eq!([hw.r8(0x02000300), hw.r8(0x02000301), hw.r8(0x02000302)], [0x12, 0x34, 0x56]);
+        // Exact-mode SPI writes share the same image and atomic replacement.
+        p.backup.write_cnt(0x8000);
+        p.backup.write_data(0x06);
+        for b in [0x0a, 0, 1, 0x23, 0xab] {
+            p.backup.write_cnt(0x8040);
+            p.backup.write_data(b);
+        }
+        p.backup.write_cnt(0);
+        p.backup.write_cnt(0x8000);
+        p.backup.write_data(0x04);
+        assert_eq!(std::fs::read(&path).unwrap()[0x123], 0xab);
+        drop(p);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }

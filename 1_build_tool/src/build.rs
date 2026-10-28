@@ -407,9 +407,9 @@ pub fn recompile(
     for names in dictionary_tables(&opts.source) {
         gen_cmd.arg("--names").arg(&names);
     }
-    // Block 5.4 (opt-in, `MKDS_TIMING=native` when building): ARM9 code without the instruction budget. Such a
+    // Block 5.4 (native by default, `MKDS_TIMING=exact` to opt out): ARM9 code without the instruction budget. Such a
     // build needs the native hardware services, so its executables turn them on (see NATIVE_TIMING_MAIN).
-    let timing_native = std::env::var("MKDS_TIMING").as_deref() == Ok("native");
+    let timing_native = std::env::var("MKDS_TIMING").as_deref() != Ok("exact");
     if timing_native {
         gen_cmd.arg("--timing").arg("native");
         log("Timing: native (Block 5.4): ARM9 code without the instruction budget; MKDS_HW_*=native at run time.".into());
@@ -504,6 +504,9 @@ pub fn recompile(
         std::fs::create_dir_all(gdir.join("src/bin"))?;
         std::fs::write(
             gdir.join("src/bin/acceptance.rs"),
+            // Acceptance shares this build's generated timing. Budget-free code must
+            // enable the matching runtime before Session reads its cached switches.
+            // Exact builds leave the oracle's startup and hardware defaults alone.
             with_timing(format!(
                 "//! Acceptance driver on this build's generated code (verification only).\n\
                  //! `acceptance <rom.nds> <route.csv> <new-output-dir> [max-frames]`\n\
@@ -717,7 +720,7 @@ fn main() {
 /// time may only come from the native services; they are switched on unless the caller chose otherwise.
 const NATIVE_TIMING_MAIN: &str = "    // Block 5.4: built with --timing native
     unsafe { std::env::set_var(\"MKDS_TIMING\", \"native\") };
-    for k in [\"MKDS_HW_TIME\", \"MKDS_HW_ARM7\", \"MKDS_HW_FS\"] {
+    for k in [\"MKDS_HW_TIME\", \"MKDS_HW_ARM7\", \"MKDS_HW_FS\", \"MKDS_HW_SND\"] {
         if std::env::var_os(k).is_none() {
             unsafe { std::env::set_var(k, \"native\") };
         }
@@ -932,6 +935,11 @@ fn launch_command(bundle: &Path, m: &serde_json::Value, exe: &str, rom: &str, ex
         }
         None => {
             command.args(extra).arg("--rom").arg(rom);
+        }
+    }
+    for key in ["MKDS_HW_FS", "MKDS_HW_ARM7", "MKDS_HW_TIME", "MKDS_HW_SND"] {
+        if std::env::var_os(key).is_none() {
+            command.env(key, "native");
         }
     }
     command.current_dir(bundle);

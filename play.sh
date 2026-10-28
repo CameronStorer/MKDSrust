@@ -4,7 +4,7 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 PLAY="$ROOT/builds/mkds/play"
 if [ ! -x "$PLAY" ]; then
-    echo "No native build found in builds/mkds. Run: $ROOT/build.sh /path/to/game.nds" >&2
+    echo "No MKDSrust build found in builds/mkds. Run: $ROOT/build.sh /path/to/game.nds" >&2
     exit 1
 fi
 exec "$PLAY" "$@"

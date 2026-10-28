@@ -73,6 +73,63 @@ pub struct Frame {
     pub depth: Vec<f64>,
 }
 
+/// The console's polygon list order (GBATEK, SWAP_BUFFERS / polygon sorting): the rendering engine draws
+/// every opaque polygon before any translucent one, whatever order the game submitted them in. Translucent
+/// polygons are sorted by their screen Y extent (bottom edge, then top edge, top of the screen first) when
+/// `swap_param` bit 0 is clear (auto-sort), else they keep their submission order (manual sort). Opaque
+/// polygons keep their submission order here: among them the order only decides exact depth ties, and the
+/// console's own Y order there is not modelled. The sort is stable. A polygon is translucent when its alpha
+/// is 1-30, or when its texture has an alpha channel (A3I5 / A5I3) and it is not a decal or shadow polygon.
+///
+/// Drawing in submission order instead loses translucent surfaces submitted before the opaque ones behind
+/// them (they do not write depth, so the later opaque polygons cover them): Mario Kart DS's course water
+/// and waterfalls, and shadow volumes whose masks were built against an incomplete depth buffer.
+pub fn hardware_order(polys: &mut [Polygon], viewport: [u8; 4], swap_param: u32) {
+    let (y1, y2) = (viewport[1] as f64, viewport[3] as f64);
+    let key = |p: &Polygon| -> (bool, u16, u16) {
+        let alpha = (p.attr >> 16) & 31;
+        let format = (p.tex_param >> 26) & 7;
+        let translucent = (1..31).contains(&alpha) || (matches!(format, 1 | 6) && (p.attr >> 4) & 1 == 0);
+        if !translucent || swap_param & 1 != 0 {
+            return (translucent, 0, 0);
+        }
+        let verts: Vec<V> = p
+            .verts
+            .iter()
+            .map(|v| V {
+                x: v.clip[0] as f64,
+                y: v.clip[1] as f64,
+                z: v.clip[2] as f64,
+                w: v.clip[3] as f64,
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                s: 0.0,
+                t: 0.0,
+            })
+            .collect();
+        let (mut top, mut bottom) = (u16::MAX, 0u16);
+        for v in clip_near(&verts) {
+            let y = 191.0 - (y1 + (v.y / v.w + 1.0) * 0.5 * (y2 - y1 + 1.0));
+            let y = y.round().clamp(0.0, 191.0) as u16;
+            top = top.min(y);
+            bottom = bottom.max(y);
+        }
+        (translucent, bottom, top.min(bottom))
+    };
+    if polys.len() < 2 {
+        return;
+    }
+    let keys: Vec<_> = polys.iter().map(key).collect();
+    let mut order: Vec<usize> = (0..polys.len()).collect();
+    order.sort_by_key(|&i| keys[i]);
+    if order.iter().enumerate().all(|(n, &i)| n == i) {
+        return;
+    }
+    let sorted: Vec<Polygon> = order.iter().map(|&i| polys[i].clone()).collect();
+    polys.clone_from_slice(&sorted);
+}
+
 /// Renders `polys` into a frame cleared to `clear` (packed `0xRRGGBBAA`).
 pub fn render(polys: &[Polygon], viewport: [u8; 4], tex: &[u8], pal: &[u8], clear: u32) -> Frame {
     let mut f = Frame { color: vec![clear; W * H], depth: vec![f64::INFINITY; W * H] };
@@ -337,6 +394,38 @@ mod tests {
         let c = px(&f, 128, 96);
         assert!((c >> 24) > 60 && ((c >> 8) & 0xFF) > 60, "red and blue both present: {c:#010X}");
         assert!(f.depth[96 * W + 128] > 0.7, "translucent polygon did not write depth");
+    }
+
+    #[test]
+    fn translucent_polygons_submitted_first_still_show_over_opaque_ones_behind() {
+        // a translucent surface submitted before the opaque ground behind it (course water)
+        let mut water = tri((-3000, -3000), (3000, -3000), (0, 3000), 0, RED);
+        water.attr = (16 << 16) | (1 << 7);
+        let ground = tri((-3000, -3000), (3000, -3000), (0, 3000), 2000, BLUE);
+        let submitted = render(&[water.clone(), ground.clone()], VP, &[], &[], 0);
+        assert_eq!(px(&submitted, 128, 96) >> 24, 0, "submission order: the ground covers the water");
+        let mut polys = vec![water, ground];
+        hardware_order(&mut polys, VP, 0);
+        assert_eq!(polys[0].attr, ATTR, "opaque first");
+        let ordered = render(&polys, VP, &[], &[], 0);
+        let c = px(&ordered, 128, 96);
+        assert!((c >> 24) > 60 && ((c >> 8) & 0xFF) > 60, "water blended over the ground: {c:#010X}");
+    }
+
+    #[test]
+    fn opaque_polygons_keep_their_order_and_translucent_ones_sort_by_y_unless_manual() {
+        let low = tri((-3000, -3000), (3000, -3000), (0, -2000), 0, RED); // bottom of the screen
+        let high = tri((-3000, 2000), (3000, 2000), (0, 3000), 0, BLUE); // top of the screen
+        let mut glass_a = low.clone();
+        glass_a.attr = (16 << 16) | (1 << 7);
+        let mut glass_b = high.clone();
+        glass_b.attr = (16 << 16) | (1 << 7);
+        let mut polys = vec![glass_a.clone(), low.clone(), glass_b.clone(), high.clone()];
+        hardware_order(&mut polys, VP, 1);
+        assert_eq!(polys, vec![low.clone(), high.clone(), glass_a.clone(), glass_b.clone()]);
+        let mut polys = vec![glass_a.clone(), low.clone(), glass_b.clone(), high.clone()];
+        hardware_order(&mut polys, VP, 0);
+        assert_eq!(polys, vec![low, high, glass_b, glass_a], "auto-sort: translucent by Y");
     }
 
     fn shadow(z: i32, id: u32) -> Polygon {

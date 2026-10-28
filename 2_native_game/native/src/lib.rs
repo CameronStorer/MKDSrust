@@ -1,5 +1,6 @@
 //! Native host for the locally generated game. Call `run` with the generated lift table.
 mod audio;
+pub mod saves;
 pub mod assets;
 pub mod gpu;
 mod pad;
@@ -22,6 +23,7 @@ use std::{
 
 #[derive(Default, Debug, Clone)]
 pub struct Options {
+    pub save_rom_sha1: Option<String>,
     /// Explicit oracle fallback for ARM7 integration diagnostics; never enable in acceptance.
     pub diagnostic_arm7_interpreter: bool,
     pub headless: bool,
@@ -33,6 +35,8 @@ pub struct Options {
     /// snapshots contain game graphics).
     pub snapshots: Option<PathBuf>,
     pub snapshot_every: Option<u64>,
+    /// Diagnostics: first hardware frame `--snapshots` writes (default 0).
+    pub snapshot_from: u64,
     pub input_script: Option<PathBuf>,
     pub gx_trace: Option<PathBuf>,
     /// Print once per second: emulated vs wall time, frames presented/rendered, audio underruns.
@@ -82,6 +86,9 @@ impl Options {
                 "--frames" => result.frame_limit = Some(positive(args.next(), "--frames")?),
                 "--snapshots" => {
                     result.snapshots = Some(args.next().ok_or("--snapshots needs a directory")?.into())
+                }
+                "--snapshot-from" => {
+                    result.snapshot_from = args.next().and_then(|s| s.parse().ok()).ok_or("--snapshot-from needs a frame")?
                 }
                 "--snapshot-every" => {
                     result.snapshot_every = Some(positive(args.next(), "--snapshot-every")?)
@@ -281,6 +288,9 @@ pub fn run_from_assets(
     options: Options,
 ) -> Result<RunReport, String> {
     let assets = assets::load(path, expected_rom_sha256, expected_assets_sha256)?;
+    let mut options = options;
+    let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(path.join("manifest.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    options.save_rom_sha1 = Some(manifest["rom"]["sha1"].as_str().ok_or("Assets lack original ROM SHA-1; rebuild the bundle")?.to_string());
     eprintln!("Verified loose assets; manifest sha256={}", assets.manifest_sha256);
     run_with_signatures(&assets.card, &assets.arm9, table, signatures, options)
 }
@@ -305,6 +315,9 @@ pub fn run_from_assets_dual(
     options: Options,
 ) -> Result<RunReport, String> {
     let assets = assets::load(path, expected_rom_sha256, expected_assets_sha256)?;
+    let mut options = options;
+    let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(path.join("manifest.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    options.save_rom_sha1 = Some(manifest["rom"]["sha1"].as_str().ok_or("Assets lack original ROM SHA-1; rebuild the bundle")?.to_string());
     eprintln!("Verified loose assets; manifest sha256={}", assets.manifest_sha256);
     run_with_dual_tables(&assets.card, &assets.arm9, table, signatures, table7, options)
 }
@@ -334,6 +347,7 @@ fn run_internal(
     signatures: &'static [recomp::residency::SegmentSig],
     table7: Option<&'static [Lifted]>, options: Options,
 ) -> Result<RunReport, String> {
+    recomp::player_defaults();
     if options.headless && options.instruction_limit.is_none() {
         return Err("Headless diagnostics require a finite instruction limit".into());
     }
@@ -373,6 +387,8 @@ fn emulate(
     let dispatcher = Dispatcher::with_loaded(table, &resident);
     dispatcher.set_natives(recomp::native::selected());
     let mut session = Session::new(rom, image, &dispatcher)?;
+    let save_id = options.save_rom_sha1.clone().unwrap_or_else(|| mkds_builder::rom::sha1(rom));
+    saves::configure(&mut session.machine.arm7.as_mut().unwrap().s.periph.backup, Some(&save_id), options.input_script.is_some() || options.input_log.is_some())?;
     // Headless `--stats` prints a per-stage cost profile; the clock is only read when asked for.
     session.machine.profile_time = options.headless && options.stats;
     if let Some(table7) = table7 {
@@ -465,6 +481,8 @@ fn emulate(
     }
     let busy = Arc::new(AtomicBool::new(false));
     let renderer = window.is_some().then(|| spawn_renderer(busy.clone(), options.software_renderer != Some(true)));
+    // Presenters show what the console scans out at each display start (latched; see `Machine::render_snapshot`).
+    session.machine.display_latch = window.is_some() || options.snapshots.is_some();
     // Wall-clock time spent re-anchoring the schedule after a slow stretch (no catch-up sprint).
     let mut skew = Duration::ZERO;
     let mut parity: Option<Vec<u32>> = None;
@@ -503,10 +521,16 @@ fn emulate(
                 let remaining = options.instruction_limit.map_or(16_384, |n| {
                     n.saturating_sub(session.stats.instructions).min(16_384) as u32
                 });
-                session.advance(remaining)?;
+                // Stop at a new frame so every frame is presented: without an instruction budget one step can
+                // hold a whole frame of guest work, and `advance(remaining)` then ran past frames unseen.
+                let frame_before = session.frame_number();
+                let mut left = remaining;
+                while left > 0 && !session.machine.host_quit && session.frame_number() == frame_before {
+                    left -= session.step(left)?;
+                }
                 if let Some(dir) = &options.snapshots {
                     let frame = session.frame_number();
-                    if frame != last_snapshot && frame % options.snapshot_every.unwrap_or(60) == 0 {
+                    if frame != last_snapshot && frame >= options.snapshot_from && frame % options.snapshot_every.unwrap_or(60) == 0 {
                         last_snapshot = frame;
                         let path = dir.join(format!("f{frame:06}.mksnap"));
                         std::fs::write(&path, session.render_snapshot().encode())
@@ -760,7 +784,7 @@ impl From<&Controls> for Bindings {
             pad: std::array::from_fn(|a| c.pad[a].clone()),
             quit_pad: c.pad[controls::QUIT].clone(),
             title: format!(
-                "MKDS | A={} B={} L={} R={} Start={} | mouse = touch | F11 = fullscreen | {} = quit",
+                "MKDSrust | A={} B={} L={} R={} Start={} | mouse = touch | F11 = fullscreen | {} = quit",
                 hint(0), hint(1), hint(9), hint(8), hint(3), hint(controls::QUIT)
             ),
         }

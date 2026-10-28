@@ -18,7 +18,7 @@ use std::{
 struct Preferences {
     rom: PathBuf,
     output: PathBuf,
-    native: [bool; 3],
+    accuracy: bool,
     fingerprint: String,
 }
 enum Event {
@@ -28,6 +28,8 @@ enum Event {
     Played(Result<i32, String>),
 }
 struct Launcher {
+    branding: egui::TextureHandle,
+    icon: egui::TextureHandle,
     prefs: Preferences,
     dir: PathBuf,
     settings: Settings,
@@ -118,7 +120,18 @@ impl Launcher {
             Controls::default()
         });
         let log = std::fs::read_to_string(dir.join("launcher-build.log")).unwrap_or_default();
+        let load_texture = |name, bytes: &[u8]| {
+            let image = eframe::icon_data::from_png_bytes(bytes).expect("valid embedded branding PNG");
+            cc.egui_ctx.load_texture(
+                name,
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [image.width as usize, image.height as usize], &image.rgba),
+                egui::TextureOptions::LINEAR,
+            )
+        };
         let mut app = Self {
+            branding: load_texture("MKDSrust wordmark", include_bytes!("../../assets/branding/logo_dark.png")),
+            icon: load_texture("MKDSrust icon", include_bytes!("../../assets/branding/icon.png")),
             prefs,
             dir,
             settings,
@@ -293,14 +306,13 @@ impl Launcher {
     fn play(&mut self) {
         self.busy = true;
         let output = self.prefs.output.clone();
-        let native = self.prefs.native;
+        let accuracy = self.prefs.accuracy;
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         std::thread::spawn(move || {
-            let env: Vec<_> = ["MKDS_HW_FS", "MKDS_HW_ARM7", "MKDS_HW_TIME"]
+            let env: Vec<_> = ["MKDS_HW_FS", "MKDS_HW_ARM7", "MKDS_HW_TIME", "MKDS_HW_SND"]
                 .into_iter()
-                .zip(native)
-                .map(|(k, on)| (k, on.then_some("native")))
+                .filter_map(|k| accuracy.then_some((k, Some("exact"))))
                 .collect();
             let _ = tx.send(Event::Played(
                 build::launch_with_env(&output, &[], &env).map_err(|e| e.to_string()),
@@ -308,6 +320,8 @@ impl Launcher {
         });
     }
     fn home(&mut self, ui: &mut egui::Ui) {
+        let width = ui.available_width().min(480.);
+        ui.add(egui::Image::new(&self.branding).fit_to_exact_size(egui::vec2(width, width / 4.)));
         ui.heading("Your game, on your desktop");
         ui.label("Choose your own ROM, build locally, then play.");
         ui.separator();
@@ -425,6 +439,12 @@ impl Launcher {
             });
     }
     fn settings_page(&mut self, ui: &mut egui::Ui) {
+        if ui.button("Open save folder").clicked() {
+            if let Some(folder) = mkds_builder::settings::save_folder() {
+                let result = std::fs::create_dir_all(&folder).and_then(|_| std::process::Command::new("explorer.exe").arg(&folder).spawn().map(|_| ()));
+                if let Err(e) = result { self.message = e.to_string(); }
+            }
+        }
         ui.heading("Display settings");
         ui.label("Shared with the terminal launcher and game. Save before launching.");
         ui.horizontal(|ui| {
@@ -594,8 +614,9 @@ impl Launcher {
             .exact_width(175.)
             .show(ctx, |ui| {
                 ui.add_space(22.);
-                ui.heading("MKDS Native");
-                ui.label("Desktop launcher");
+                ui.add(egui::Image::new(&self.icon).fit_to_exact_size(egui::vec2(64., 64.)));
+                ui.heading("MKDSrust");
+                ui.label("MKDSrust desktop launcher");
                 ui.add_space(30.);
                 for (i, title) in ["Home", "Settings", "Controls", "Advanced"]
                     .iter()
@@ -618,10 +639,7 @@ impl Launcher {
         egui::CentralPanel::default().show(ctx, |ui| { egui::ScrollArea::vertical().show(ui, |ui| {
             ui.add_space(18.);
             match self.page { 0 => self.home(ui), 1 => self.settings_page(ui), 2 => self.controls_page(ui, ctx), _ => {
-                ui.heading("Advanced"); ui.label("Experimental native modes. These may cause crashes or incorrect behavior.");
-                let mut changed = false;
-                for (i, name) in ["Native filesystem (experimental)", "Native ARM7 (experimental)", "Native timing (experimental)"].iter().enumerate() { changed |= ui.checkbox(&mut self.prefs.native[i], *name).changed(); }
-                if changed { self.save(); } self.log_panel(ui);
+                ui.heading("Advanced"); let changed = ui.checkbox(&mut self.prefs.accuracy, "Accuracy mode (exact hardware)").changed(); if changed { self.save(); } self.log_panel(ui);
             }}
         }); });
         if self.busy && ctx.input(|i| i.viewport().close_requested()) {
@@ -644,9 +662,11 @@ impl eframe::App for Launcher {
 }
 fn main() -> eframe::Result<()> {
     eframe::run_native(
-        "MKDS Native Launcher",
+        "MKDSrust",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
+                .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../../assets/branding/icon.png"))
+                    .expect("valid embedded window icon"))
                 .with_inner_size([1020., 820.])
                 .with_min_inner_size([800., 650.]),
             ..Default::default()
@@ -664,9 +684,9 @@ mod tests {
         assert_eq!(map_key(egui::Key::Z), controls::key_index("Z"));
     }
     #[test]
-    fn experimental_defaults_are_off() {
+    fn accuracy_defaults_off() {
         let p: Preferences = serde_json::from_str("{}").unwrap();
-        assert_eq!(p.native, [false; 3]);
+        assert!(!p.accuracy);
     }
 
     #[test]
@@ -731,7 +751,7 @@ mod tests {
     #[test]
     fn child_environment_probe() {
         if let Some(path) = std::env::var_os("LAUNCHER_TEST_PROBE") {
-            let values: Vec<_> = ["MKDS_HW_FS", "MKDS_HW_ARM7", "MKDS_HW_TIME"]
+            let values: Vec<_> = ["MKDS_HW_FS", "MKDS_HW_ARM7", "MKDS_HW_TIME", "MKDS_HW_SND"]
                 .map(|k| std::env::var(k).unwrap_or_default())
                 .into();
             std::fs::write(path, values.join(",")).unwrap();
@@ -756,13 +776,14 @@ mod tests {
                     ("LAUNCHER_TEST_PROBE", Some(output)),
                     ("MKDS_HW_FS", Some("native")),
                     ("MKDS_HW_ARM7", None),
-                    ("MKDS_HW_TIME", Some("native"))
+                    ("MKDS_HW_TIME", Some("native")),
+                    ("MKDS_HW_SND", Some("exact")),
                 ]
             )
             .unwrap(),
             0
         );
-        assert_eq!(std::fs::read_to_string(output).unwrap(), "native,,native");
+        assert_eq!(std::fs::read_to_string(output).unwrap(), "native,,native,exact");
         assert_eq!(std::env::var_os("MKDS_HW_FS"), before);
     }
 }

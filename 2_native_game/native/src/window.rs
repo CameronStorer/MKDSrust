@@ -16,6 +16,19 @@ use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, PhysicalKey};
 use winit::window::{Fullscreen, Window, WindowId};
 
+/// Decode the compile-time embedded RGBA icon; no runtime asset path is needed.
+fn brand_icon() -> winit::window::Icon {
+    let decoder = png::Decoder::new(std::io::Cursor::new(
+        include_bytes!("../../../assets/branding/icon.png").as_slice(),
+    ));
+    let mut reader = decoder.read_info().expect("valid embedded icon PNG");
+    let mut rgba = vec![0; reader.output_buffer_size().expect("icon buffer size")];
+    let info = reader.next_frame(&mut rgba).expect("decode embedded icon");
+    rgba.truncate(info.buffer_size());
+    winit::window::Icon::from_rgba(rgba, info.width, info.height)
+        .expect("embedded icon is RGBA")
+}
+
 /// Both screens, top first: 256 x 384 pixels, `0x00RRGGBB`.
 pub const W: u32 = 256;
 pub const H: u32 = 384;
@@ -237,6 +250,7 @@ impl ApplicationHandler for App {
         let (w, h) = if self.display.side_by_side { (W * 2, H / 2) } else { (W, H) };
         let attrs = Window::default_attributes()
             .with_title(self.title.clone())
+            .with_window_icon(Some(brand_icon()))
             .with_inner_size(LogicalSize::new(w * 2, h * 2))
             .with_min_inner_size(LogicalSize::new(w / 2, h / 2))
             .with_fullscreen(self.display.fullscreen.then_some(Fullscreen::Borderless(None)));

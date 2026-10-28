@@ -1,4 +1,4 @@
-//! MKDS Rust port builder: validates a user-supplied ROM, builds the port with locked
+//! MKDSrust builder: validates a user-supplied ROM, builds the port with locked
 //! dependencies, and writes a launcher bundle. Also acts as the bundle's launcher (`play`).
 mod build;
 
@@ -11,7 +11,7 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(version, about)]
+#[command(version, about = "MKDSrust: build and launch a native game from your own Mario Kart DS ROM")]
 struct Args {
     /// Path to your own .nds file
     rom: Option<PathBuf>,
@@ -66,6 +66,9 @@ struct Args {
     /// Diagnostics only: compile the reference interpreter into the game (enables --arm7-interpreted)
     #[arg(long)]
     with_interpreter: bool,
+    /// Instruction timing (default: native; MKDS_TIMING also supported)
+    #[arg(long, value_parser = ["native", "exact"])]
+    timing: Option<String>,
     /// Prevent Cargo network access
     #[arg(long)]
     offline: bool,
@@ -120,6 +123,7 @@ fn run() -> Result<i32, BuildError> {
         }
     }
     let args = Args::parse();
+    if let Some(timing) = &args.timing { unsafe { std::env::set_var("MKDS_TIMING", timing); } }
     if args.clear_cache {
         let dir = args.cache_dir.clone().unwrap_or_else(build::default_cache_dir);
         if dir.join("build.lock").exists() {
@@ -249,5 +253,16 @@ fn main() {
             eprintln!("Error: {e}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod defaults_tests {
+    use super::*;
+    #[test]
+    fn timing_cli_accepts_only_supported_modes() {
+        assert!(Args::try_parse_from(["builder", "--timing", "exact"]).is_ok());
+        assert!(Args::try_parse_from(["builder", "--timing", "native"]).is_ok());
+        assert!(Args::try_parse_from(["builder", "--timing", "invalid"]).is_err());
     }
 }

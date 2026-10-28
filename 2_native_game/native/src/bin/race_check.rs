@@ -49,6 +49,7 @@ pub fn run_with_tables(
     signatures: &'static [recomp::residency::SegmentSig],
     table7: &'static [recomp::mem::Lifted],
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var_os("MKDS_RTC").is_none() { unsafe { std::env::set_var("MKDS_RTC", "fixed"); } }
     // Block 5.0 oracle options (anywhere among the positional arguments; see `oracle`):
     // --record DIR, --replay INPUTS.csv (open loop, route ignored: pass `-`), --mask FILE, --dump-frames a,b
     let mut positional = Vec::new();
@@ -120,6 +121,7 @@ pub fn run_with_tables(
     let dispatcher = Dispatcher::with_loaded(table, &fixed);
     dispatcher.set_natives(recomp::native::selected());
     let mut session = Session::new(&rom, &image, &dispatcher)?;
+    mkds_native::saves::configure(&mut session.machine.arm7.as_mut().unwrap().s.periph.backup, None, record.is_some() || replay.is_some())?;
     if !table7.is_empty() {
         session
             .machine
@@ -927,7 +929,12 @@ pub mod oracle {
             }
             if shot_frames().contains(&frame) {
                 // diagnostics only (`MKDS_SHOT_FRAMES=a,b,..`): both screens as PNG, for writing input scripts
-                shot(&self.dir.join(format!("shot_{frame}.png")), &m.render_snapshot().screens())?;
+                let snap = m.render_snapshot();
+                shot(&self.dir.join(format!("shot_{frame}.png")), &snap.screens())?;
+                if std::env::var_os("MKDS_SHOT_SNAP").is_some() {
+                    // the raw render inputs too (`snap_info`, `render_compare`), same scratch-only rule
+                    std::fs::write(self.dir.join(format!("snap_{frame}.mksnap")), snap.encode())?;
+                }
             }
             self.waits = [0; 4];
             self.last = Some(frame);

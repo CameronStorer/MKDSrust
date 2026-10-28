@@ -44,6 +44,42 @@ pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// SHA-1 names flat saves by the original cartridge image (not the sparse virtual card).
+pub fn sha1(bytes: &[u8]) -> String {
+    let mut h = [0x67452301u32, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0];
+    let mut padded = bytes.to_vec();
+    padded.push(0x80);
+    while padded.len() % 64 != 56 { padded.push(0); }
+    padded.extend_from_slice(&((bytes.len() as u64) * 8).to_be_bytes());
+    for block in padded.chunks_exact(64) {
+        let mut w = [0u32; 80];
+        for (i, b) in block.chunks_exact(4).enumerate() { w[i] = u32::from_be_bytes(b.try_into().unwrap()); }
+        for i in 16..80 { w[i] = (w[i-3] ^ w[i-8] ^ w[i-14] ^ w[i-16]).rotate_left(1); }
+        let [mut a, mut b, mut c, mut d, mut e] = h;
+        for (i, word) in w.into_iter().enumerate() {
+            let (f, k) = match i {
+                0..=19 => ((b & c) | (!b & d), 0x5a827999),
+                20..=39 => (b ^ c ^ d, 0x6ed9eba1),
+                40..=59 => ((b & c) | (b & d) | (c & d), 0x8f1bbcdc),
+                _ => (b ^ c ^ d, 0xca62c1d6),
+            };
+            let t = a.rotate_left(5).wrapping_add(f).wrapping_add(e).wrapping_add(k).wrapping_add(word);
+            e = d; d = c; c = b.rotate_left(30); b = a; a = t;
+        }
+        for (s, v) in h.iter_mut().zip([a,b,c,d,e]) { *s = s.wrapping_add(v); }
+    }
+    h.iter().map(|v| format!("{v:08x}")).collect()
+}
+
+#[cfg(test)]
+mod sha1_tests {
+    #[test]
+    fn known_vectors() {
+        assert_eq!(super::sha1(b""), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+        assert_eq!(super::sha1(b"abc"), "a9993e364706816aba3e25717850c26c9cd0d89d");
+    }
+}
+
 pub fn sha256_file(path: &Path) -> Result<String, BuildError> {
     let mut f = File::open(path)?;
     let mut h = Sha256::new();

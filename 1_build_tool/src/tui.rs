@@ -437,7 +437,7 @@ fn draw(f: &mut Frame, screen: &Screen, cfg: &Config) {
     let [title, body, help] =
         Layout::vertical([Constraint::Length(3), Constraint::Min(5), Constraint::Length(1)]).areas(f.area());
     f.render_widget(
-        Paragraph::new("MKDS Native Builder").block(Block::bordered()).style(Style::new().add_modifier(Modifier::BOLD)),
+        Paragraph::new("MKDSrust").block(Block::bordered()).style(Style::new().add_modifier(Modifier::BOLD)),
         title,
     );
     let list_style = |l: List<'static>| l.highlight_symbol("> ").highlight_style(Style::new().fg(Color::Yellow));

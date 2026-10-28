@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/branding/logo.png" alt="MKDSrust" width="640" />
+</p>
+
 # MKDSrust
 
 **Lift the code. Keep the drift.**
@@ -10,7 +14,7 @@ The aim is to preserve playability beyond the original hardware, make the game's
 > You must own the game and dump your cartridge yourself. This repository supplies no Nintendo code, assets or ROMs and does not fetch them for you. Translation and extraction happen locally. Generated source, extracted assets and built games are for personal use and must not be shared.
 
 > [!WARNING]
-> This is a work in progress. Verification covers recorded scenarios, not every possible game state. Leave experimental native hardware options off for the established baseline.
+> This is a work in progress. Verification covers recorded scenarios, not every possible game state. Player builds use native hardware services and budget-free timing by default. Use exact timing and hardware switches for the established acceptance baseline.
 
 MKDSrust is not affiliated with or endorsed by Nintendo. Nintendo, Mario Kart DS and other trademarks belong to their respective owners.
 
@@ -31,7 +35,7 @@ MKDSrust is not affiliated with or endorsed by Nintendo. Nintendo, Mario Kart DS
 - About **2 GB free disk space** and **8 GB RAM recommended**. Compilation can consume substantial memory; reduce `--jobs N` if necessary.
 - Internet for the initial dependency download; cached dependencies can be used offline later.
 
-Existing executable names, output paths and configuration folders still use **MKDS Native Builder** / `mkds`. This README name does not rename those interfaces.
+MKDSrust keeps existing executable names, output paths and configuration folders for compatibility with existing installs.
 
 ## Quick start: graphical Windows launcher
 
@@ -46,7 +50,7 @@ On **Home**, select your own supported ROM, inspect its compatibility result, se
 
 **Settings** and **Controls** have explicit Save buttons; changes apply on the next game launch. Controller bindings use menus, without physical controller capture. A rebuild into a nonempty destination creates a sibling directory and changes the active output only after success, preserving the old bundle. Keep the source checkout available for future builds.
 
-Preferences and the last completed build log live in `%APPDATA%\MKDS Native Builder\launcher.json` and `launcher-build.log` beside it. **Outdated** compares local source timestamps and the selected ROM hash; it is not an online update check. The three Advanced native FS/ARM7/time toggles are experimental and initially off. See [launcher documentation](launcher/README.md).
+Preferences and the last completed build log live in `%APPDATA%\MKDS Native Builder\launcher.json` and `launcher-build.log` beside it. **Outdated** compares local source timestamps and the selected ROM hash; it is not an online update check. Advanced offers Accuracy mode (exact hardware), off by default; it sets FS/ARM7/TIME/SND to exact in the game process. See [launcher documentation](launcher/README.md).
 
 ## Quick start: Windows scripts
 
@@ -56,7 +60,7 @@ Preferences and the last completed build log live in `%APPDATA%\MKDS Native Buil
 - Close and reopen any terminal windows afterwards.
 
 **2. Get this repository**
-- Click **Code -> Download ZIP** on GitHub and unzip it (for example to `C:\MKDS Native Builder`), **or** run
+- Click **Code -> Download ZIP** on GitHub and unzip it (for example to `C:\MKDSrust`), **or** run
   `git clone https://github.com/CameronStorer/mkds-native-builder`.
 
 **3. Build**
@@ -291,6 +295,12 @@ The [function dictionary](dictionary/README.md) contains research metadata rathe
 
 Research notes: [MKDS Decomp Docs](https://docs.cameronstorer.com/MKDS-Decomp-Docs/).
 
+## Native defaults and exact builds
+
+Normal builds use budget-free native timing. Player executables default `MKDS_HW_FS`, `MKDS_HW_ARM7`, `MKDS_HW_TIME`, and `MKDS_HW_SND` to `native`; explicit environment overrides are preserved. Native RTC reads the host local date and time. Set `MKDS_RTC=fixed` for the deterministic clock (2010-06-15 12:00:00).
+
+For the original behavior, rebuild with `--timing exact` (or `MKDS_TIMING=exact`), then set all four hardware switches to `exact`. Accuracy mode in the launcher sets those four runtime switches; matching instruction timing requires an exact build. `acceptance.exe` uses its build's generated timing and a fixed RTC: native builds enable native runtime timing and hardware defaults, while exact builds keep exact hardware defaults. Acceptance/reference proofs must build with `--timing exact --with-acceptance`; record/replay paths default to the fixed clock.
+
 ## Verification and source progress
 
 The [Block 4 report](4_docs/BLOCK4_SOURCE_PLAN.md) records a Figure-8 acceptance race finishing first at frame **11,462**. Fiber and flat dispatch produced the same **1,707,950,080 ARM9 instructions**, **581,521 IRQs**, byte-identical telemetry over **12,362 frames**, identical inputs and all **40 screenshots**. Raised code and type/accessor passes are also reported race-identical. This proves regression equivalence for the recorded run against the project's exact baseline, rather than universal agreement with real hardware across all modes.
@@ -383,3 +393,12 @@ Include your OS, error text, the scenario and relevant logs. The graphical launc
 The repository contains no Nintendo code, assets or ROMs. You must own the game and make your own lawful cartridge dump. ROMs, extracted files, generated source and compiled game bundles are for personal use and must not be redistributed. Texture dumps are also game-derived material. Access to the tools does not grant rights to distribute the game.
 
 MKDSrust is independent of Nintendo and is neither affiliated with nor endorsed by it. All trademarks remain the property of their respective owners.
+## Save files
+
+Players automatically keep progress and options in the platform settings data directory,
+under `MKDSrust/saves/<original ROM sha1>.sav`. Use **Open save folder** in launcher settings.
+A flat 256 KiB `save.sav` beside `play.exe` is imported when no user save exists;
+same-size flat DeSmuME/melonDS images can also be copied into the save folder.
+`MKDS_SAVE=off` disables saves; `MKDS_SAVE=<path>` selects a different file.
+Acceptance defaults to blank in-memory saves; an explicit path enables persistence for
+save testing. Recording/replay always uses blank memory, even with an explicit path.
