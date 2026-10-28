@@ -33,6 +33,8 @@ pub struct Options {
     /// snapshots contain game graphics).
     pub snapshots: Option<PathBuf>,
     pub snapshot_every: Option<u64>,
+    /// Diagnostics: first hardware frame `--snapshots` writes (default 0).
+    pub snapshot_from: u64,
     pub input_script: Option<PathBuf>,
     pub gx_trace: Option<PathBuf>,
     /// Print once per second: emulated vs wall time, frames presented/rendered, audio underruns.
@@ -82,6 +84,9 @@ impl Options {
                 "--frames" => result.frame_limit = Some(positive(args.next(), "--frames")?),
                 "--snapshots" => {
                     result.snapshots = Some(args.next().ok_or("--snapshots needs a directory")?.into())
+                }
+                "--snapshot-from" => {
+                    result.snapshot_from = args.next().and_then(|s| s.parse().ok()).ok_or("--snapshot-from needs a frame")?
                 }
                 "--snapshot-every" => {
                     result.snapshot_every = Some(positive(args.next(), "--snapshot-every")?)
@@ -466,6 +471,8 @@ fn emulate(
     }
     let busy = Arc::new(AtomicBool::new(false));
     let renderer = window.is_some().then(|| spawn_renderer(busy.clone(), options.software_renderer != Some(true)));
+    // Presenters show what the console scans out at each display start (latched; see `Machine::render_snapshot`).
+    session.machine.display_latch = window.is_some() || options.snapshots.is_some();
     // Wall-clock time spent re-anchoring the schedule after a slow stretch (no catch-up sprint).
     let mut skew = Duration::ZERO;
     let mut parity: Option<Vec<u32>> = None;
@@ -504,10 +511,16 @@ fn emulate(
                 let remaining = options.instruction_limit.map_or(16_384, |n| {
                     n.saturating_sub(session.stats.instructions).min(16_384) as u32
                 });
-                session.advance(remaining)?;
+                // Stop at a new frame so every frame is presented: without an instruction budget one step can
+                // hold a whole frame of guest work, and `advance(remaining)` then ran past frames unseen.
+                let frame_before = session.frame_number();
+                let mut left = remaining;
+                while left > 0 && !session.machine.host_quit && session.frame_number() == frame_before {
+                    left -= session.step(left)?;
+                }
                 if let Some(dir) = &options.snapshots {
                     let frame = session.frame_number();
-                    if frame != last_snapshot && frame % options.snapshot_every.unwrap_or(60) == 0 {
+                    if frame != last_snapshot && frame >= options.snapshot_from && frame % options.snapshot_every.unwrap_or(60) == 0 {
                         last_snapshot = frame;
                         let path = dir.join(format!("f{frame:06}.mksnap"));
                         std::fs::write(&path, session.render_snapshot().encode())

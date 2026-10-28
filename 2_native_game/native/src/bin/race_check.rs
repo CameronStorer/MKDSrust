@@ -928,7 +928,12 @@ pub mod oracle {
             }
             if shot_frames().contains(&frame) {
                 // diagnostics only (`MKDS_SHOT_FRAMES=a,b,..`): both screens as PNG, for writing input scripts
-                shot(&self.dir.join(format!("shot_{frame}.png")), &m.render_snapshot().screens())?;
+                let snap = m.render_snapshot();
+                shot(&self.dir.join(format!("shot_{frame}.png")), &snap.screens())?;
+                if std::env::var_os("MKDS_SHOT_SNAP").is_some() {
+                    // the raw render inputs too (`snap_info`, `render_compare`), same scratch-only rule
+                    std::fs::write(self.dir.join(format!("snap_{frame}.mksnap")), snap.encode())?;
+                }
             }
             self.waits = [0; 4];
             self.last = Some(frame);
