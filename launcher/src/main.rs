@@ -424,6 +424,12 @@ impl Launcher {
             });
     }
     fn settings_page(&mut self, ui: &mut egui::Ui) {
+        if ui.button("Open save folder").clicked() {
+            if let Some(folder) = mkds_builder::settings::save_folder() {
+                let result = std::fs::create_dir_all(&folder).and_then(|_| std::process::Command::new("explorer.exe").arg(&folder).spawn().map(|_| ()));
+                if let Err(e) = result { self.message = e.to_string(); }
+            }
+        }
         ui.heading("Display settings");
         ui.label("Shared with the terminal launcher and game. Save before launching.");
         ui.horizontal(|ui| {

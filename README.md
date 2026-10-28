@@ -389,3 +389,12 @@ Include your OS, error text, the scenario and relevant logs. The graphical launc
 The repository contains no Nintendo code, assets or ROMs. You must own the game and make your own lawful cartridge dump. ROMs, extracted files, generated source and compiled game bundles are for personal use and must not be redistributed. Texture dumps are also game-derived material. Access to the tools does not grant rights to distribute the game.
 
 Driftlift is independent of Nintendo and is neither affiliated with nor endorsed by it. All trademarks remain the property of their respective owners.
+## Save files
+
+Players automatically keep progress and options in the platform settings data directory,
+under `Driftlift/saves/<original ROM sha1>.sav`. Use **Open save folder** in launcher settings.
+A flat 256 KiB `save.sav` beside `play.exe` is imported when no user save exists;
+same-size flat DeSmuME/melonDS images can also be copied into the save folder.
+`MKDS_SAVE=off` disables saves; `MKDS_SAVE=<path>` selects a different file.
+Acceptance defaults to blank in-memory saves; an explicit path enables persistence for
+save testing. Recording/replay always uses blank memory, even with an explicit path.

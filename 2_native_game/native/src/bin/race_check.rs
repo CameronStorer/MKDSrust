@@ -121,6 +121,7 @@ pub fn run_with_tables(
     let dispatcher = Dispatcher::with_loaded(table, &fixed);
     dispatcher.set_natives(recomp::native::selected());
     let mut session = Session::new(&rom, &image, &dispatcher)?;
+    mkds_native::saves::configure(&mut session.machine.arm7.as_mut().unwrap().s.periph.backup, None, record.is_some() || replay.is_some())?;
     if !table7.is_empty() {
         session
             .machine

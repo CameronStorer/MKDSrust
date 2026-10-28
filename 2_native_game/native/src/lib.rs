@@ -1,5 +1,6 @@
 //! Native host for the locally generated game. Call `run` with the generated lift table.
 mod audio;
+pub mod saves;
 pub mod assets;
 pub mod gpu;
 mod pad;
@@ -22,6 +23,7 @@ use std::{
 
 #[derive(Default, Debug, Clone)]
 pub struct Options {
+    pub save_rom_sha1: Option<String>,
     /// Explicit oracle fallback for ARM7 integration diagnostics; never enable in acceptance.
     pub diagnostic_arm7_interpreter: bool,
     pub headless: bool,
@@ -281,6 +283,9 @@ pub fn run_from_assets(
     options: Options,
 ) -> Result<RunReport, String> {
     let assets = assets::load(path, expected_rom_sha256, expected_assets_sha256)?;
+    let mut options = options;
+    let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(path.join("manifest.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    options.save_rom_sha1 = Some(manifest["rom"]["sha1"].as_str().ok_or("Assets lack original ROM SHA-1; rebuild the bundle")?.to_string());
     eprintln!("Verified loose assets; manifest sha256={}", assets.manifest_sha256);
     run_with_signatures(&assets.card, &assets.arm9, table, signatures, options)
 }
@@ -305,6 +310,9 @@ pub fn run_from_assets_dual(
     options: Options,
 ) -> Result<RunReport, String> {
     let assets = assets::load(path, expected_rom_sha256, expected_assets_sha256)?;
+    let mut options = options;
+    let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(path.join("manifest.json")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    options.save_rom_sha1 = Some(manifest["rom"]["sha1"].as_str().ok_or("Assets lack original ROM SHA-1; rebuild the bundle")?.to_string());
     eprintln!("Verified loose assets; manifest sha256={}", assets.manifest_sha256);
     run_with_dual_tables(&assets.card, &assets.arm9, table, signatures, table7, options)
 }
@@ -374,6 +382,8 @@ fn emulate(
     let dispatcher = Dispatcher::with_loaded(table, &resident);
     dispatcher.set_natives(recomp::native::selected());
     let mut session = Session::new(rom, image, &dispatcher)?;
+    let save_id = options.save_rom_sha1.clone().unwrap_or_else(|| mkds_builder::rom::sha1(rom));
+    saves::configure(&mut session.machine.arm7.as_mut().unwrap().s.periph.backup, Some(&save_id), options.input_script.is_some() || options.input_log.is_some())?;
     // Headless `--stats` prints a per-stage cost profile; the clock is only read when asked for.
     session.machine.profile_time = options.headless && options.stats;
     if let Some(table7) = table7 {

@@ -182,6 +182,11 @@ pub fn default_path() -> Option<PathBuf> {
     crate::controls::default_path().map(|p| p.with_file_name("settings.txt"))
 }
 
+/// Use the same platform directory selection as controls/settings, under the game name.
+pub fn save_folder() -> Option<PathBuf> {
+    default_path()?.parent()?.parent().map(|p| p.join("Driftlift").join("saves"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

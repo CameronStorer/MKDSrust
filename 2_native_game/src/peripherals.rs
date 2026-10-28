@@ -463,6 +463,7 @@ pub enum BackupKind {
 }
 
 pub struct Backup {
+    save: Option<crate::save::Save>,
     pub kind: BackupKind,
     pub data: Vec<u8>,
     pub cnt: u16,
@@ -476,7 +477,27 @@ pub struct Backup {
 
 impl Backup {
     pub fn new(kind: BackupKind, size: usize) -> Backup {
-        Backup { kind, data: vec![0xFF; size], cnt: 0, reply: 0, step: 0, cmd: 0, addr: 0, write_enabled: false, selected: false }
+        Backup { save: None, kind, data: vec![0xFF; size], cnt: 0, reply: 0, step: 0, cmd: 0, addr: 0, write_enabled: false, selected: false }
+    }
+
+    pub fn attach_save(&mut self, path: std::path::PathBuf, import: Option<&std::path::Path>) -> std::io::Result<()> {
+        self.save = Some(crate::save::Save::load(path, import, &mut self.data)?);
+        Ok(())
+    }
+
+    pub fn changed(&mut self) {
+        if let Some(s) = &mut self.save { s.dirty = true; }
+    }
+
+    pub fn poll_save(&mut self) {
+        if let Some(s) = &mut self.save {
+            if let Err(e) = s.poll(&self.data) { eprintln!("[save] write failed: {e}"); }
+        }
+    }
+
+    pub fn flush_save(&mut self) -> std::io::Result<()> {
+        if let Some(s) = &mut self.save { s.flush(&self.data)?; }
+        Ok(())
     }
 
     fn addr_bytes(&self) -> usize {
@@ -504,6 +525,10 @@ impl Backup {
         }
         let hold = self.cnt & 0x40 != 0;
         self.reply = self.exchange(b);
+        self.poll_save();
+        if self.cmd == 0x04 {
+            if let Err(e) = self.flush_save() { eprintln!("[save] write failed: {e}"); }
+        }
         if trace_enabled() {
             eprintln!("backup spi step {} cmd {:#04X} in {:#04X} -> {:#04X}{}", self.step, self.cmd, b, self.reply, if hold { " (hold)" } else { "" });
         }
@@ -549,6 +574,7 @@ impl Backup {
                 } else if self.write_enabled {
                     let a = self.addr % size;
                     self.data[a] = if self.cmd == 0x0A || self.kind != BackupKind::Flash { b } else { self.data[a] & b };
+                    self.changed();
                     // wraps within the 256-byte page
                     self.addr = (self.addr & !0xFF) | ((self.addr + 1) & 0xFF);
                 }
@@ -567,6 +593,7 @@ impl Backup {
                     for i in 0..len.min(size - start) {
                         self.data[start + i] = 0xFF;
                     }
+                    self.changed();
                 }
                 0
             }
@@ -582,6 +609,12 @@ impl Backup {
 // ---------------------------------------------------------------------------------------------
 // The set, as the ARM7's I/O sees it
 // ---------------------------------------------------------------------------------------------
+
+impl Drop for Backup {
+    fn drop(&mut self) {
+        if let Err(e) = self.flush_save() { eprintln!("[save] exit write failed: {e}"); }
+    }
+}
 
 pub struct Peripherals {
     pub spi: Spi,

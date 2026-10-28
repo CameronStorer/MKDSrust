@@ -224,6 +224,7 @@ impl<'a> Session<'a> {
 
     /// Advance at most 32 ARM9 instructions, keeping the boot-time PXI handshake interleaved.
     pub fn step(&mut self, limit: u32) -> Result<u32, String> {
+        if let Some(a) = &mut self.machine.arm7 { a.s.periph.backup.poll_save(); }
         let limit = limit.min(32);
         if limit == 0 {
             return Ok(0);

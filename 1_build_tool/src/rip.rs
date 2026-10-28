@@ -199,6 +199,7 @@ pub fn rip(rom: &[u8], rom_sha256: &str, out: &Path, log: &mut dyn FnMut(String)
         "format": "mkds-assets",
         "format_version": FORMAT_VERSION,
         "rom": {
+            "sha1": crate::rom::sha1(rom),
             "sha256": rom_sha256,
             "game_code": String::from_utf8_lossy(&h[12..16]),
             "revision": h[0x1E],
