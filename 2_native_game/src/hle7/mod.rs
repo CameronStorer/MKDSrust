@@ -1,4 +1,4 @@
-//! ARM7 → PXI service HLE (Block 5, stage 5.2a; `4_docs/BLOCK5_PLAN.md`, lane `b5-hle7`).
+//! ARM7 → PXI service HLE (Block 5, stage 5.2a; `https://github.com/CameronStorer/MKDSrust-Docs`, lane `b5-hle7`).
 //!
 //! The ARM9 talks to the ARM7 only through the IPC FIFO (PXI words: bits 0-4 tag, bit 5 error, bits 6-31
 //! data), the IPCSYNC nibble and shared main memory. [`Router`] receives the ARM9's FIFO words for the tags it

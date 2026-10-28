@@ -1,4 +1,5 @@
 //! Private AMCE0 acceptance driver. Reads guest telemetry, sends host buttons, never writes guest RAM.
+//! Usage, inputs and diagnostic scripts: https://github.com/CameronStorer/MKDSrust-Docs.
 //! Not a game runner or a substitute for compiled-game acceptance.
 use recomp::{boot::session::Session, dispatch::Dispatcher, rt::Mem};
 use std::{
@@ -372,7 +373,8 @@ pub mod oracle {
     use recomp::{ds_mem, machine::Machine};
     use std::cell::{Cell, RefCell};
     use std::io::{BufWriter, Write};
-    use std::path::{Path, PathBuf};
+    //! Usage, inputs and diagnostic scripts: https://github.com/CameronStorer/MKDSrust-Docs.
+use std::path::{Path, PathBuf};
     use std::rc::Rc;
 
     const MAIN_BLOCK: u32 = 0x1_0000;

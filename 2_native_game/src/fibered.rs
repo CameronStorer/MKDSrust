@@ -1,4 +1,4 @@
-//! Fiber execution of the ARM9 (block 4A.2, `4_docs/BLOCK4_SOURCE_PLAN.md`).
+//! Fiber execution of the ARM9 (block 4A.2, `https://github.com/CameronStorer/MKDSrust-Docs`).
 //!
 //! The flat runtime returns to its run loop at every call, return and slice end, so a lifted
 //! function must be resumable at any block. Readable (raised) code needs real Rust calls instead.

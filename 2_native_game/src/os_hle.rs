@@ -1,5 +1,5 @@
 //! Block 5.3: OS time and interrupts on the host (`MKDS_HW_TIME=native`; the default `exact` model is
-//! unchanged). See `4_docs/BLOCK5_PLAN.md` ("5.3") and `4_docs/BLOCK5_CENSUS.md`.
+//! unchanged). See `https://github.com/CameronStorer/MKDSrust-Docs` ("5.3") and `https://github.com/CameronStorer/MKDSrust-Docs`.
 //!
 //! Two parts, both off unless the switch is set:
 //! - [`VirtualTime`] owns timers 0 and 1, the two the SDK uses: TM0 is the `OS_GetTick` counter (its
@@ -159,7 +159,7 @@ impl VirtualTime {
     }
 }
 
-/// Busy-wait loops from the census (`4_docs/BLOCK5_CENSUS.md`) that poll for pending IRQs: a slice that
+/// Busy-wait loops from the census (`https://github.com/CameronStorer/MKDSrust-Docs`) that poll for pending IRQs: a slice that
 /// starts inside one is a safe point. (start, end, what).
 pub const SAFE_LOOPS: &[(u32, u32, &str)] = &[
     (0x0214_D830, 0x0214_D920, "PXI_Init handshake on IPCSYNC (boot)"),

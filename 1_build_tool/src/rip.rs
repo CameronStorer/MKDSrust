@@ -1,4 +1,4 @@
-//! Rips the user's ROM into loose files (`assets/`, format 1; spec: 4_docs/ASSET_LAYOUT.md).
+//! Rips the user's ROM into loose files (`assets/`, format 1; spec: https://github.com/CameronStorer/MKDSrust-Docs).
 //! Every FAT entry is written exactly once: named NitroFS files under `files/`, overlays and system
 //! binaries under `system/`. The manifest records sizes and SHA-256 so the runtime can rebuild an
 //! identical file system (same FAT ids) from the folder and detect edited or missing files.
@@ -193,7 +193,7 @@ pub fn rip(rom: &[u8], rom_sha256: &str, out: &Path, log: &mut dyn FnMut(String)
         assets.join("README.txt"),
         "These files were generated on your machine from your own ROM by mkds_builder --rip.\n\
          They are the game's copyrighted data: keep them for your own use and do not distribute them.\n\
-         Layout and manifest format: 4_docs/ASSET_LAYOUT.md in the project.\n",
+         Layout and manifest format: https://github.com/CameronStorer/MKDSrust-Docs in the project.\n",
     )?;
     let manifest = json!({
         "format": "mkds-assets",

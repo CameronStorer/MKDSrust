@@ -159,7 +159,7 @@ fn raised_rom_functions_match_their_translation() {
     let rom = std::fs::read(path).unwrap();
     let image = mkds_builder::extract::arm9_main(&rom).unwrap();
     let base = u32::from_le_bytes(rom[0x28..0x2C].try_into().unwrap());
-    let csv = std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../4_docs/FUNCTION_BOUNDARIES.csv")).unwrap();
+    let csv = std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../dictionary/FUNCTION_BOUNDARIES.csv")).unwrap();
     let img = Image::new(base, &image);
     let want: usize = std::env::var("MKDS_T1_SAMPLE").ok().and_then(|v| v.parse().ok()).unwrap_or(300);
     let mut all: Vec<_> = build_support::boundaries(&csv)
@@ -473,7 +473,7 @@ fn nospill_rom_functions_match_their_translation() {
     let rom = std::fs::read(path).unwrap();
     let image = mkds_builder::extract::arm9_main(&rom).unwrap();
     let base = u32::from_le_bytes(rom[0x28..0x2C].try_into().unwrap());
-    let csv = std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../4_docs/FUNCTION_BOUNDARIES.csv")).unwrap();
+    let csv = std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../dictionary/FUNCTION_BOUNDARIES.csv")).unwrap();
     let img = Image::new(base, &image);
     let want: usize = std::env::var("MKDS_T1_SAMPLE").ok().and_then(|v| v.parse().ok()).unwrap_or(300);
     let mut all: Vec<_> = build_support::boundaries(&csv)

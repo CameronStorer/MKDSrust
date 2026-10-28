@@ -3,7 +3,7 @@
 //! account of every metadata entry. Contains no game data; everything comes from the supplied ROM.
 //!
 //! ```text
-//! mkds_gen --rom <game.nds> --metadata <boundaries.csv> --out <dir>
+//! mkds_gen --rom <game.nds> --metadata dictionary/FUNCTION_BOUNDARIES.csv --out <dir>
 //!          [--recomp <path to recomp crate>] [--lockfile <Cargo.lock>] [--part-bytes N]
 //!          [--no-game] [--allow-incomplete]
 //! ```

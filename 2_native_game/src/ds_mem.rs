@@ -925,7 +925,7 @@ impl Bus {
             // IPCSYNC: bits 0-3 are the ARM7's output (read-only here), bits 8-11 ours, 14 enables the recv IRQ.
             // ARM7 stand-in for the SDK's PXI_Init handshake (sub_214D830): the ARM9 echoes the nibble it
             // reads; the ARM7 side answers an echo of its current value by counting up (mod 16), and the ARM9
-            // finishes once it has seen >4 changes and the value is back at 0. Documented in 4_docs/RECOMP_PLAN.md.
+            // finishes once it has seen >4 changes and the value is back at 0. Documented in https://github.com/CameronStorer/MKDSrust-Docs.
             0x180 | 0x181 => {
                 let (mine, ctrl) = match (off, n) {
                     (0x180, 2) | (0x180, 4) => ((v >> 8) & 0xF, v & 0x4F00),

@@ -49,15 +49,7 @@ fn main() {
         .unwrap_or_else(|| manifest.join("no-rom-supplied.nds"));
     let metadata = std::env::var_os("MKDS_FUNCTIONS")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            // address-only boundaries with modes (5_tools/export_boundaries.py), else the private table
-            let b = manifest.join("../4_docs/FUNCTION_BOUNDARIES.csv");
-            if b.exists() {
-                b
-            } else {
-                manifest.join("../4_docs/FUNCTION_TABLE.csv")
-            }
-        });
+        .unwrap_or_else(|| manifest.join("../dictionary/FUNCTION_BOUNDARIES.csv"));
     // Watch the ROM only when one was supplied: a watched path that does not exist makes Cargo rerun
     // this script (and rebuild recomp plus every generated crate) on every build.
     if explicit_rom.is_some() {

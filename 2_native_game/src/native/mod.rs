@@ -1,4 +1,4 @@
-//! Native functions (block 3, `4_docs/BLOCK3_PLAN.md`): readable Rust that replaces a whole guest
+//! Native functions (block 3, `https://github.com/CameronStorer/MKDSrust-Docs`): readable Rust that replaces a whole guest
 //! function once the function dictionary knows what it does. Contains no game code or data: each
 //! entry is our own implementation, found by the address of the function it replaces.
 //!

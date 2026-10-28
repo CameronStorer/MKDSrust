@@ -31,14 +31,6 @@ required-features = ["interpreter"]
 name = "synthetic_lift"
 required-features = ["interpreter"]
 
-[[example]]
-name = "dual_boot"
-required-features = ["interpreter"]
-
-[[example]]
-name = "mkds_boot"
-required-features = ["interpreter"]
-
 [features]
 # The reference interpreter (tests, differential checks, diagnostics). Shipped games build recomp with
 # `default-features = false`: a pc with no lifted code is then an error naming the pc and segment.

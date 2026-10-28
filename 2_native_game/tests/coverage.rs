@@ -1,4 +1,4 @@
-//! Lifter coverage over every function boundary (4_docs/FUNCTION_BOUNDARIES.csv) of the user's ROM:
+//! Lifter coverage over every function boundary (dictionary/FUNCTION_BOUNDARIES.csv) of the user's ROM:
 //! how many functions discover cleanly, and which encodings are still undecodable (left to the
 //! interpreter). Prints a report; fails only if discovery itself errors on a readable entry.
 //! Skipped when no ROM is available. Run with `cargo test --test coverage -- --nocapture`.
@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 fn lift_coverage() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let rom_path = std::env::var_os("MKDS_ROM").map(std::path::PathBuf::from).unwrap_or_else(|| root.join("6_data/rom/gamefile.nds"));
-    let (Ok(rom), Ok(csv)) = (std::fs::read(rom_path), std::fs::read_to_string(root.join("4_docs/FUNCTION_BOUNDARIES.csv"))) else {
+    let (Ok(rom), Ok(csv)) = (std::fs::read(rom_path), std::fs::read_to_string(root.join("dictionary/FUNCTION_BOUNDARIES.csv"))) else {
         eprintln!("no ROM or boundaries: skipping");
         return;
     };

@@ -1,4 +1,4 @@
-//! Shadow checker for native functions (block 3, `4_docs/BLOCK3_PLAN.md`): every time the game reaches a
+//! Shadow checker for native functions (block 3, `https://github.com/CameronStorer/MKDSrust-Docs`): every time the game reaches a
 //! native function, the exact translation runs first with a write journal, its writes are rolled back, the
 //! native runs for real, and the two are compared: the return pc, r0-r3, r12, sp, lr, the flags, the final
 //! value of every memory byte written outside the stack below the entry sp, and the order of math-unit

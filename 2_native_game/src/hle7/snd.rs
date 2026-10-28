@@ -1,4 +1,4 @@
-//! Event-driven ARM7 sound driver (Block 5.2b, `4_docs/BLOCK5_PLAN.md`, lane `b5-sound`).
+//! Event-driven ARM7 sound driver (Block 5.2b, `https://github.com/CameronStorer/MKDSrust-Docs`, lane `b5-sound`).
 //!
 //! Switch: `MKDS_HW_SND=native` (default `exact`: the ARM7 CPU runs the sound driver as before). It implies the
 //! native small services of 5.2a (`MKDS_HW_ARM7=native`), because the CPU stops.
@@ -38,7 +38,7 @@
 //!
 //! Diagnostics: `MKDS_SND_LOG=<file>` (both modes, record only) writes the driver's event stream (see [`log`]).
 //!
-//! Message-level oracle (5.2b verification; scripts in `native/diagnostics/`):
+//! Usage, inputs and diagnostic scripts: https://github.com/CameronStorer/MKDSrust-Docs.
 //! ```text
 //! MKDS_SND_LOG=exact.log acceptance rom.nds route.csv out 15000        # exact model: events, reads, exact.log.snap
 //! python snd_sched.py exact.log exact.sched                              # the exact schedule, reads per context

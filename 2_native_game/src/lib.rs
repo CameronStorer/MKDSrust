@@ -1,4 +1,4 @@
-//! ROM-driven recompiler (4_docs/RECOMP_PLAN.md): decode ARM/Thumb, lift to Rust, run with a DS
+//! ROM-driven recompiler (https://github.com/CameronStorer/MKDSrust-Docs): decode ARM/Thumb, lift to Rust, run with a DS
 //! service layer. Contains no game code or data.
 pub mod arm;
 pub mod save;

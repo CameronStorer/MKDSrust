@@ -83,7 +83,7 @@ fn fingerprint() -> String {
     }
     let mut latest = 0;
     if let Some(s) = source() {
-        for name in ["1_build_tool/src", "2_native_game", "4_docs", "dictionary"] {
+        for name in ["1_build_tool/src", "2_native_game", "dictionary"] {
             walk(&s.join(name), &mut latest);
         }
     }

@@ -13,6 +13,7 @@
 //! A mask lists address ranges (`0xSTART-0xEND reason`) or whole regions (`region NAME reason`) allowed to
 //! differ, each with its reason. Ranges are applied when recording (hashes cover the masked bytes as zero),
 //! so pass the same mask to `replay`/`check`; `region` entries are also honoured by `compare`.
+//! Usage, inputs and diagnostic scripts: https://github.com/CameronStorer/MKDSrust-Docs.
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

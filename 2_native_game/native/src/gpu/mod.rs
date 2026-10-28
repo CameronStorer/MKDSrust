@@ -1,4 +1,4 @@
-//! GPU side of the native platform layer (block 2, `4_docs/BLOCK2_PLAN.md`): one `wgpu` device shared by the
+//! GPU side of the native platform layer (block 2, `https://github.com/CameronStorer/MKDSrust-Docs`): one `wgpu` device shared by the
 //! 3D renderer ([`three_d`]), raw 2D engines ([`two_d`]), screen compositor and presenter. The software renderer in `recomp`
 //! stays the reference: every GPU stage is compared against it with `render_compare`.
 pub mod compose;

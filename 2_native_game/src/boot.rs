@@ -2,8 +2,7 @@
 //! vector code) and the game's own ARM7 (interpreted) run side by side over the shared hardware.
 //! Reports where each CPU is, the hottest ARM9 pcs and what nothing implements yet.
 //!
-//! Used by `examples/dual_boot.rs` (lift table from the build) and the generated full-game workspace
-//! (`examples/lift_workspace.rs` writes a `game` crate calling [`probe`] with every lifted function).
+//! Usage, inputs and diagnostic scripts: https://github.com/CameronStorer/MKDSrust-Docs.
 //! Diagnostics by environment: MKDS_BOOT_INTERP, SLICE, MKDS_PROBE, MKDS_WATCH, ARM7_DUMP.
 
 #[cfg(feature = "interpreter")]
