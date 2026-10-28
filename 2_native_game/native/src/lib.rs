@@ -771,7 +771,7 @@ impl From<&Controls> for Bindings {
             pad: std::array::from_fn(|a| c.pad[a].clone()),
             quit_pad: c.pad[controls::QUIT].clone(),
             title: format!(
-                "MKDS | A={} B={} L={} R={} Start={} | mouse = touch | F11 = fullscreen | {} = quit",
+                "MKDSrust | A={} B={} L={} R={} Start={} | mouse = touch | F11 = fullscreen | {} = quit",
                 hint(0), hint(1), hint(9), hint(8), hint(3), hint(controls::QUIT)
             ),
         }

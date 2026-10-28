@@ -9,7 +9,7 @@ Implemented the Block 5 default promotion. No commit or push was made.
 - Acceptance generation does not inject player hardware defaults. Its driver retains exact hardware defaults and defaults `MKDS_RTC` to `fixed`.
 - The native ARM7 RTC reads `std::time::SystemTime`, converts the civil date, and uses the host OS timezone conversion (including daylight saving time) to return local BCD date/time. Windows and Unix implementations add no dependencies. `MKDS_RTC=fixed` returns the existing fixed peripheral clock. Unit tests and PXI replay routers use fixed time; recording environment paths default to fixed unless explicitly overridden. Civil-date tests cover the epoch, leap day, and midnight rollover.
 - Launcher Advanced now offers one **Accuracy mode (exact hardware)** preference, off by default. It sets all four hardware switches to exact in the child process. Off preserves inherited overrides. Older native-toggle preferences are ignored during deserialization.
-- Updated the Driftlift README, launcher README, Block 5 proposal reproduction instructions and plan status. Acceptance proofs explicitly require `--timing exact --with-acceptance`.
+- Updated the MKDSrust README, launcher README, Block 5 proposal reproduction instructions and plan status. Acceptance proofs explicitly require `--timing exact --with-acceptance`.
 
 ## Restore exact behavior
 

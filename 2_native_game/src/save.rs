@@ -79,7 +79,7 @@ mod tests {
 
     #[test]
     fn imports_once_rejects_wrong_size_and_keeps_previous_image() {
-        let dir = std::env::temp_dir().join(format!("driftlift-import-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("mkdsrust-import-test-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let path = dir.join("user.sav");
         let import = dir.join("save.sav");

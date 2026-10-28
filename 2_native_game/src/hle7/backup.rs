@@ -115,7 +115,7 @@ mod tests {
 
     #[test]
     fn backup_service_persists_and_reloads_flat_image() {
-        let dir = std::env::temp_dir().join(format!("driftlift-save-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("mkdsrust-save-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("service.sav");
         let _ = std::fs::remove_file(&path);

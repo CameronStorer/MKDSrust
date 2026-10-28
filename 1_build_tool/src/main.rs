@@ -1,4 +1,4 @@
-//! MKDS Rust port builder: validates a user-supplied ROM, builds the port with locked
+//! MKDSrust builder: validates a user-supplied ROM, builds the port with locked
 //! dependencies, and writes a launcher bundle. Also acts as the bundle's launcher (`play`).
 mod build;
 
@@ -11,7 +11,7 @@ use std::io::IsTerminal;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(version, about)]
+#[command(version, about = "MKDSrust: build and launch a native game from your own Mario Kart DS ROM")]
 struct Args {
     /// Path to your own .nds file
     rom: Option<PathBuf>,

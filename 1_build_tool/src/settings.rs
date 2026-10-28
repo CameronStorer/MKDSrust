@@ -108,7 +108,7 @@ impl Settings {
     pub fn to_text(&self) -> String {
         let path = |p: &Option<PathBuf>| p.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
         format!(
-            "# MKDS Native Builder display settings\n\
+            "# MKDSrust display settings\n\
              #\n\
              # By default the 3D is drawn sharper than on a DS, as sharp as your window allows; everything else looks like\n\
              # the DS: sharp pixels, top screen above the bottom one. Set Scale = 1 for the exact original look.\n\

@@ -1,4 +1,4 @@
-# MKDS Native Launcher
+# MKDSrust launcher
 
 A graphical Windows launcher built with Rust, eframe/egui and the shared builder library. All interface text, shapes and styling are original. WheelWizard was consulted only for broad workflow ideas (setup, sidebar navigation, a prominent launch action and progress feedback); none of its implementation or assets is included.
 

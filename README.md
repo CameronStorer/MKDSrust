@@ -31,7 +31,7 @@ MKDSrust is not affiliated with or endorsed by Nintendo. Nintendo, Mario Kart DS
 - About **2 GB free disk space** and **8 GB RAM recommended**. Compilation can consume substantial memory; reduce `--jobs N` if necessary.
 - Internet for the initial dependency download; cached dependencies can be used offline later.
 
-Existing executable names, output paths and configuration folders still use **MKDS Native Builder** / `mkds`. This README name does not rename those interfaces.
+MKDSrust keeps existing executable names, output paths and configuration folders for compatibility with existing installs.
 
 ## Quick start: graphical Windows launcher
 
@@ -56,7 +56,7 @@ Preferences and the last completed build log live in `%APPDATA%\MKDS Native Buil
 - Close and reopen any terminal windows afterwards.
 
 **2. Get this repository**
-- Click **Code -> Download ZIP** on GitHub and unzip it (for example to `C:\MKDS Native Builder`), **or** run
+- Click **Code -> Download ZIP** on GitHub and unzip it (for example to `C:\MKDSrust`), **or** run
   `git clone https://github.com/CameronStorer/mkds-native-builder`.
 
 **3. Build**

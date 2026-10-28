@@ -112,7 +112,7 @@ impl Controls {
 
     pub fn to_text(&self) -> String {
         let mut s = String::from(
-            "# MKDS Native Builder controls: one line per DS button, `Button = Key`.\n\
+            "# MKDSrust controls: one line per DS button, `Button = Key`.\n\
              # Several keys for one button: `A = Z, Space`. No key: `Select =`.\n\
              # Key names: A-Z, Key0-Key9, F1-F15, Up, Down, Left, Right, Space, Enter, Escape, Tab, Backspace,\n\
              # LeftShift, RightShift, LeftCtrl, RightCtrl, LeftAlt, RightAlt, NumPad0-NumPad9 (full list in README.md).\n\

@@ -19,7 +19,7 @@ fi
 # Separate host artifacts, including when this checkout is shared with Windows/WSL.
 TARGET="$ROOT/1_build_tool/target/$(uname -s)-$(uname -m)"
 OUT=${2:-"$ROOT/builds/mkds"}
-echo "Preparing the builder (the first time this takes a few minutes)..."
+echo "Preparing the MKDSrust builder (the first time this takes a few minutes)..."
 cargo build --release --locked --manifest-path "$ROOT/1_build_tool/Cargo.toml" --target-dir "$TARGET"
 if [ "$#" -eq 0 ]; then
     # the menu asks for the ROM (paste its path), builds into builds/mkds and can start the game afterwards

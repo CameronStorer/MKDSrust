@@ -599,8 +599,8 @@ impl Launcher {
             .exact_width(175.)
             .show(ctx, |ui| {
                 ui.add_space(22.);
-                ui.heading("MKDS Native");
-                ui.label("Desktop launcher");
+                ui.heading("MKDSrust");
+                ui.label("MKDSrust desktop launcher");
                 ui.add_space(30.);
                 for (i, title) in ["Home", "Settings", "Controls", "Advanced"]
                     .iter()
@@ -646,7 +646,7 @@ impl eframe::App for Launcher {
 }
 fn main() -> eframe::Result<()> {
     eframe::run_native(
-        "MKDS Native Launcher",
+        "MKDSrust",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([1020., 820.])

@@ -1,5 +1,5 @@
 @echo off
-rem MKDS Native Builder.
+rem MKDSrust.
 rem   Double-click (no arguments): a menu opens and asks for your .nds file; paste its path and press Enter.
 rem   From a terminal: build.bat "path\to\your game.nds" ["output folder"]
 setlocal
@@ -10,7 +10,7 @@ if errorlevel 1 (
   exit /b 1
 )
 set "BUILDER=%~dp01_build_tool\target\release\mkds_builder.exe"
-echo Preparing the builder (the first time this takes a few minutes)...
+echo Preparing the MKDSrust builder (the first time this takes a few minutes)...
 cargo build --release --locked --quiet --manifest-path "%~dp01_build_tool\Cargo.toml"
 if errorlevel 1 (
   echo Could not build the builder. See the messages above.
