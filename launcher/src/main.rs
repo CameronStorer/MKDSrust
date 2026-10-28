@@ -28,6 +28,8 @@ enum Event {
     Played(Result<i32, String>),
 }
 struct Launcher {
+    branding: egui::TextureHandle,
+    icon: egui::TextureHandle,
     prefs: Preferences,
     dir: PathBuf,
     settings: Settings,
@@ -118,7 +120,18 @@ impl Launcher {
             Controls::default()
         });
         let log = std::fs::read_to_string(dir.join("launcher-build.log")).unwrap_or_default();
+        let load_texture = |name, bytes: &[u8]| {
+            let image = eframe::icon_data::from_png_bytes(bytes).expect("valid embedded branding PNG");
+            cc.egui_ctx.load_texture(
+                name,
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [image.width as usize, image.height as usize], &image.rgba),
+                egui::TextureOptions::LINEAR,
+            )
+        };
         let mut app = Self {
+            branding: load_texture("MKDSrust wordmark", include_bytes!("../../assets/branding/logo_dark.png")),
+            icon: load_texture("MKDSrust icon", include_bytes!("../../assets/branding/icon.png")),
             prefs,
             dir,
             settings,
@@ -307,6 +320,8 @@ impl Launcher {
         });
     }
     fn home(&mut self, ui: &mut egui::Ui) {
+        let width = ui.available_width().min(480.);
+        ui.add(egui::Image::new(&self.branding).fit_to_exact_size(egui::vec2(width, width / 4.)));
         ui.heading("Your game, on your desktop");
         ui.label("Choose your own ROM, build locally, then play.");
         ui.separator();
@@ -599,6 +614,7 @@ impl Launcher {
             .exact_width(175.)
             .show(ctx, |ui| {
                 ui.add_space(22.);
+                ui.add(egui::Image::new(&self.icon).fit_to_exact_size(egui::vec2(64., 64.)));
                 ui.heading("MKDSrust");
                 ui.label("MKDSrust desktop launcher");
                 ui.add_space(30.);
@@ -649,6 +665,8 @@ fn main() -> eframe::Result<()> {
         "MKDSrust",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
+                .with_icon(eframe::icon_data::from_png_bytes(include_bytes!("../../assets/branding/icon.png"))
+                    .expect("valid embedded window icon"))
                 .with_inner_size([1020., 820.])
                 .with_min_inner_size([800., 650.]),
             ..Default::default()

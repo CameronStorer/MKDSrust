@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/branding/logo.png" alt="MKDSrust" width="640" />
+</p>
+
 # MKDSrust
 
 **Lift the code. Keep the drift.**
