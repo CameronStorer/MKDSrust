@@ -27,17 +27,27 @@ pub fn kart_update_speed(g: &mut Game, kart: Ptr<Kart>, input: u32) {
 
 The code is still generated on the user's machine from their own ROM, and it still behaves exactly like the game.
 
-## Status (2026-10-27)
+## Status (2026-10-28)
 | Package | State |
 |---|---|
 | 4A IR | Done. Prints today's code identically for all 12,736 functions |
 | 4A.2 Fibers | Done, **default** (`MKDS_FLAT=1` turns it off). Race identical to `main`; 401,332 SDK thread switches served |
 | 4B pass 1, dead flags | Done, **default** (`MKDS_EXACT=1` turns it off). Race identical |
-| 4B T1 raised functions | Done for **all ARM9 and ARM7 functions** (0 rejected; the ARM7 uses its cycle-cost budget). Compiled switches print as `match` over their cases (563). Locals, folded temporaries, structured `if`/`loop`/`break`, folded compares (`if r6 == 0`), memory helpers (`R::st32`, `R::ld16s`), push/pop notes. Race identical (fibers and flat). `tests/t1_differential.rs` compares T1 with T0 on synthetic cases and on 300 ROM functions from 48 random states each. `MKDS_T1=off/all/<file>` for bisecting |
-| Names | Raised functions are named from the dictionary, else `sub_<segment>_<address>`. `dictionary/game_names.csv`: 10,035 names: from our notes (Codex), the mapping research, and, for functions without notes, Codex reading the raised code (2,666 names). `dictionary/merge_names.py` checks every name for ROM text. 217 ARM9 functions are still unnamed (4 Codex batches pending), plus the ARM7 program; 3,419 names end in `_maybe` |
+| 4B T1 raised functions | Done for **all 12,736 ARM9 and ARM7 functions** (0 rejected; the ARM7 uses its cycle-cost budget). Compiled switches print as `match` over their cases (563). Locals, folded temporaries, structured `if`/`loop`/`break`, folded compares (`if r6 == 0`), memory helpers (`R::st32`, `R::ld16s`), push/pop notes. Race identical (fibers and flat). `tests/t1_differential.rs` compares T1 with T0 on synthetic cases and on 300 ROM functions from 48 random states each. `MKDS_T1=off/all/<file>` for bisecting |
+| Names | All ARM9 and all 1,105 ARM7 functions named; latest review changed 109 names and leaves 1,445 names ending exactly in `_maybe`. See the completed-work evidence below |
 | Comments | Calls carry the callee's name; constants carry global names. Layout tables: `dictionary/fields.csv`, `field_uses.csv`, `globals.csv` (`export_layout.py`) |
 | 4E source package | `source/README.txt` explains both versions; `tiers.csv` indexes every function (address, tier, Rust name, crate) |
-| 4C types (T2) | **Field accessors and struct inference done.** Memory accesses at struct fields print as `kart::racer_index(m, r4)` / `kart::set_bounce(m, r0, r1)` (5,135 sites). Struct inference: reaching definitions group the register reads that share a value (plain copies included); each access votes for the structs `field_uses.csv` says the function uses at that offset, and a unique winner names every field of that value (stack slots never). The generated `layout` crate holds the 254 research structs with their 2,289 field offsets (`pub const`) and the 584 accessors used, each exactly the helper call it replaces (`#[inline(always)]`); the plain name is the access the field's type implies (or, untyped, the one the code uses most), others carry the width. Typed registers: a register holding one struct pointer wherever it is read is named after it (`kart` instead of `r4`); arguments that point to a struct are listed (`/// Arguments: r0 = kart (a Kart)`). Whole-program propagation: three rounds pass argument types from callers to callees (597 typed arguments; 334 functions list typed arguments, 326 rename registers, 5,677 accessor sites). Readability: a run of instructions with the same condition prints as one `if`, folded where a compare feeds it. Race identical (fibers and flat). Flags across calls (ARM9): a whole-program fixed point finds the flags each function reads at entry and the flags its callers read after it returns; calls and returns then keep only those (computed calls reach only address-taken functions; SWI, push/pop and mode changes keep flags; an exception return replaces them). A second fixed point finds the flags each function writes on every path before returning (8,505 write all four), so a call ends the caller's earlier flags. 4,422 functions return with no live flags; flag-setting compares in the source fell from 66,914 to 60,828. A compare feeding both `if eq` and `if ne` runs (`moveq`/`movne`) folds both. What remains is held mostly by address-taken functions (thread-context code saves the whole CPSR, so their returns keep all flags). `MKDS_FOLD_STATS=1` prints why compares don't fold. `MKDS_CALL_FLAGS_OFF=1` turns it off. More type seeds from `structs.csv`: aliases merged (`KartRaw` is `Kart`: 182 struct modules), parents (a `Shell` has the `Item` fields), global roots (`*0x021755FC` points to the race manager) and pointer fields (`*(kart+0x514)`), applied repeatedly as values get typed; values with no vote take the one struct whose fields cover 3+ of their offsets when that is unlikely by chance (density^offsets < 2%). Now 8,258 accessor sites, 435 functions list typed arguments, 437 rename registers. Next: flags as locals |
+| 4C types (T2) | **Accessors, struct inference and type propagation implemented.** Reaching definitions, alias/parent layouts, pointer fields, global roots, interior pointers and constant-global bases seed types; caller facts propagate to callees. Current measured coverage (`0a4351f`): **26,370 accessor sites, 810 typed-argument functions, 1,003 renamed-register functions, 11,770 named-global notes**. Fiber and flat races identical. Broader type coverage, SDK value types and source organization remain; see evidence below |
+
+### Completed since the initial status
+
+- **T1:** all **12,736 ARM9 and ARM7 functions** have raised output, with no rejected functions (`daf1a38`, `9c3b700`). T0 remains available for transfers that require exact dispatch behavior.
+- **Flags as locals:** `6b267ef` makes **81,372 of 107,472 compares** into `fa`/`fb`/`fz` locals folded into conditions. Observable boundaries still synchronize CPU flags. Fiber and flat races remain identical.
+- **Type coverage:** interior pointers, constant-global bases and additional global/field seeds (`0a4351f`) increased accessor sites **8,258 -> 26,370**, typed-argument functions **435 -> 810**, renamed-register functions **437 -> 1,003**, and named-global notes **4,086 -> 11,770**. Fiber and flat races remain identical. These are coverage counts, not proof that the 60% T2 goal is met.
+- **Names:** the last ARM9 functions and all **1,105 ARM7 functions** were named (`6a12b0a`, `94f2f24`); **491 SDK placeholders** were named (`67f804a`). The latest [name review](../NAMES_REPORT.md) examined **1,532** rows ending exactly in `_maybe`: **109** changes (**87** confirmations, **22** rewordings retaining uncertainty). **1,445** such names remain uncertain (1,327 game, 118 SDK); names containing `_maybe_...` were outside that review.
+- **Fields:** after **664** field names landed (`6383f63`), the [field review](../FIELDS_REPORT.md) examined the remaining **595** placeholders: **204** renamed (**58** confident, **146** `_maybe`), **391** kept.
+
+**Remaining:** resolve uncertain names and fields, broaden inferred types, separate pointers from integers, add SDK value types and improve source organization. Direct typed call signatures and spill/reload removal remain linked to Block 5.5. The work-package lists below retain the original design; T1 coverage is complete, but full source readability and the Block 4 completion criteria are not all established.
 
 How exactness holds:
 - T1 pays the same budget at every original block start, and spills its locals before anything that reads `c.r`.
@@ -107,8 +117,7 @@ guest thread), adapted so runs stay identical:
 - **Non-local exits** (context loads, a `SaveContext` resume) go to the innermost loop. A pc that matches an outer
   loop's `(ret, sp)` unwinds to that loop, through T0 frames, which pass it on. Functions that do this have to stay
   T0; a raised function is only ever left normally.
-- Code: `src/fibered.rs`, enabled with `MKDS_FIBERS=1` or `Session::enable_fibers`. The flat loop stays the default
-  until the fiber run is proven identical.
+- Code: `src/fibered.rs`, enabled with `MKDS_FIBERS=1` or `Session::enable_fibers`. Fibers are now the default (`74b34b3`); `MKDS_FLAT=1` selects flat dispatch.
 - **Status (2026-10-27): proven identical over a full race.** On the Figure-8 acceptance race, `race_check` with
   fibers and on `main` produce:
   - the same 1,707,950,080 ARM9 instructions and 581,521 IRQs;
@@ -128,15 +137,13 @@ guest thread), adapted so runs stay identical:
   points, so the same check also proves raised functions, and can be bisected to single functions.
 
 ### 4B. Decompiler passes (T1), whole program
-In order. Each pass is separately switchable, so a failing function can be traced to the pass that broke it.
+The original pass design follows. All functions now have T1 output; proposed stack-local and direct typed-call forms remain readability goals where not yet emitted. Each pass is separately switchable, so a failing function can be traced to the pass that broke it.
 1. **Flag liveness.** Drop every N/Z/C/V calculation that nothing reads. This is most of today's noise.
-   *Implemented (`src/raise.rs`, opt-in `MKDS_RAISE=1` in `mkds_gen`), not yet race-proven.* On the whole ROM it
+   *Implemented, default and race-proven (`74b34b3`, `6b267ef`); `MKDS_EXACT=1` disables dead-flag elimination.* On the whole ROM it
    removes 65% of `R::set_nz`, 76% of carry writes, and turns a third of `R::subs`/`R::adds` into plain
    arithmetic.
 2. **SSA and register promotion.** Registers become `let` locals. Arguments and returns come from
-   `recomp::signature` (already whole-program). The callee-saved discipline is checked per function. Functions
-   that break the ARM calling convention (r12 uses, extra returns in r1-r3, reading flags across a call) are
-   detected and stay T0.
+   `recomp::signature` (already whole-program). The callee-saved discipline is checked per function. The original design kept calling-convention exceptions at T0; all functions now have T1 output, with exact dispatch fallback where needed.
 3. **Stack frames.** `sp`-relative slots become locals. A slot whose address escapes stays in a small frame array
    in DS memory.
 4. **Constants.** Literal-pool loads fold into constants. Addresses inside known sections become symbols
@@ -203,6 +210,5 @@ runtime as a dependency, and a `TIERS.md` report (counts per tier and area, each
 - Repeat builds produce identical source.
 - The repo has no Nintendo material.
 
-## Later (Block 5)
-Real PC pointers in place of DS-memory views, where types are fully known. Native file system, GX and sound services
-at the SDK boundary. HD and modding hooks.
+## Block 5 (under way)
+Native FS, ARM7 services, event-driven sound and OS time have merged behind switches; an opt-in budget-free build finishes first. See the [Block 5 status](BLOCK5_PLAN.md#status-2026-10-28). Real PC pointers, broader native graphics services, HD and modding hooks remain planned.

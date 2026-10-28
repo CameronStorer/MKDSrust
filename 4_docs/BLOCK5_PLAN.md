@@ -1,6 +1,21 @@
 # Block 5: from emulated DS hardware to a native game
 
-Status: plan (2026-10-27). Nothing implemented yet. Branch to be cut from `block4` once 4B/4C land.
+## Status (2026-10-28)
+
+| Stage | State and evidence |
+|---|---|
+| 5.0 Oracle harness and census | **Done, merged** (`b11c7fd`, `fcc3647`, `77cb9c1`). [Census](BLOCK5_CENSUS.md): exact/exact replay equal over 12,045 logical frames; flat/fiber equal; deliberate perturbations detected. Battle, missions and more menus remain to be covered |
+| 5.1 Native FS | **Done, merged**, behind `MKDS_HW_FS=native` (`b457b54`, `4cc57a8`) |
+| 5.2a ARM7 PXI services | **Done, merged**, behind `MKDS_HW_ARM7=native` (`c9d8876`, `0b88736`) |
+| 5.2b Event-driven sound driver | **Done, merged**, behind `MKDS_HW_SND=native` (`2751159`, `55cf172`); IRQ scheduling refined in `db4c388`, `9776f2e`. Runs the translated driver on events; a complete native sound rewrite remains future work |
+| 5.3 OS time and IRQs | **Done, merged**, behind `MKDS_HW_TIME=native` (`76efc25`, `3e99cb5`) |
+| 5.4 Remove budgets | **Working opt-in build; finish work in progress** (`16b1476`, `d2d4bff`, `fb7f97a`, merged by `4286f4b`). Build with `MKDS_TIMING=native` / generator `--timing native`: 122,736 ARM9 budget sites empty, 4,164 poll sites retained. Closed-loop races finish 1st at frame 11,698 (fiber) / 11,711 (flat); 1.84/1.78 ms per frame versus exact 2.31/2.22, about **20% less CPU per frame** |
+| 5.5 Remove spill/reload | **In progress**; the no-spill calling convention and per-thread register requirements below remain completion criteria |
+| 5.6 Presentation extras | **Planned, optional** |
+
+The [seed-equalized proof](masks/native_seed_equalized.md) (`fb7f97a`) reports equality in every unmasked region for all compared race frames: TIME **10,079/10,079**, ARM7 **10,082/10,082**, FS **10,077/10,077**, all three **10,081/10,081**, budget-free **10,078/10,078**. It uses test-only `MKDS_TICK_PIN`, a documented mask, re-keyed inputs and loading leads of 4 frames (FS/all three) or 18 (budget-free). Open-loop finishes are 11,462 (TIME/ARM7), 11,458 (FS/all three), and 11,444 (budget-free), all 1st. Without seed pinning the all-three control has 0/10,081 equal frames and does not finish. This proof covers FS/ARM7/TIME, not the separately merged SND switch.
+
+5.4 finish work remains: the proof build retains ARM7 sound CPU execution and cycle-driven hardware advancement in waits; overlay residency uses `code_epoch` dispatch/slice checks rather than the planned `FS_AfterLoadOverlay` hook. Broader corpus validation, frame-event-only advancement and default promotion remain. Native modes stay opt-in. The inventory, stage designs and effort estimates below describe the original exact baseline and plan; this status records what has landed.
 
 ## Goal
 Today the translated game runs inside a cycle-counted model of the DS: `Session::step` (`2_native_game/src/session.rs`)
