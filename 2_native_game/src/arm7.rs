@@ -88,6 +88,15 @@ pub struct Arm7 {
     pub execution_error: Option<String>,
     pub lifted_cycles: u64,
     pub interpreted_instructions: u64,
+    /// `MKDS_SND_LOG` (diagnostics, record only): log the SND driver's command deliveries and thread-loop
+    /// iterations as the CPU reaches them ([`crate::hle7::snd::log`]).
+    snd_watch: bool,
+    /// Block 5.2b take-over check: set when the CPU dispatches a block at `watch_pc` (0 = none).
+    pub watch_pc: u32,
+    pub watch_hit: bool,
+    /// Message-level replay (`MKDS_SND_REPLAY`): main-RAM and I/O reads answered from a recording.
+    pub feed: Option<Box<crate::hle7::snd::Feed>>,
+    snd_snapped: bool,
 }
 
 /// IRQ bits (same layout as the ARM9's for the shared sources).
@@ -144,6 +153,11 @@ impl Arm7 {
             execution_error: None,
             lifted_cycles: 0,
             interpreted_instructions: 0,
+            snd_watch: crate::hle7::snd::log::on(),
+            watch_pc: if crate::hle7::snd::log::on() { crate::hle7::snd::addr::MAIN_LOOP_MARK } else { 0 },
+            watch_hit: false,
+            feed: None,
+            snd_snapped: false,
             s: State7 {
                 wram: vec![0; WRAM_SIZE],
                 bios,
@@ -181,6 +195,7 @@ impl Arm7 {
     /// data from memory as the hardware would.
     pub fn render_audio(&mut self, hw: &mut ds_mem::Bus, frames: usize) -> Vec<[i16; 2]> {
         let mut spu = std::mem::take(&mut self.s.spu);
+        let _quiet = crate::hle7::snd::log::Quiet::new(); // the sound hardware's reads are not the driver's
         let out = {
             let mut v = View { s: &mut self.s, hw };
             spu.render(&mut v, frames)
@@ -191,14 +206,25 @@ impl Arm7 {
 
     pub fn run(&mut self, hw: &mut ds_mem::Bus, cycles: u32) {
         self.run_cpu(hw, cycles);
-        // the sound hardware runs with time whether or not anyone listens: one-shot channels must end
-        // (the game waits for that) even in a headless run
+        self.advance_audio(hw, cycles as u64);
+        if self.snd_watch && !self.snd_snapped && self.watch_hit && self.idle(hw) {
+            // `MKDS_SND_LOG`: where the native driver would take over, keep the state for the replay
+            self.snd_snapped = true;
+            crate::hle7::snd::log::snapshot(self, hw);
+        }
+    }
+
+    /// Renders the sound output for `cycles` more bus cycles into [`State7::audio_out`] (the SPU registers as
+    /// they are now). The sound hardware runs with time whether or not anyone listens: one-shot channels
+    /// must end (the game waits for that) even in a headless run.
+    pub fn advance_audio(&mut self, hw: &mut ds_mem::Bus, cycles: u64) {
         const ARM7_HZ: u64 = ds_mem::BUS_HZ;
-        self.s.audio_cycles += cycles as u64 * self.s.spu.output_rate() as u64;
+        self.s.audio_cycles += cycles * self.s.spu.output_rate() as u64;
         let frames = self.s.audio_cycles / ARM7_HZ;
         self.s.audio_cycles %= ARM7_HZ;
         if frames > 0 {
             let out = self.render_audio(hw, frames as usize);
+            audio_dump(&out);
             self.s.audio_out.extend(out);
             let cap = self.s.spu.output_rate() as usize; // one second
             if self.s.audio_out.len() > cap {
@@ -248,6 +274,12 @@ impl Arm7 {
                     *p.entry(self.pc).or_insert(0) += 1;
                 }
                 if let Some(f) = self.dispatcher.as_ref().and_then(|d| d.get(self.pc)) {
+                    if self.snd_watch {
+                        crate::hle7::snd::log::cpu_block(self.pc, &self.cpu, v.s.ie & v.s.iflag);
+                    }
+                    if self.pc == self.watch_pc {
+                        self.watch_hit = true;
+                    }
                     v.s.trace_pc = self.pc;
                     let budget = n - spent;
                     self.cpu.budget = budget;
@@ -324,6 +356,7 @@ fn cost(d: &crate::arm::Decoded, passed: bool, jumped: bool) -> u32 {
 impl Drop for Arm7 {
     fn drop(&mut self) {
         crate::hle7::trace::flush();
+        crate::hle7::snd::log::flush();
     }
 }
 
@@ -364,7 +397,7 @@ impl State7 {
         }
     }
 
-    fn tick_timers(&mut self, cycles: u64) {
+    pub fn tick_timers(&mut self, cycles: u64) {
         let mut overflow_prev = 0u64;
         for t in 0..4 {
             let tm = &mut self.timers[t];
@@ -476,6 +509,7 @@ impl State7 {
 
     fn io_write(&mut self, hw: &mut ds_mem::Bus, off: u32, v: u32, n: usize) {
         if self.spu.write(off, v, n) {
+            crate::hle7::snd::log::spu(off, v, n);
             if let Some(p) = hw.probe.as_mut() {
                 p.spu_write(&hw.main, off, v, n); // Block 5.0 oracle (off by default)
             }
@@ -521,7 +555,10 @@ impl State7 {
                     self.raise(irq::IPC_RECV_NOT_EMPTY);
                 }
             }
-            (0x188, _) => hw.arm7_send(v),
+            (0x188, _) => {
+                crate::hle7::snd::log::reply(v);
+                hw.arm7_send(v)
+            }
             (0x208, _) => self.ime = v & 1,
             (0x210, _) => self.ie = v,
             (0x214, _) => self.iflag &= !v,
@@ -588,6 +625,7 @@ impl View<'_> {
             } else {
                 self.s.fifo_ctl |= 0x4000;
             }
+            crate::hle7::snd::log::read(a, self.s.last_recv, n, self.s.trace_pc, &self.s.wram);
             return self.s.last_recv;
         }
         let get = |buf: &[u8], o: usize| {
@@ -599,6 +637,7 @@ impl View<'_> {
             Region::Bios(o) => get(&self.s.bios, o),
             Region::Main(o) => {
                 let v = get(&self.hw.main, o);
+                crate::hle7::snd::log::read(a, v, n, self.s.trace_pc, &self.s.wram);
                 if crate::hle7::trace::on() && crate::hle7::trace::service_reader(self.s.trace_pc) {
                     crate::hle7::trace::event(["7L1", "7L2", "7L3", "7L4"][n - 1], self.hw.cycles, v, Some(a));
                 }
@@ -609,7 +648,9 @@ impl View<'_> {
             Region::Vram7(o) => get(&self.s.vram7, o),
             Region::Io(off) => {
                 let v = self.s.io_read(self.hw, off & !3);
-                v >> (8 * (off & 3))
+                let v = v >> (8 * (off & 3));
+                crate::hle7::snd::log::read(a, v & (u32::MAX >> (32 - 8 * n as u32)), n, self.s.trace_pc, &self.s.wram);
+                v
             }
             Region::None => {
                 self.s.note(format!("read unmapped {:#04X}xxxxxx", a >> 24));
@@ -635,6 +676,7 @@ impl View<'_> {
         };
         match self.region(a) {
             Region::Main(o) => {
+                crate::hle7::snd::log::main_write(a, v, n, self.s.trace_pc);
                 if crate::hle7::trace::on() {
                     crate::hle7::trace::arm7_main_write(self.hw.cycles, a, v, self.s.trace_pc);
                     if crate::hle7::trace::service_address(a) {
@@ -825,6 +867,173 @@ impl Bus for View<'_> {
     }
 }
 
+/// Diagnostics (`MKDS_AUDIO_DUMP=<file>`): every rendered stereo frame, raw little-endian i16 pairs at the SPU
+/// output rate, for comparing the sound of two runs. Off by default.
+fn audio_dump(out: &[[i16; 2]]) {
+    use std::io::Write;
+    use std::sync::{Mutex, OnceLock};
+    static DUMP: OnceLock<Option<Mutex<std::io::BufWriter<std::fs::File>>>> = OnceLock::new();
+    let Some(d) = DUMP
+        .get_or_init(|| {
+            let p = std::env::var("MKDS_AUDIO_DUMP").ok()?;
+            Some(Mutex::new(std::io::BufWriter::new(std::fs::File::create(p).ok()?)))
+        })
+        .as_ref()
+    else {
+        return;
+    };
+    let mut d = d.lock().unwrap();
+    for f in out {
+        let _ = d.write_all(&f[0].to_le_bytes());
+        let _ = d.write_all(&f[1].to_le_bytes());
+    }
+    let _ = d.flush();
+}
+
+/// Return address of a [`Arm7::plain_call`]: no code lives there, so reaching it means the callee returned.
+pub const PLAIN_RET: u32 = 0xFFFF_FFF0;
+
+/// Instructions one [`Arm7::plain_call`] may run before it is declared stuck (a spin on something only the
+/// other CPU could change). Far above any driver tick (a few thousand instructions).
+pub const PLAIN_LIMIT: u32 = 200_000_000;
+
+/// The ARM7's memory for lifted code run as plain function calls (Block 5.2b, [`crate::hle7::snd`]): calls run
+/// to completion through the dispatcher instead of returning to a CPU loop, and words the code sends to the
+/// ARM9 (IPCFIFOSEND) are queued in `sent` with the send FIFO always reported as having room, so the
+/// driver's "retry while full" loops cannot spin while the ARM9 is not running.
+pub struct Plain<'a> {
+    pub v: View<'a>,
+    d: &'a crate::dispatch::Dispatcher,
+    pub sent: &'a mut std::collections::VecDeque<u32>,
+    /// Replaying ([`Arm7::feed`]): reads come from the recording, the FIFO is reported as it was.
+    feed: Option<&'a mut crate::hle7::snd::Feed>,
+    feed_on: bool,
+}
+
+impl Plain<'_> {
+    fn read(&mut self, a: u32, n: usize) -> u32 {
+        if let Some(f) = self.feed.as_deref_mut().filter(|_| matches!(a >> 24, 0x02 | 0x04)) {
+            if let Some(v) = f.take(a, n) {
+                return v;
+            }
+        }
+        let v = self.v.read(a, n);
+        if self.feed_on {
+            return v;
+        }
+        if a & !3 == 0x0400_0184 && a & 3 == 0 {
+            v & !2 // IPCFIFOCNT: the send FIFO is never full
+        } else {
+            v
+        }
+    }
+
+    fn write(&mut self, a: u32, v: u32, n: usize) {
+        if a & !3 == 0x0400_0188 {
+            crate::hle7::snd::log::reply(v);
+            self.sent.push_back(v);
+        } else {
+            self.v.write(a, v, n)
+        }
+    }
+}
+
+impl Mem for Plain<'_> {
+    fn r8(&mut self, a: u32) -> u8 {
+        self.read(a, 1) as u8
+    }
+    fn r16(&mut self, a: u32) -> u16 {
+        self.read(a, 2) as u16
+    }
+    fn r32(&mut self, a: u32) -> u32 {
+        self.read(a, 4)
+    }
+    fn w8(&mut self, a: u32, v: u8) {
+        self.write(a, v as u32, 1)
+    }
+    fn w16(&mut self, a: u32, v: u16) {
+        self.write(a, v as u32, 2)
+    }
+    fn w32(&mut self, a: u32, v: u32) {
+        self.write(a, v, 4)
+    }
+}
+
+impl Bus for Plain<'_> {
+    fn call(&mut self, c: &mut Cpu, target: u32, ret: u32) -> u32 {
+        let d = self.d;
+        d.call(c, self, target, ret)
+    }
+    fn swi(&mut self, c: &mut Cpu, n: u32) {
+        if matches!(n, 4..=6) {
+            // Halt / IntrWait: nothing to wait for in a plain call (the caller decides when time passes)
+            self.v.s.note(format!("swi {n:#04x} in a plain ARM7 call (ignored)"));
+            return;
+        }
+        self.v.swi(c, n)
+    }
+    fn mrc(&mut self, c: &mut Cpu, cp: u8, op1: u8, crn: u8, crm: u8, op2: u8) -> u32 {
+        self.v.mrc(c, cp, op1, crn, crm, op2)
+    }
+    fn mcr(&mut self, c: &mut Cpu, cp: u8, op1: u8, crn: u8, crm: u8, op2: u8, v: u32) {
+        self.v.mcr(c, cp, op1, crn, crm, op2, v)
+    }
+}
+
+impl Arm7 {
+    /// Runs the lifted ARM7 function at `target` to completion on `cpu` (not the ARM7 CPU's own registers)
+    /// with `args` in r0-r3, as a plain function call: no time passes, no interrupt is taken, nothing is
+    /// interleaved with the ARM9. Returns r0 (r1 is left in `cpu`). Words sent to the ARM9 go to `sent`.
+    pub fn plain_call(
+        &mut self,
+        hw: &mut ds_mem::Bus,
+        cpu: &mut Cpu,
+        sent: &mut std::collections::VecDeque<u32>,
+        target: u32,
+        args: [u32; 4],
+    ) -> Result<u32, String> {
+        let d = self.dispatcher.as_ref().ok_or("no ARM7 table installed")?;
+        cpu.r[..4].copy_from_slice(&args);
+        cpu.r[14] = PLAIN_RET;
+        cpu.budget = PLAIN_LIMIT;
+        let sp = cpu.r[13];
+        self.s.trace_pc = target;
+        let feed_on = self.feed.is_some();
+        let mut bus = Plain { v: View { s: &mut self.s, hw }, d, sent, feed: self.feed.as_deref_mut(), feed_on };
+        let pc = d.call(cpu, &mut bus, target, PLAIN_RET);
+        self.lifted_cycles += (PLAIN_LIMIT - cpu.budget) as u64;
+        if let Some(e) = d.take_error() {
+            return Err(format!("plain ARM7 call {target:#010x}: {e}"));
+        }
+        if pc != PLAIN_RET || cpu.r[13] != sp {
+            return Err(format!(
+                "plain ARM7 call {target:#010x} did not return (pc {pc:#010x}, sp {:#010x} vs {sp:#010x})",
+                cpu.r[13]
+            ));
+        }
+        Ok(cpu.r[0])
+    }
+
+    /// The ARM7 CPU is idle: halted in a thread context with no interrupt pending and every ARM9 word read
+    /// (Block 5.2b take-over check).
+    pub fn idle(&self, hw: &ds_mem::Bus) -> bool {
+        self.s.halted
+            && self.s.intr_wait.is_none()
+            && self.s.ie & self.s.iflag == 0
+            && self.cpu.ctl & 0x1F != 0x12
+            && self.s.fifo_pos >= hw.ipc_out.len()
+            && self.execution_error.is_none()
+            && self.s.crash.is_none()
+    }
+
+    /// The ARM7's IRQ-mode stack pointer (its IRQ stack is empty while the CPU runs a thread).
+    pub fn irq_stack_top(&self) -> u32 {
+        let mut c = self.cpu.clone();
+        c.set_mode(0x12);
+        c.r[13]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     fn test_lift(c: &mut crate::rt::Cpu, m: &mut dyn crate::rt::Bus, pc: u32) -> u32 {
@@ -963,6 +1172,51 @@ mod tests {
         );
         assert_eq!(hw.fifo_in.front(), Some(&0x1234));
         assert_eq!(a.cpu.r[2], 0xBEEF);
+    }
+
+    #[test]
+    fn plain_call_runs_nested_calls_to_completion_and_queues_fifo_words() {
+        // 0x03800000: r0 += 1, call 0x03800100, then return; 0x03800100: send r0 to the ARM9 (only if the
+        // send FIFO reads "not full"), return.
+        fn outer(c: &mut crate::rt::Cpu, m: &mut dyn crate::rt::Bus, _pc: u32) -> u32 {
+            c.r[0] += 1;
+            let lr = c.r[14];
+            c.r[13] -= 4;
+            m.w32(c.r[13], lr);
+            c.r[14] = 0x0380_0008;
+            let x = m.call(c, 0x0380_0100, 0x0380_0008);
+            assert_eq!(x, 0x0380_0008);
+            c.r[14] = m.r32(c.r[13]);
+            c.r[13] += 4;
+            crate::rt::spend(c, 3);
+            c.r[14]
+        }
+        fn inner(c: &mut crate::rt::Cpu, m: &mut dyn crate::rt::Bus, _pc: u32) -> u32 {
+            if m.r16(0x0400_0184) & 2 == 0 {
+                m.w32(0x0400_0188, c.r[0]);
+            }
+            crate::rt::spend(c, 2);
+            c.r[14]
+        }
+        static TABLE: &[crate::mem::Lifted] = &[
+            crate::mem::Lifted { segment: "arm7_main", entry: 0x0380_0000, blocks: &[0x0380_0000], insts: &[0x0380_0000], f: outer },
+            crate::mem::Lifted { segment: "arm7_main", entry: 0x0380_0100, blocks: &[0x0380_0100], insts: &[0x0380_0100], f: inner },
+        ];
+        let mut a = super::Arm7::new();
+        let mut hw = crate::ds_mem::Bus::new();
+        a.configure_lifted(TABLE, false);
+        for i in 0..16 {
+            hw.fifo_in.push_back(i); // the ARM9's receive FIFO is full
+        }
+        let mut cpu = crate::rt::Cpu::default();
+        cpu.r[13] = 0x0380_F000;
+        let mut sent = std::collections::VecDeque::new();
+        let r0 = a.plain_call(&mut hw, &mut cpu, &mut sent, 0x0380_0000, [41, 0, 0, 0]).unwrap();
+        assert_eq!(r0, 42);
+        assert_eq!(cpu.r[13], 0x0380_F000);
+        assert_eq!(sent, [42], "queued, not dropped, while the FIFO is full");
+        assert_eq!(hw.fifo_in.len(), 16);
+        assert_eq!(a.lifted_cycles, 5);
     }
 
     #[test]
