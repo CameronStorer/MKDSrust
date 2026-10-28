@@ -388,11 +388,16 @@ Include your OS, error text, the scenario and relevant logs. The graphical launc
 
 ## License and legal status
 
-**This checkout has no top-level LICENSE file or project license declaration in the reviewed Cargo manifests.** The owner needs to specify redistribution terms for this project's code. Do not infer GPL-3.0 for MKDSrust from Wiicompiled's license. Dependencies and public reference projects retain their own licenses.
+MKDSrust's code is licensed under the **GNU General Public License v3.0 or later** (see [`LICENSE`](LICENSE)).
+Forks and modified versions must stay open source under the same terms.
 
-The repository contains no Nintendo code, assets or ROMs. You must own the game and make your own lawful cartridge dump. ROMs, extracted files, generated source and compiled game bundles are for personal use and must not be redistributed. Texture dumps are also game-derived material. Access to the tools does not grant rights to distribute the game.
+The repository contains no Nintendo code, assets or ROMs. You must own the game and make your own lawful cartridge
+dump. ROMs, extracted files, generated source and compiled game bundles are produced locally from your copy, are for
+personal use and must not be shared. The GPL covers this project's own code, not anything generated from a game.
 
-MKDSrust is independent of Nintendo and is neither affiliated with nor endorsed by it. All trademarks remain the property of their respective owners.
+MKDSrust is independent of Nintendo and is neither affiliated with nor endorsed by it. All trademarks remain the
+property of their respective owners.
+
 ## Save files
 
 Players automatically keep progress and options in the platform settings data directory,

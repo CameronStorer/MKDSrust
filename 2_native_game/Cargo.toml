@@ -2,6 +2,7 @@
 name = "recomp"
 version = "0.1.0"
 edition = "2024"
+license = "GPL-3.0-or-later"
 description = "Spike: lift ARM machine code from a user-supplied MKDS ROM to Rust (no game logic is stored here)"
 build = "build.rs"
 
