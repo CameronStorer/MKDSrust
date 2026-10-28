@@ -1,8 +1,8 @@
-# Driftlift
+# MKDSrust
 
 **Lift the code. Keep the drift.**
 
-Driftlift turns your own legally dumped **Mario Kart DS (USA, revision 0)** ROM into a native Windows game and a Rust source workspace you can inspect and rebuild. Static recompilation translates the game's ARM9 and ARM7 programs on your computer before play. Linux has limited validation; macOS has an untested build path.
+MKDSrust turns your own legally dumped **Mario Kart DS (USA, revision 0)** ROM into a native Windows game and a Rust source workspace you can inspect and rebuild. Static recompilation translates the game's ARM9 and ARM7 programs on your computer before play. Linux has limited validation; macOS has an untested build path.
 
 The aim is to preserve playability beyond the original hardware, make the game's behavior easier to study, create room for modding, and improve performance and presentation while retaining the original driving behavior. Generated source has structured control flow, research names and inferred field accessors; readability is still improving rather than being a finished hand-written decompilation.
 
@@ -12,7 +12,7 @@ The aim is to preserve playability beyond the original hardware, make the game's
 > [!WARNING]
 > This is a work in progress. Verification covers recorded scenarios, not every possible game state. Leave experimental native hardware options off for the established baseline.
 
-Driftlift is not affiliated with or endorsed by Nintendo. Nintendo, Mario Kart DS and other trademarks belong to their respective owners.
+MKDSrust is not affiliated with or endorsed by Nintendo. Nintendo, Mario Kart DS and other trademarks belong to their respective owners.
 
 ## What you get
 
@@ -378,8 +378,8 @@ Include your OS, error text, the scenario and relevant logs. The graphical launc
 
 ## License and legal status
 
-**This checkout has no top-level LICENSE file or project license declaration in the reviewed Cargo manifests.** The owner needs to specify redistribution terms for this project's code. Do not infer GPL-3.0 for Driftlift from Wiicompiled's license. Dependencies and public reference projects retain their own licenses.
+**This checkout has no top-level LICENSE file or project license declaration in the reviewed Cargo manifests.** The owner needs to specify redistribution terms for this project's code. Do not infer GPL-3.0 for MKDSrust from Wiicompiled's license. Dependencies and public reference projects retain their own licenses.
 
 The repository contains no Nintendo code, assets or ROMs. You must own the game and make your own lawful cartridge dump. ROMs, extracted files, generated source and compiled game bundles are for personal use and must not be redistributed. Texture dumps are also game-derived material. Access to the tools does not grant rights to distribute the game.
 
-Driftlift is independent of Nintendo and is neither affiliated with nor endorsed by it. All trademarks remain the property of their respective owners.
+MKDSrust is independent of Nintendo and is neither affiliated with nor endorsed by it. All trademarks remain the property of their respective owners.
