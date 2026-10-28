@@ -175,9 +175,13 @@ impl Controls {
     }
 }
 
-/// `%APPDATA%\MKDS Native Builder\controls.txt` on Windows, `~/Library/Application Support/MKDS Native
-/// Builder/controls.txt` on macOS, `$XDG_CONFIG_HOME` (or `~/.config`)`/mkds-native-builder/controls.txt` elsewhere.
+/// Shared MKDSrust data directory. Legacy data is copied without replacing newer files.
 pub fn default_path() -> Option<PathBuf> {
+    static PATH: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    PATH.get_or_init(migrated_default_path).clone()
+}
+
+fn migrated_default_path() -> Option<PathBuf> {
     let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
     let dir = if cfg!(windows) {
         env("APPDATA")?.join("MKDS Native Builder")
@@ -186,12 +190,46 @@ pub fn default_path() -> Option<PathBuf> {
     } else {
         env("XDG_CONFIG_HOME").or_else(|| env("HOME").map(|h| h.join(".config")))?.join("mkds-native-builder")
     };
-    Some(dir.join("controls.txt"))
+    let current = dir.with_file_name("MKDSrust");
+    // Keep the originals intact, including build output paths stored in launcher.json.
+    // Fall back to the legacy directory on failure so existing data stays usable.
+    if migrate_data(&dir, &current).is_err() { return Some(dir.join("controls.txt")); }
+    let alternate = dir.with_file_name(if cfg!(windows) || cfg!(target_os = "macos") { "mkds-native-builder" } else { "MKDS Native Builder" });
+    if migrate_data(&alternate, &current).is_err() { return Some(alternate.join("controls.txt")); }
+    Some(current.join("controls.txt"))
+}
+
+pub fn migrate_data(old: &std::path::Path, new: &std::path::Path) -> std::io::Result<()> {
+    if !old.is_dir() { return Ok(()); }
+    std::fs::create_dir_all(new)?;
+    for entry in std::fs::read_dir(old)? {
+        let entry = entry?;
+        let target = new.join(entry.file_name());
+        let kind = entry.file_type()?;
+        if kind.is_dir() { migrate_data(&entry.path(), &target)?; }
+        else if kind.is_file() && !target.exists() { std::fs::copy(entry.path(), target)?; }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migration_preserves_old_data_and_newer_preferences() {
+        let root = tempfile::tempdir().unwrap();
+        let old = root.path().join("old"); let new = root.path().join("MKDSrust");
+        std::fs::create_dir_all(old.join("toolchains/rust")).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(old.join("controls.txt"), "old").unwrap();
+        std::fs::write(new.join("controls.txt"), "new").unwrap();
+        std::fs::write(old.join("toolchains/rust/marker"), "tool").unwrap();
+        migrate_data(&old,&new).unwrap(); migrate_data(&old,&new).unwrap();
+        assert_eq!(std::fs::read_to_string(new.join("controls.txt")).unwrap(), "new");
+        assert!(old.join("controls.txt").is_file());
+        assert!(new.join("toolchains/rust/marker").is_file());
+    }
 
     #[test]
     fn defaults_round_trip_through_the_file() {

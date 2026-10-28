@@ -72,6 +72,9 @@ struct Args {
     /// Prevent Cargo network access
     #[arg(long)]
     offline: bool,
+    /// Build with the launcher's portable GNU toolchain at DIR (Rust x86_64-pc-windows-gnu plus DIR/llvm-mingw)
+    #[arg(long, value_name = "DIR", conflicts_with = "reference_port")]
+    portable_gnu: Option<PathBuf>,
     /// Course archive name to start in (omit for the game menu)
     #[arg(long)]
     course: Option<String>,
@@ -213,7 +216,11 @@ fn run() -> Result<i32, BuildError> {
         if args.course.is_some() {
             return err("--course is not supported by the native build yet.");
         }
-        build::recompile(
+        let toolchain = args
+            .portable_gnu
+            .as_deref()
+            .map(|d| build::Toolchain::portable_gnu(d, &d.join("llvm-mingw")));
+        build::recompile_with_toolchain(
             &info,
             &build::RecompileOptions {
                 source,
@@ -231,6 +238,7 @@ fn run() -> Result<i32, BuildError> {
                     Some(args.cache_dir.clone().unwrap_or_else(build::default_cache_dir))
                 },
             },
+            toolchain.as_ref(),
             &mut |l| eprintln!("{l}"),
         )?
     };

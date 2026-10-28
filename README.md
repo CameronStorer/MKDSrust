@@ -20,12 +20,13 @@ MKDSrust turns your own dumped **Mario Kart DS (USA, revision 0)** ROM into a na
 | Requirement | Details |
 |---|---|
 | Game | Your clean, self-dumped USA cartridge ROM, code **AMCE**, revision **0** |
-| Windows | Windows 10/11 64-bit, stable Rust MSVC toolchain and Visual Studio C++ Build Tools |
+| Windows launcher | Windows 10/11 64-bit; the release launcher prepares a private portable GNU Rust toolchain |
+| Windows development | Rust 1.96.0; MSVC builds of the launcher require Visual Studio C++ Build Tools |
 | Linux | Stable Rust, C/C++ toolchain, pkg-config, ALSA, udev, X11/Wayland and xkbcommon development libraries |
 | macOS | Stable native Rust toolchain and Apple command line tools; untested |
 | Resources | About 2 GB free disk space; 8 GB RAM recommended; internet for initial dependencies |
 
-Install Rust from [rustup.rs](https://rustup.rs), then reopen your terminal.
+For development builds, install Rust from [rustup.rs](https://rustup.rs), then reopen your terminal.
 Build on the OS where you intend to play; generated executables are platform specific.
 
 ### Windows launcher
@@ -34,15 +35,27 @@ Build on the OS where you intend to play; generated executables are platform spe
 
    ```powershell
    cargo build --release --locked --manifest-path launcher/Cargo.toml
-   .\launcher\target\release\mkds_launcher.exe
+   .\launcher\target\release\MKDSrust.exe
    ```
 
-2. On **Home**, select your ROM and output folder, then choose **Build game**.
+2. Follow **Setup**: welcome, ROM verification, portable toolchain installation, local build, then Home.
 3. Keep the launcher open during building and playing. Choose **Play** when ready.
 4. Use **Settings** and **Controls**, then **Save**; changes apply on the next launch.
 
 The launcher checks ROM compatibility and verifies the bundle before play.
 Rebuilding into a nonempty destination stages a sibling folder and switches only after success.
+
+Release downloads need no source checkout, Rust installation, or Visual Studio. The launcher embeds
+an allowlisted compressed archive of `1_build_tool`, `2_native_game`, and the address dictionary;
+it extracts a versioned copy in its data folder. No ROM, extracted assets, generated workspace,
+or compiled game is embedded. Rust 1.96.0 GNU components are downloaded from the official Rust
+distribution server and checked against its SHA-256 files. Toolchain downloads support retry
+and resume. Initial crate downloads still require internet access. A future release may provide
+a separately downloadable archive of vendored lockfile dependencies for offline builds.
+
+**Advanced** offers system Rust, accuracy mode, rebuilding, logs, and folders. **Mods** describes
+planned plugin support. Settings and controls remain shared with the builder and game.
+`MKDSrust.exe --smoke-test` saves all pages and setup stages to `release_shots/` and exits.
 Keep the checkout for future builds. Logs appear in the launcher and are saved beside
 `%APPDATA%\MKDS Native Builder\launcher.json` as `launcher-build.log`.
 

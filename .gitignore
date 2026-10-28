@@ -4,11 +4,14 @@ target_*/
 builds/
 assets/*
 !assets/branding/
+!assets/licenses/
 source/
 *.nds
 *.srl
 *.sav
 8_scratch/
+release_shots/
+release_proof/
 
 # Python caches
 __pycache__/

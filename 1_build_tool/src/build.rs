@@ -9,7 +9,10 @@ use std::process::{Command, Stdio};
 pub fn find_source(start: &Path) -> Option<PathBuf> {
     start
         .ancestors()
-        .find(|d| d.join("2_native_game/Cargo.toml").is_file() || d.join("3_hand_port/game/Cargo.toml").is_file())
+        .find(|d| {
+            d.join("2_native_game/Cargo.toml").is_file()
+                || d.join("3_hand_port/game/Cargo.toml").is_file()
+        })
         .map(Path::to_path_buf)
 }
 
@@ -82,9 +85,17 @@ fn recomp_without_defaults(ws: &Path, with_interpreter: bool) -> Result<usize, B
         let mut out = String::with_capacity(text.len());
         for line in text.lines() {
             let t = line.trim_start();
-            if (t.starts_with("recomp = {") || t.starts_with("mkds_native = {")) && !t.contains("default-features") {
-                let extra = if with_interpreter { ", features = [\"interpreter\"]" } else { "" };
-                let close = line.rfind('}').ok_or_else(|| BuildError(format!("Unexpected dependency line in {}", toml.display())))?;
+            if (t.starts_with("recomp = {") || t.starts_with("mkds_native = {"))
+                && !t.contains("default-features")
+            {
+                let extra = if with_interpreter {
+                    ", features = [\"interpreter\"]"
+                } else {
+                    ""
+                };
+                let close = line.rfind('}').ok_or_else(|| {
+                    BuildError(format!("Unexpected dependency line in {}", toml.display()))
+                })?;
                 out.push_str(&line[..close].trim_end());
                 out.push_str(&format!(", default-features = false{extra} }}"));
                 changed += 1;
@@ -109,7 +120,8 @@ pub fn default_cache_dir() -> PathBuf {
     } else {
         std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from)
     };
-    base.unwrap_or_else(|| home().join(".cache")).join("mkds_builder")
+    base.unwrap_or_else(|| home().join(".cache"))
+        .join("MKDSrust").join("cache")
 }
 
 /// Makes `dst` hold exactly the files of `src` (a `target` directory is never touched), rewriting
@@ -178,7 +190,11 @@ impl Drop for CacheLock {
 fn lock_cache(dir: &Path) -> Result<CacheLock, BuildError> {
     std::fs::create_dir_all(dir)?;
     let lock = dir.join("build.lock");
-    match std::fs::OpenOptions::new().write(true).create_new(true).open(&lock) {
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&lock)
+    {
         Ok(mut f) => {
             use std::io::Write;
             let _ = writeln!(f, "pid {}", std::process::id());
@@ -201,30 +217,44 @@ pub fn default_jobs() -> usize {
 /// Runs Cargo, forwarding diagnostics to `log`, and returns every executable Cargo reports, by
 /// target name (never a guessed path).
 fn run_cargo(
-    mut command: Command,
+    command: Command,
     log: &mut dyn FnMut(String),
 ) -> Result<std::collections::HashMap<String, PathBuf>, BuildError> {
-    command
-        .arg("--message-format=json-render-diagnostics")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    run_cargo_output(command, log, true)
+}
+
+fn run_cargo_output(
+    mut command: Command,
+    log: &mut dyn FnMut(String),
+    json_messages: bool,
+) -> Result<std::collections::HashMap<String, PathBuf>, BuildError> {
+    if json_messages {
+        command.arg("--message-format=json-render-diagnostics");
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn()?;
     // Drain stderr on its own thread so a full pipe can never stall Cargo.
     let stderr = child.stderr.take().unwrap();
     let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let stdout_tx = tx.clone();
+    let stdout = child.stdout.take().unwrap();
+    let stdout_reader = std::thread::spawn(move || {
+        for l in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let _ = stdout_tx.send(l);
+        }
+    });
     let reader = std::thread::spawn(move || {
         for l in BufReader::new(stderr).lines().map_while(Result::ok) {
             let _ = tx.send(l);
         }
     });
     let mut executables = std::collections::HashMap::new();
-    for line in BufReader::new(child.stdout.take().unwrap())
-        .lines()
-        .map_while(Result::ok)
-    {
-        while let Ok(l) = rx.try_recv() {
-            log(l);
-        }
+    for line in rx.iter() {
         match serde_json::from_str::<serde_json::Value>(&line) {
             Ok(ev) => match ev["reason"].as_str() {
                 Some("compiler-artifact") if ev["executable"].is_string() => {
@@ -245,11 +275,14 @@ fn run_cargo(
         }
     }
     let _ = reader.join();
+    let _ = stdout_reader.join();
     while let Ok(l) = rx.try_recv() {
         log(l);
     }
     if !child.wait()?.success() {
-        return err("Cargo failed (diagnostics above).");
+        return err(
+            "Cargo failed (diagnostics above). If downloads failed, check your internet connection and retry; the first build needs crates.io.",
+        );
     }
     executables.retain(|_, e: &mut PathBuf| e.is_file());
     Ok(executables)
@@ -310,6 +343,61 @@ pub fn recompile(
     opts: &RecompileOptions,
     log: &mut dyn FnMut(String),
 ) -> Result<PathBuf, BuildError> {
+    recompile_with_toolchain(info, opts, None, log)
+}
+
+/// Explicit per-build compiler selection; never changes the parent process environment.
+pub struct Toolchain {
+    pub cargo: PathBuf,
+    pub rustc: PathBuf,
+    /// Passed to every rustc (build scripts and proc-macros too) as `CARGO_ENCODED_RUSTFLAGS`.
+    pub rustflags: Vec<String>,
+    /// Prepended to the child PATH (linker helpers and the DLLs they load).
+    pub path: Vec<PathBuf>,
+}
+
+/// Host triple of the portable toolchain. It is the host, so Cargo gets no `--target`: the flags below then
+/// reach build scripts and proc-macros as well.
+pub const PORTABLE_GNU_TARGET: &str = "x86_64-pc-windows-gnu";
+
+impl Toolchain {
+    /// The portable Rust `x86_64-pc-windows-gnu` toolchain at `root` (rustc, cargo, rust-std, rust-mingw) plus an
+    /// extracted llvm-mingw at `llvm_mingw`.
+    /// - `-Cdlltool`: raw-dylib imports (windows-link) need a dlltool; Rust's bundled one needs `as.exe`,
+    ///   which isn't shipped, so llvm-mingw's llvm-dlltool makes the import libraries.
+    /// - `rust-lld`: GNU ld (Rust's self-contained `ld.exe`) mislinks those llvm-dlltool import libraries.
+    ///   Some imports (e.g. kernel32 `GetCurrentThreadId`) end up in the IAT without an import descriptor, so
+    ///   the loader never binds them and the first call (winit's start-up initializer) jumps to a hint/name RVA
+    ///   and crashes before `main`. lld builds the import table itself and links them correctly.
+    /// - `-Clink-self-contained=yes`: rust-mingw's CRT objects and import libraries (no system MinGW needed).
+    pub fn portable_gnu(root: &Path, llvm_mingw: &Path) -> Toolchain {
+        let rustlib = root.join("lib/rustlib").join(PORTABLE_GNU_TARGET).join("bin");
+        let flag = |name: &str, p: PathBuf| format!("-C{name}={}", p.display());
+        Toolchain {
+            cargo: root.join("bin/cargo.exe"),
+            rustc: root.join("bin/rustc.exe"),
+            rustflags: vec![
+                flag("dlltool", llvm_mingw.join("bin/x86_64-w64-mingw32-dlltool.exe")),
+                flag("linker", rustlib.join("rust-lld.exe")),
+                "-Clinker-flavor=ld.lld".into(),
+                "-Clink-self-contained=yes".into(),
+            ],
+            path: vec![
+                root.join("bin"),
+                rustlib.clone(),
+                rustlib.join("self-contained"),
+                llvm_mingw.join("bin"),
+            ],
+        }
+    }
+}
+
+pub fn recompile_with_toolchain(
+    info: &RomInfo,
+    opts: &RecompileOptions,
+    toolchain: Option<&Toolchain>,
+    log: &mut dyn FnMut(String),
+) -> Result<PathBuf, BuildError> {
     if !info.reference_match && !opts.allow_unverified {
         return err(
             "This ROM differs from the reference. For an experimental modified-ROM build, allow unverified ROMs.",
@@ -337,7 +425,10 @@ pub fn recompile(
             "Source checkout needs 2_native_game/Cargo.toml, 2_native_game/Cargo.lock, and address-only dictionary/FUNCTION_BOUNDARIES.csv.",
         );
     }
-    let cargo = cargo_path()?;
+    let cargo = match toolchain {
+        Some(t) => t.cargo.clone(),
+        None => cargo_path()?,
+    };
     let parent = output
         .parent()
         .ok_or_else(|| BuildError("Output has no parent directory.".into()))?;
@@ -356,6 +447,23 @@ pub fn recompile(
         None => stage.path().join("gen-target"),
     };
     let offline = |c: &mut Command| {
+        if let Some(t) = toolchain {
+            c.env("RUSTC", &t.rustc)
+                .env("RUSTDOC", t.rustc.with_file_name("rustdoc.exe"));
+            // No `--target`/CARGO_BUILD_TARGET: the toolchain's host is its target, so the flags apply to
+            // build scripts and proc-macros too. The encoded form keeps paths with spaces intact.
+            c.env_remove("CARGO_BUILD_TARGET")
+                .env_remove("RUSTFLAGS")
+                .env("CARGO_ENCODED_RUSTFLAGS", t.rustflags.join("\u{1f}"));
+            // Only child PATH: DLLs and linker tools need to be discoverable.
+            let mut paths = t.path.clone();
+            paths.extend(std::env::split_paths(
+                &std::env::var_os("PATH").unwrap_or_default(),
+            ));
+            if let Ok(path) = std::env::join_paths(paths) {
+                c.env("PATH", path);
+            }
+        }
         if opts.offline {
             c.arg("--offline");
         }
@@ -375,7 +483,15 @@ pub fn recompile(
     log("[2/5] Building the generator.".into());
     let mut gen_build = Command::new(&cargo);
     gen_build
-        .args(["build", "--release", "--locked", "--features", "gen", "--bin", "mkds_gen"])
+        .args([
+            "build",
+            "--release",
+            "--locked",
+            "--features",
+            "gen",
+            "--bin",
+            "mkds_gen",
+        ])
         .arg("--manifest-path")
         .arg(&recomp_manifest)
         .arg("--target-dir")
@@ -415,7 +531,15 @@ pub fn recompile(
         log("Timing: native (Block 5.4): ARM9 code without the instruction budget; MKDS_HW_*=native at run time.".into());
     }
     let with_timing = |main: String| {
-        if timing_native { main.replacen("fn main() {\n", &format!("fn main() {{\n{NATIVE_TIMING_MAIN}"), 1) } else { main }
+        if timing_native {
+            main.replacen(
+                "fn main() {\n",
+                &format!("fn main() {{\n{NATIVE_TIMING_MAIN}"),
+                1,
+            )
+        } else {
+            main
+        }
     };
     let out = gen_cmd.output()?;
     for l in String::from_utf8_lossy(&out.stderr)
@@ -427,9 +551,12 @@ pub fn recompile(
     if !out.status.success() || !ws.join("generation.json").is_file() {
         return err("Generation failed; nothing was staged.");
     }
-    let generation: serde_json::Value = serde_json::from_slice(&std::fs::read(ws.join("generation.json"))?)
-        .map_err(|e| BuildError(format!("Unreadable generation.json: {e}")))?;
-    let unaccounted = generation["rejected_or_absent_entries"].as_u64().unwrap_or(u64::MAX);
+    let generation: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(ws.join("generation.json"))?)
+            .map_err(|e| BuildError(format!("Unreadable generation.json: {e}")))?;
+    let unaccounted = generation["rejected_or_absent_entries"]
+        .as_u64()
+        .unwrap_or(u64::MAX);
     if unaccounted != 0 && !opts.allow_incomplete {
         let sample: Vec<String> = generation["rejected"]
             .as_array()
@@ -465,7 +592,8 @@ pub fn recompile(
             toml_path(&native),
         ),
     )?;
-    let has_arm7 = std::fs::read_to_string(ws.join("lifted/src/lib.rs"))?.contains("pub static LIFTED7");
+    let has_arm7 =
+        std::fs::read_to_string(ws.join("lifted/src/lib.rs"))?.contains("pub static LIFTED7");
     if !has_arm7 && !opts.with_interpreter {
         return err(
             "The generator produced no lifted ARM7 code (LIFTED7); without it the ARM7 can only be interpreted. Update the checkout, or build with --with-interpreter for diagnostics.",
@@ -486,18 +614,33 @@ pub fn recompile(
             GAME_MAIN
                 .replace("@ASSETS_SHA256@", assets_sha)
                 .replace("@ARM7@", arm7_entry)
-                .replace("@INTERPRETED@", if opts.with_interpreter { INTERPRETED_ARM7 } else { NO_INTERPRETER }),
+                .replace(
+                    "@INTERPRETED@",
+                    if opts.with_interpreter {
+                        INTERPRETED_ARM7
+                    } else {
+                        NO_INTERPRETER
+                    },
+                ),
         ),
     )?;
     let deps = recomp_without_defaults(&ws, opts.with_interpreter)?;
     log(format!(
         "Interpreter {}: {deps} generated dependencies set to default-features = false.",
-        if opts.with_interpreter { "compiled in (diagnostics build)" } else { "not compiled in" }
+        if opts.with_interpreter {
+            "compiled in (diagnostics build)"
+        } else {
+            "not compiled in"
+        }
     ));
     if opts.with_acceptance {
-        let driver = opts.source.join("2_native_game/native/src/bin/race_check.rs");
+        let driver = opts
+            .source
+            .join("2_native_game/native/src/bin/race_check.rs");
         if !driver.is_file() {
-            return err("--with-acceptance needs 2_native_game/native/src/bin/race_check.rs in the checkout.");
+            return err(
+                "--with-acceptance needs 2_native_game/native/src/bin/race_check.rs in the checkout.",
+            );
         }
         let driver = driver.canonicalize()?;
         let driver = driver.to_string_lossy();
@@ -532,13 +675,9 @@ pub fn recompile(
     let mut update = Command::new(&cargo);
     update
         .args(["update", "--workspace", "--manifest-path"])
-        .arg(ws.join("Cargo.toml"))
-        .stdout(Stdio::null())
-        .stderr(Stdio::inherit());
+        .arg(ws.join("Cargo.toml"));
     offline(&mut update);
-    if !update.status()?.success() {
-        return err("Could not settle the generated workspace's lockfile.");
-    }
+    run_cargo_output(update, log, false)?;
     let (ws, target_dir) = match &rom_cache {
         Some(c) => {
             let cached = c.join("workspace");
@@ -567,13 +706,14 @@ pub fn recompile(
     let exe = built
         .remove("game")
         .ok_or_else(|| BuildError("Cargo did not report a built game executable.".into()))?;
-    let acceptance = if opts.with_acceptance {
-        Some(built.remove("acceptance").ok_or_else(|| {
-            BuildError("Cargo did not report the acceptance executable.".into())
-        })?)
-    } else {
-        None
-    };
+    let acceptance =
+        if opts.with_acceptance {
+            Some(built.remove("acceptance").ok_or_else(|| {
+                BuildError("Cargo did not report the acceptance executable.".into())
+            })?)
+        } else {
+            None
+        };
 
     log("[5/5] Staging the bundle.".into());
     let (generated_sha, _) = hash_generated(&ws)?;
@@ -761,7 +901,9 @@ pub fn build(
     let manifest = opts.source.join("3_hand_port/game/Cargo.toml");
     let lock = opts.source.join("3_hand_port/game/Cargo.lock");
     if !manifest.is_file() || !lock.is_file() {
-        return err("Source checkout must contain 3_hand_port/game/Cargo.toml and 3_hand_port/game/Cargo.lock.");
+        return err(
+            "Source checkout must contain 3_hand_port/game/Cargo.toml and 3_hand_port/game/Cargo.lock.",
+        );
     }
     let cargo = cargo_path()?;
     let mut args: Vec<String> = ["build", "--release", "--locked", "--manifest-path"]
@@ -782,6 +924,13 @@ pub fn build(
     // Drain stderr on its own thread so a full pipe can never stall Cargo.
     let stderr = child.stderr.take().unwrap();
     let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let stdout_tx = tx.clone();
+    let stdout = child.stdout.take().unwrap();
+    let stdout_reader = std::thread::spawn(move || {
+        for l in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let _ = stdout_tx.send(l);
+        }
+    });
     let reader = std::thread::spawn(move || {
         for l in BufReader::new(stderr).lines().map_while(Result::ok) {
             let _ = tx.send(l);
@@ -813,6 +962,7 @@ pub fn build(
         }
     }
     let _ = reader.join();
+    let _ = stdout_reader.join();
     while let Ok(l) = rx.try_recv() {
         log(l);
     }
@@ -878,9 +1028,13 @@ pub fn launch_with_env(
         .as_str()
         .ok_or_else(|| BuildError("Manifest lacks ROM path.".into()))?;
     if let Some(recorded) = m["assets"]["assets_sha256"].as_str() {
-        let got = mkds_builder::rip::verify(&bundle.join(m["assets"]["path"].as_str().unwrap_or("assets")))?;
+        let got = mkds_builder::rip::verify(
+            &bundle.join(m["assets"]["path"].as_str().unwrap_or("assets")),
+        )?;
         if got != recorded {
-            return err("Assets differ from the ones this game was built with. Rebuild from your ROM.");
+            return err(
+                "Assets differ from the ones this game was built with. Rebuild from your ROM.",
+            );
         }
     }
     // Bundles whose game reads the ROM (`{rom}` in launch_args, or legacy without launch_args) need it
@@ -892,7 +1046,9 @@ pub fn launch_with_env(
     if needs_rom {
         let want = m["rom"]["sha256"].as_str().unwrap_or_default();
         if !Path::new(rom).is_file() {
-            return err(format!("The ROM this bundle was built from is missing: {rom}"));
+            return err(format!(
+                "The ROM this bundle was built from is missing: {rom}"
+            ));
         }
         if sha256_file(Path::new(rom))? != want {
             return err("ROM changed since build; run the ROM builder again.");
@@ -919,7 +1075,13 @@ pub fn launch_with_env(
 /// The game command for a verified bundle: `launch_args` from the manifest with `{rom}` (the verified
 /// ROM) and `{assets}` (the bundle's ripped assets) substituted, then the user's extra arguments.
 /// Bundles without `launch_args` (the legacy reference port) get `extra --rom <rom>`.
-fn launch_command(bundle: &Path, m: &serde_json::Value, exe: &str, rom: &str, extra: &[String]) -> Command {
+fn launch_command(
+    bundle: &Path,
+    m: &serde_json::Value,
+    exe: &str,
+    rom: &str,
+    extra: &[String],
+) -> Command {
     let mut command = Command::new(bundle.join(exe));
     match m["launch_args"].as_array() {
         Some(template) => {
@@ -958,12 +1120,19 @@ fn dictionary_tables(source: &Path) -> Vec<PathBuf> {
         .filter_map(|e| e.ok().map(|e| e.path()))
         // name tables only: `sdk_*.csv` and `game_*.csv` (fields, field uses and globals are layout tables)
         .filter(|p| {
-            let n = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            let n = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
             n.ends_with(".csv") && (n.starts_with("sdk_") || n.starts_with("game_"))
         })
         .collect();
     refined.sort();
-    let tables: Vec<PathBuf> = [base].into_iter().filter(|p| p.is_file()).chain(refined).collect();
+    let tables: Vec<PathBuf> = [base]
+        .into_iter()
+        .filter(|p| p.is_file())
+        .chain(refined)
+        .collect();
     tables
 }
 
@@ -972,16 +1141,43 @@ mod tests {
     use super::*;
 
     #[test]
+    fn portable_gnu_links_with_lld_and_llvm_dlltool() {
+        let t = Toolchain::portable_gnu(Path::new("C:/tc dir"), Path::new("C:/tc dir/llvm-mingw"));
+        assert_eq!(t.rustc, Path::new("C:/tc dir/bin/rustc.exe"));
+        let f = &t.rustflags;
+        assert!(f.iter().all(|a| !a.contains("--target")));
+        assert!(f[0].starts_with("-Cdlltool=C:/tc dir/llvm-mingw") && f[0].ends_with("x86_64-w64-mingw32-dlltool.exe"));
+        assert!(f[1].starts_with("-Clinker=C:/tc dir") && f[1].contains("x86_64-pc-windows-gnu") && f[1].ends_with("rust-lld.exe"));
+        assert_eq!(f[2..], ["-Clinker-flavor=ld.lld", "-Clink-self-contained=yes"]);
+        assert!(t.path.iter().any(|p| p.ends_with("self-contained")));
+        assert!(t.path.contains(&Path::new("C:/tc dir/llvm-mingw").join("bin")));
+    }
+
+    #[test]
     fn dictionary_tables_come_in_override_order() {
         let d = tempfile::tempdir().unwrap();
         assert!(dictionary_tables(d.path()).is_empty());
         let dict = d.path().join("dictionary");
         std::fs::create_dir(&dict).unwrap();
-        for f in ["sdk_functions.csv", "functions.csv", "game_karts.csv", "structs.csv", "fields.csv", "globals.csv", "export.py"] {
+        for f in [
+            "sdk_functions.csv",
+            "functions.csv",
+            "game_karts.csv",
+            "structs.csv",
+            "fields.csv",
+            "globals.csv",
+            "export.py",
+        ] {
             std::fs::write(dict.join(f), "").unwrap();
         }
-        let names: Vec<_> = dictionary_tables(d.path()).iter().map(|p| p.file_name().unwrap().to_string_lossy().into_owned()).collect();
-        assert_eq!(names, ["functions.csv", "game_karts.csv", "sdk_functions.csv"]);
+        let names: Vec<_> = dictionary_tables(d.path())
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            ["functions.csv", "game_karts.csv", "sdk_functions.csv"]
+        );
     }
 
     #[cfg(unix)]
@@ -993,13 +1189,27 @@ mod tests {
         let bundle = d.path().join("bundle with spaces");
         std::fs::create_dir(&source).unwrap();
         let game = source.join("game");
-        std::fs::write(&game, "#!/bin/sh\n[ \"$1\" = '--label' ] && [ \"$2\" = 'two words' ] || exit 9\nexit 23\n").unwrap();
+        std::fs::write(
+            &game,
+            "#!/bin/sh\n[ \"$1\" = '--label' ] && [ \"$2\" = 'two words' ] || exit 9\nexit 23\n",
+        )
+        .unwrap();
         std::fs::set_permissions(&game, std::fs::Permissions::from_mode(0o755)).unwrap();
         copy_tree(&source, &bundle).unwrap();
-        assert_ne!(std::fs::metadata(bundle.join("game")).unwrap().permissions().mode() & 0o111, 0);
+        assert_ne!(
+            std::fs::metadata(bundle.join("game"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o111,
+            0
+        );
         let m = json!({"rom": {"path": "absent.nds"}, "executable": "game", "launch_args": []});
         std::fs::write(bundle.join("manifest.json"), m.to_string()).unwrap();
-        assert_eq!(launch(&bundle, &["--label".into(), "two words".into()]).unwrap(), 23);
+        assert_eq!(
+            launch(&bundle, &["--label".into(), "two words".into()]).unwrap(),
+            23
+        );
     }
 
     #[test]
@@ -1048,7 +1258,11 @@ mod tests {
         let rom = d.path().join("x.nds");
         std::fs::write(&rom, b"abc").unwrap();
         let out = d.path().join("out");
-        let e = recompile(&fake_info(&rom, false), &options(d.path(), &out), &mut |_| {});
+        let e = recompile(
+            &fake_info(&rom, false),
+            &options(d.path(), &out),
+            &mut |_| {},
+        );
         assert!(e.unwrap_err().0.contains("differs from the reference"));
         assert!(!out.exists());
     }
@@ -1074,7 +1288,11 @@ mod tests {
         let out = d.path().join("out");
         std::fs::create_dir(&out).unwrap();
         std::fs::write(out.join("keep.txt"), b"mine").unwrap();
-        let e = recompile(&fake_info(&rom, true), &options(d.path(), &out), &mut |_| {});
+        let e = recompile(
+            &fake_info(&rom, true),
+            &options(d.path(), &out),
+            &mut |_| {},
+        );
         assert!(e.unwrap_err().0.contains("Output must be empty"));
         assert_eq!(std::fs::read(out.join("keep.txt")).unwrap(), b"mine");
     }
@@ -1085,7 +1303,11 @@ mod tests {
         let rom = d.path().join("x.nds");
         std::fs::write(&rom, b"abc").unwrap();
         let out = d.path().join("out");
-        let e = recompile(&fake_info(&rom, true), &options(d.path(), &out), &mut |_| {});
+        let e = recompile(
+            &fake_info(&rom, true),
+            &options(d.path(), &out),
+            &mut |_| {},
+        );
         assert!(e.unwrap_err().0.contains("Source checkout needs"));
         assert!(!out.exists());
     }
@@ -1127,9 +1349,19 @@ mod tests {
     #[test]
     fn launch_args_substitute_rom_and_assets_then_user_arguments() {
         let bundle = Path::new("C:/bundle dir");
-        let m = json!({"launch_args": ["--assets", "{assets}", "{rom}"], "assets": {"path": "assets"}});
-        let c = launch_command(bundle, &m, "game.exe", "C:/roms/my game.nds", &["--mute".into()]);
-        let args: Vec<String> = c.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let m =
+            json!({"launch_args": ["--assets", "{assets}", "{rom}"], "assets": {"path": "assets"}});
+        let c = launch_command(
+            bundle,
+            &m,
+            "game.exe",
+            "C:/roms/my game.nds",
+            &["--mute".into()],
+        );
+        let args: Vec<String> = c
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
         assert_eq!(
             args,
             vec![
@@ -1140,7 +1372,10 @@ mod tests {
             ]
         );
         let legacy = launch_command(bundle, &json!({}), "mkds_game.exe", "r.nds", &[]);
-        let args: Vec<String> = legacy.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        let args: Vec<String> = legacy
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
         assert_eq!(args, vec!["--rom", "r.nds"]);
     }
 
@@ -1152,15 +1387,24 @@ mod tests {
         std::fs::write(src.join("part_00/src/lib.rs"), "same").unwrap();
         std::fs::write(src.join("Cargo.toml"), "v1").unwrap();
         assert_eq!(sync_tree(&src, &dst).unwrap(), (2, 0, 0));
-        let before = std::fs::metadata(dst.join("part_00/src/lib.rs")).unwrap().modified().unwrap();
+        let before = std::fs::metadata(dst.join("part_00/src/lib.rs"))
+            .unwrap()
+            .modified()
+            .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(src.join("Cargo.toml"), "v2").unwrap();
         std::fs::create_dir_all(dst.join("part_99")).unwrap();
         std::fs::create_dir_all(dst.join("target/keep")).unwrap();
         assert_eq!(sync_tree(&src, &dst).unwrap(), (1, 1, 1));
-        let after = std::fs::metadata(dst.join("part_00/src/lib.rs")).unwrap().modified().unwrap();
+        let after = std::fs::metadata(dst.join("part_00/src/lib.rs"))
+            .unwrap()
+            .modified()
+            .unwrap();
         assert_eq!(before, after, "unchanged file keeps its timestamp");
-        assert_eq!(std::fs::read_to_string(dst.join("Cargo.toml")).unwrap(), "v2");
+        assert_eq!(
+            std::fs::read_to_string(dst.join("Cargo.toml")).unwrap(),
+            "v2"
+        );
         assert!(!dst.join("part_99").exists() && dst.join("target/keep").exists());
     }
 
@@ -1168,7 +1412,12 @@ mod tests {
     fn cache_lock_is_exclusive_and_released() {
         let d = tempfile::tempdir().unwrap();
         let first = lock_cache(d.path()).unwrap();
-        assert!(lock_cache(d.path()).unwrap_err().0.contains("Another build is using the cache"));
+        assert!(
+            lock_cache(d.path())
+                .unwrap_err()
+                .0
+                .contains("Another build is using the cache")
+        );
         drop(first);
         assert!(lock_cache(d.path()).is_ok());
     }
@@ -1176,7 +1425,13 @@ mod tests {
     #[test]
     fn rom_free_bundle_launches_without_the_rom_but_still_checks_assets() {
         let d = tempfile::tempdir().unwrap();
-        let ripped = mkds_builder::rip::rip(&sample_rom_for_launch(), "00", &d.path().join("b"), &mut |_| {}).unwrap();
+        let ripped = mkds_builder::rip::rip(
+            &sample_rom_for_launch(),
+            "00",
+            &d.path().join("b"),
+            &mut |_| {},
+        )
+        .unwrap();
         let bundle = d.path().join("b");
         let m = json!({"rom": {"path": d.path().join("gone.nds"), "sha256": "00"},
                        "executable": "missing-game.exe", "launch_args": ["--assets", "{assets}"],
@@ -1186,7 +1441,12 @@ mod tests {
         let e = launch(&bundle, &[]).unwrap_err().0;
         assert!(!e.contains("ROM"), "{e}");
         std::fs::write(bundle.join("assets/files/a"), b"edited").unwrap();
-        assert!(launch(&bundle, &[]).unwrap_err().0.contains("Asset changed"));
+        assert!(
+            launch(&bundle, &[])
+                .unwrap_err()
+                .0
+                .contains("Asset changed")
+        );
     }
 
     /// Minimal ROM image for the launcher tests: header + one named file "a".
@@ -1214,19 +1474,47 @@ mod tests {
     #[test]
     fn generated_crates_drop_recomp_default_features_once() {
         let d = tempfile::tempdir().unwrap();
-        for (name, deps) in [("part_00", "recomp = { path = \"C:/x/recomp\" }\n"), ("game", "recomp = { path = \"C:/x/recomp\" }\nlifted = { path = \"../lifted\" }\nmkds_native = { path = \"C:/x/native\" }\n")] {
+        for (name, deps) in [
+            ("part_00", "recomp = { path = \"C:/x/recomp\" }\n"),
+            (
+                "game",
+                "recomp = { path = \"C:/x/recomp\" }\nlifted = { path = \"../lifted\" }\nmkds_native = { path = \"C:/x/native\" }\n",
+            ),
+        ] {
             std::fs::create_dir_all(d.path().join(name)).unwrap();
-            std::fs::write(d.path().join(name).join("Cargo.toml"), format!("[package]\nname = \"{name}\"\n\n[dependencies]\n{deps}")).unwrap();
+            std::fs::write(
+                d.path().join(name).join("Cargo.toml"),
+                format!("[package]\nname = \"{name}\"\n\n[dependencies]\n{deps}"),
+            )
+            .unwrap();
         }
         assert_eq!(recomp_without_defaults(d.path(), false).unwrap(), 3);
         let game = std::fs::read_to_string(d.path().join("game/Cargo.toml")).unwrap();
-        assert!(game.contains("recomp = { path = \"C:/x/recomp\", default-features = false }"), "{game}");
-        assert!(game.contains("mkds_native = { path = \"C:/x/native\", default-features = false }"));
+        assert!(
+            game.contains("recomp = { path = \"C:/x/recomp\", default-features = false }"),
+            "{game}"
+        );
+        assert!(
+            game.contains("mkds_native = { path = \"C:/x/native\", default-features = false }")
+        );
         assert!(game.contains("lifted = { path = \"../lifted\" }"));
-        assert_eq!(recomp_without_defaults(d.path(), false).unwrap(), 0, "idempotent");
+        assert_eq!(
+            recomp_without_defaults(d.path(), false).unwrap(),
+            0,
+            "idempotent"
+        );
         let e = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(e.path().join("game")).unwrap();
-        std::fs::write(e.path().join("game/Cargo.toml"), "[dependencies]\nrecomp = { path = \"r\" }\n").unwrap();
+        std::fs::write(
+            e.path().join("game/Cargo.toml"),
+            "[dependencies]\nrecomp = { path = \"r\" }\n",
+        )
+        .unwrap();
         recomp_without_defaults(e.path(), true).unwrap();
-        assert!(std::fs::read_to_string(e.path().join("game/Cargo.toml")).unwrap().contains("default-features = false, features = [\"interpreter\"] }"));
-    }}
+        assert!(
+            std::fs::read_to_string(e.path().join("game/Cargo.toml"))
+                .unwrap()
+                .contains("default-features = false, features = [\"interpreter\"] }")
+        );
+    }
+}
