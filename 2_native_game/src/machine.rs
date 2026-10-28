@@ -93,7 +93,7 @@ const WFI_LIMIT: u32 = 2_000_000;
 impl<'a> Machine<'a> {
     pub fn new(mut hw: ds_mem::Bus, disp: &'a Dispatcher) -> Self {
         let hle7 = crate::hle7::Router::from_env(&mut hw);
-        Machine {
+        let mut m = Machine {
             hw,
             disp,
             hooks: HashMap::new(),
@@ -123,7 +123,13 @@ impl<'a> Machine<'a> {
             os_gate: None,
             tick_pin: crate::os_hle::TickPin::from_env(),
             budget_free: crate::os_hle::budget_free(),
+        };
+        if m.budget_free {
+            if let Some(r) = m.hle7.as_mut() {
+                r.latency = 0; // replies are synchronous (see `pxi_sync`)
+            }
         }
+        m
     }
 
     /// Replace the function at `entry` (bit 0 ignored).
@@ -174,13 +180,37 @@ impl Mem for Machine<'_> {
             .unwrap_or_else(|| self.hw.r32(a))
     }
     fn w8(&mut self, a: u32, v: u8) {
-        self.hw.w8(a, v)
+        self.hw.w8(a, v);
+        if self.budget_free {
+            self.pxi_sync();
+        }
     }
     fn w16(&mut self, a: u32, v: u16) {
-        self.hw.w16(a, v)
+        self.hw.w16(a, v);
+        if self.budget_free {
+            self.pxi_sync();
+        }
     }
     fn w32(&mut self, a: u32, v: u32) {
-        self.hw.w32(a, v)
+        self.hw.w32(a, v);
+        if self.budget_free {
+            self.pxi_sync();
+        }
+    }
+}
+
+impl Machine<'_> {
+    /// Block 5.4 (`MKDS_TIMING=native` with `MKDS_HW_ARM7=native`): a PXI word for a native ARM7 service is
+    /// answered at once, inside the ARM9's FIFO write (the router's reply latency is 0 in this mode), instead
+    /// of at the next slice end, which without a budget may be far away. The reply's IPC-receive IRQ is
+    /// then delivered at the next safe point like every other IRQ.
+    fn pxi_sync(&mut self) {
+        if self.hw.hle7_in.is_empty() {
+            return;
+        }
+        if let Some(r) = self.hle7.as_mut() {
+            r.advance(&mut self.hw, self.arm7.as_mut().map(|a| &mut a.s.periph));
+        }
     }
 }
 

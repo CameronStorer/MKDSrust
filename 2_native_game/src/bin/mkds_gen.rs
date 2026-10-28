@@ -88,8 +88,8 @@ fn parse_args() -> Result<Args, String> {
             "--allow-incomplete" => allow_incomplete = true,
             // Block 5.4: `native` emits ARM9 code without the per-block budget (see `recomp::lift::timing_native`)
             "--timing" => match value("--timing")?.as_str() {
-                "native" => recomp::lift::set_timing_native(true, recomp::os_hle::SAFE_LOOPS),
-                "exact" => recomp::lift::set_timing_native(false, &[]),
+                "native" => lift::set_timing_native(true, recomp::os_hle::SAFE_LOOPS),
+                "exact" => lift::set_timing_native(false, &[]),
                 t => return Err(format!("--timing must be exact or native, not {t}")),
             },
             other => return Err(format!("unknown argument {other}")),
@@ -1581,7 +1581,7 @@ edition = \"2024\"
             "per_segment": extra_counts.iter().map(|(k, v)| (k.clone(), json!({"functions": v.0, "instructions": v.1, "undecoded_sites": v.2}))).collect::<BTreeMap<_, _>>(),
         },
     });
-    if recomp::lift::timing_native() {
+    if lift::timing_native() {
         report["timing"] = json!("native"); // Block 5.4: ARM9 code without the instruction budget
     }
     put(args.out.join(MARKER), &serde_json::to_string_pretty(&report).unwrap())?;

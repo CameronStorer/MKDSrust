@@ -13,8 +13,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Block 5.4 (`mkds_gen --timing native`, off by default): ARM9 code is emitted without the per-block
-/// instruction budget. Only blocks inside the census busy-wait loops ([`crate::os_hle::SAFE_LOOPS`]) keep
-/// it, as poll points where a slice may end and a pending IRQ be taken. The ARM7 table (it charges
+/// instruction budget. Only loop headers and the blocks inside the census busy-wait loops
+/// ([`crate::os_hle::SAFE_LOOPS`]) keep it, as poll points where a slice may end (the hardware and the ARM7
+/// advance) and a pending IRQ be taken. The ARM7 table (it charges
 /// cycles, `cost` is `Some`) is unchanged: the ARM7 CPU still runs on hardware time.
 static TIMING_NATIVE: AtomicBool = AtomicBool::new(false);
 static POLL_LOOPS: std::sync::OnceLock<&'static [(u32, u32, &'static str)]> = std::sync::OnceLock::new();
@@ -786,6 +787,25 @@ pub fn emit_cost(f: &Func, id: &str, img: Option<&Image>, cost: Option<&dyn Fn(&
 /// (today: dead flag computations are dropped, see [`crate::raise`]).
 pub fn emit_full(f: &Func, id: &str, img: Option<&Image>, cost: Option<&dyn Fn(&Decoded, bool) -> u32>, raise: bool) -> String {
     let live = if raise { Some(crate::raise::flag_liveness(f, img)) } else { None };
+    // Block 5.4 (`--timing native`, ARM9): loop headers (targets of backward direct branches) keep the budget as
+    // poll points, so a loop waiting on the ARM7 or on time still ends slices
+    let headers: BTreeSet<u32> = if cost.is_none() && timing_native() {
+        let mut h = BTreeSet::new();
+        for &start in &f.blocks {
+            for (a, d) in f.block(start) {
+                for st in crate::ir::lower(&d, a & !1, Func::next(a, &d) & !1, img) {
+                    if let crate::ir::S::Goto(crate::ir::E::Const(t)) = st {
+                        if t & !1 <= a & !1 {
+                            h.insert(t & !1);
+                        }
+                    }
+                }
+            }
+        }
+        h
+    } else {
+        BTreeSet::new()
+    };
     let mut s = format!(
         "#[allow(non_snake_case, unused_variables, unused_assignments, unused_mut, unreachable_code, unused_parens, unused_braces, clippy::all)]\npub fn f_{id}(c: &mut recomp::rt::Cpu, m: &mut dyn recomp::rt::Bus, mut pc: u32) -> u32 {{\n    #[allow(unused_imports)] use recomp::rt as R;\n    #[allow(unused_imports)] use recomp::arm::interwork as iw;\n    #[allow(unused_imports)] use recomp::rt::Mem as _;\n    loop {{\n        match pc {{\n"
     );
@@ -795,7 +815,7 @@ pub fn emit_full(f: &Func, id: &str, img: Option<&Image>, cost: Option<&dyn Fn(&
             None => insts.len() as u32,
             Some(cost) => insts.iter().enumerate().map(|(i, (_, d))| cost(d, i + 1 == insts.len() && (d.inst.writes_pc() || d.inst.is_call()))).sum(),
         };
-        if cost.is_none() && timing_native() && !polls(start) {
+        if cost.is_none() && timing_native() && !polls(start) && !headers.contains(&(start & !1)) {
             // Block 5.4: no budget outside poll points
             let _ = writeln!(s, "            {start:#X} => {{");
         } else {

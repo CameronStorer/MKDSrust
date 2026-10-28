@@ -45,8 +45,8 @@ struct Ctx<'a> {
     switches: &'a BTreeMap<u32, Vec<u32>>,
     /// Block start -> the flag writes a slice end there needs (flags held in locals).
     budget_flags: BTreeMap<u32, Vec<S>>,
-    /// Block 5.4 (`--timing native`, ARM9 only): blocks pay no budget except poll points
-    /// ([`crate::lift::polls`]), which use `poll!` (the budget's slice-end check).
+    /// Block 5.4 (`--timing native`, ARM9 only): blocks pay no budget except poll points (loop headers and
+    /// [`crate::lift::polls`]), which use `poll!` (the budget's slice-end check).
     native_timing: bool,
 }
 
@@ -1707,7 +1707,7 @@ fn block_code(c: &Ctx, x: u32, depth: usize, out: &mut String) {
     let b = &c.blocks[&x];
     indent(out, depth);
     // Block 5.4 (`--timing native`): poll points keep the slice-end check, every other block's `budget!` is empty
-    let mac = if c.native_timing && crate::lift::polls(b.start) { "poll" } else { "budget" };
+    let mac = if c.native_timing && (crate::lift::polls(b.start) || c.header.contains(&x)) { "poll" } else { "budget" };
     match c.budget_flags.get(&x) {
         Some(fl) => {
             let _ = writeln!(out, "{mac}!({:#X}, {}, {{ {} }}); // {:#X}", b.start, b.charge, ir::print_locals(fl).replace(char::from(10), " "), b.start & !1);
