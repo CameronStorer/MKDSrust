@@ -29,6 +29,14 @@ pub fn enabled() -> bool {
     *ON.get_or_init(|| std::env::var("MKDS_HW_TIME").as_deref() == Ok("native"))
 }
 
+/// Block 5.4: `MKDS_TIMING=native` (set by the executables of a build generated with `mkds_gen --timing
+/// native`): the ARM9 code pays no instruction budget except at poll points (`recomp::lift::polls`), and
+/// slices end at waits instead (see `Machine::budget_free`, `Session::step_frame`).
+pub fn budget_free() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("MKDS_TIMING").as_deref() == Ok("native"))
+}
+
 /// Bus cycles per frame (263 lines of 2130 cycles), as `Session::FRAME_CYCLES`.
 pub const FRAME_CYCLES: u64 = 263 * 2130;
 
@@ -281,69 +289,140 @@ impl IrqGate {
     }
 }
 
-/// Test-only seed pin (`MKDS_RACE_SEED`, off by default), for seed-equalized oracle replays.
+/// Test-only tick pin (`MKDS_TICK_PIN`, off by default), for seed-equalized oracle replays.
 ///
-/// Race setup (`race_randomize_setup_maybe`, 0x0203B6AC) seeds its LCG with RTC seconds-of-day +
-/// `OS_GetTick()` and passes the seed to its first `msl_multiply_u64` call (entry 0x02133048, return
-/// 0x0203B739) in r2 (r3 = 0, the high word). Native OS time (and the native RTC) change that value, so
-/// the race differs from the first race frame by design. To compare everything *else*, the seed is pinned
-/// at that call:
-/// - `MKDS_RACE_SEED=log`: report each seed (`MKDS_RACE_SEED: call N seed 0x...`), change nothing;
-/// - `MKDS_RACE_SEED=0xA,0xB,...`: replace the seed of call N with the N-th value (from an exact run's log);
-///   calls beyond the list are reported and left alone.
+/// The race seeds its random generators from `OS_GetTick` (0x0200F5AC): `course_init_checkpoint_progress`
+/// stores two tick mixes into the race manager's RNG states (+0x47C, +0x498), `race_randomize_setup_maybe`
+/// mixes the tick with the RTC, and the menus' random picks do the same. Native OS time changes those
+/// values, so the race differs from its first frame by design. To compare everything *else*, the return
+/// value of `OS_GetTick` (r0 low, r1 high) is pinned at these call sites ([`TICK_SEED_SITES`], return
+/// addresses; `MKDS_TICK_PIN_SITES=0x..,0x..` replaces the list):
+/// - `MKDS_TICK_PIN=log`: report each call (`MKDS_TICK_PIN: site 0x... call N tick 0x...`), change nothing;
+/// - `MKDS_TICK_PIN=FILE`: a log of the exact model (those lines; others are ignored): the N-th call at a
+///   site returns that site's N-th logged tick. Calls beyond the log are reported and left alone.
 #[derive(Debug, Default)]
-pub struct SeedPin {
-    values: Option<Vec<u32>>,
-    /// Calls seen so far.
-    pub calls: usize,
-    /// The last call (sp, seed after pinning): a slice end at the callee's entry re-dispatches it.
-    last: Option<(u32, u32)>,
+pub struct TickPin {
+    sites: Vec<u32>,
+    /// (site, call index) -> tick; `None`: log only.
+    values: Option<std::collections::HashMap<(u32, u32), u64>>,
+    /// Calls seen per site (parallel to `sites`).
+    calls: Vec<u32>,
+    /// The call in progress: (return address, sp at the call).
+    pending: Option<(u32, u32)>,
+    pub pinned: u64,
 }
 
-/// Entry of `msl_multiply_u64` and the return address of race setup's first call to it.
-pub const SEED_CALL: (u32, u32) = (0x0213_3048, 0x0203_B739);
+/// `OS_GetTick` entry (ARM).
+pub const OS_GET_TICK: u32 = 0x0200_F5AC;
 
-impl SeedPin {
-    /// `MKDS_RACE_SEED` (`None` when unset).
+/// Return addresses of the `OS_GetTick` calls that seed game randomness (AMCE revision 0).
+pub const TICK_SEED_SITES: &[(u32, &str)] = &[
+    (0x0204_03FC, "course_init_checkpoint_progress: race manager RNG 1 (tick << 16)"),
+    (0x0204_0404, "course_init_checkpoint_progress: race manager RNG 1 (+ tick)"),
+    (0x0204_0458, "course_init_checkpoint_progress: race manager RNG 2"),
+    (0x0204_0460, "course_init_checkpoint_progress: race manager RNG 2"),
+    (0x0204_0468, "course_init_checkpoint_progress: race manager RNG 2"),
+    (0x0203_B6C9, "race_randomize_setup_maybe: RTC + tick seed"),
+    (0x0212_3C60, "race_init_mode_state"),
+    (0x0204_AEE4, "race_init_player_record_maybe"),
+    (0x0204_AEEC, "race_init_player_record_maybe"),
+    (0x0203_BABD, "menu_randomize_characters"),
+    (0x0203_BAC3, "menu_randomize_characters"),
+    (0x0203_BC9B, "menu_randomize_karts"),
+    (0x0203_BCA1, "menu_randomize_karts"),
+    (0x0202_AB87, "menu_init_slot_screen"),
+    (0x0202_AB8D, "menu_init_slot_screen"),
+];
+
+fn parse_num(x: &str) -> Option<u64> {
+    let x = x.trim();
+    match x.strip_prefix("0x") {
+        Some(h) => u64::from_str_radix(h, 16).ok(),
+        None => x.parse().ok(),
+    }
+}
+
+impl TickPin {
+    /// `MKDS_TICK_PIN` (`None` when unset).
     pub fn from_env() -> Option<Self> {
-        let v = std::env::var("MKDS_RACE_SEED").ok()?;
-        Some(Self::parse(&v))
+        let v = std::env::var("MKDS_TICK_PIN").ok()?;
+        let sites = std::env::var("MKDS_TICK_PIN_SITES")
+            .ok()
+            .map(|s| s.split(',').filter_map(|x| parse_num(x).map(|v| v as u32)).collect())
+            .unwrap_or_else(|| TICK_SEED_SITES.iter().map(|s| s.0).collect());
+        let log = if v.trim() == "log" {
+            None
+        } else {
+            match std::fs::read_to_string(&v) {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    eprintln!("MKDS_TICK_PIN: cannot read {v}: {e}; logging only");
+                    None
+                }
+            }
+        };
+        Some(Self::new(sites, log.as_deref()))
     }
 
-    pub fn parse(v: &str) -> Self {
-        let values = (v.trim() != "log").then(|| {
-            v.split(',')
-                .filter_map(|x| {
-                    let x = x.trim();
-                    let r = x.strip_prefix("0x").map_or_else(|| x.parse(), |h| u32::from_str_radix(h, 16));
-                    r.ok()
-                })
-                .collect()
+    /// `log`: the text of an exact model's `MKDS_TICK_PIN=log` output (`None`: log only).
+    pub fn new(sites: Vec<u32>, log: Option<&str>) -> Self {
+        let values = log.map(|t| {
+            let mut m = std::collections::HashMap::new();
+            for l in t.lines() {
+                let Some(rest) = l.split("MKDS_TICK_PIN: site ").nth(1) else { continue };
+                let f: Vec<&str> = rest.split_whitespace().collect();
+                // site S call N tick V
+                if let (Some(s), Some(n), Some(v)) =
+                    (f.first().and_then(|x| parse_num(x)), f.get(2).and_then(|x| parse_num(x)), f.get(4).and_then(|x| parse_num(x)))
+                {
+                    m.insert((s as u32, n as u32), v);
+                }
+            }
+            m
         });
-        SeedPin { values, calls: 0, last: None }
+        let calls = vec![0; sites.len()];
+        TickPin { sites, values, calls, pending: None, pinned: 0 }
     }
 
-    /// Control reached `pc` (a block dispatch). Cheap for every other pc.
+    /// Control reached `pc` (a block dispatch): notes a call of `OS_GetTick` from a pinned site, and (flat
+    /// runtime: returns are dispatched) applies the pin when that call returns. Cheap for every other pc.
     #[inline]
     pub fn entry(&mut self, pc: u32, c: &mut crate::rt::Cpu) {
-        if pc != SEED_CALL.0 || c.r[14] != SEED_CALL.1 {
+        if pc == OS_GET_TICK {
+            if self.sites.contains(&c.r[14]) {
+                self.pending = Some((c.r[14], c.r[13]));
+            }
+        } else if let Some((ret, _)) = self.pending {
+            if pc == ret {
+                self.returned(ret, c);
+            }
+        }
+    }
+
+    /// A call returned to `ret` (the fiber runtime's `Bus::call`, or a flat dispatch): if it was the pending
+    /// `OS_GetTick` call (same return address and stack pointer), report and pin its result.
+    pub fn returned(&mut self, ret: u32, c: &mut crate::rt::Cpu) {
+        let Some((site, sp)) = self.pending else { return };
+        if ret != site || c.r[13] != sp {
             return;
         }
-        if self.last == Some((c.r[13], c.r[2])) {
-            return; // the same call dispatched again after a slice end
+        self.pending = None;
+        let k = self.sites.iter().position(|&s| s == site).unwrap();
+        let n = self.calls[k];
+        self.calls[k] += 1;
+        let seen = c.r[0] as u64 | (c.r[1] as u64) << 32;
+        let pin = self.values.as_ref().and_then(|v| v.get(&(site, n))).copied();
+        if let Some(v) = pin {
+            c.r[0] = v as u32;
+            c.r[1] = (v >> 32) as u32;
+            self.pinned += 1;
         }
-        let seen = c.r[2];
-        let pinned = self.values.as_ref().and_then(|v| v.get(self.calls)).copied();
-        if let Some(p) = pinned {
-            c.r[2] = p;
-        }
-        eprintln!(
-            "MKDS_RACE_SEED: call {} seed {seen:#010x}{}",
-            self.calls,
-            pinned.map_or(String::new(), |p| format!(" pinned to {p:#010x}"))
-        );
-        self.calls += 1;
-        self.last = Some((c.r[13], c.r[2]));
+        let what = match (&self.values, pin) {
+            (None, _) => String::new(),
+            (Some(_), Some(v)) => format!(" pinned to {v:#x}"),
+            (Some(_), None) => " (not in the log: unchanged)".into(),
+        };
+        eprintln!("MKDS_TICK_PIN: site {site:#010x} call {n} tick {seen:#x}{what}");
     }
 }
 
@@ -412,29 +491,38 @@ mod tests {
     }
 
     #[test]
-    fn seed_pin_replaces_only_race_setups_seed_once_per_call() {
-        let mut p = SeedPin::parse("0x1234,7");
+    fn tick_pin_replaces_only_listed_sites_by_call_index() {
+        let log = "noise\nMKDS_TICK_PIN: site 0x020403fc call 0 tick 0x1234\nMKDS_TICK_PIN: site 0x020403fc call 1 tick 0x500000007\n";
+        let mut p = TickPin::new(vec![0x0204_03FC, 0x0204_0404], Some(log));
         let mut c = crate::rt::Cpu::default();
-        c.r[2] = 99;
         c.r[13] = 0x0200_0100;
+        // another caller: untouched
         c.r[14] = 0x0200_0001;
-        p.entry(SEED_CALL.0, &mut c);
-        assert_eq!(c.r[2], 99, "other callers keep their arguments");
-        c.r[14] = SEED_CALL.1;
-        p.entry(SEED_CALL.0, &mut c);
-        assert_eq!((c.r[2], p.calls), (0x1234, 1));
-        p.entry(SEED_CALL.0, &mut c);
-        assert_eq!(p.calls, 1, "re-dispatch of the same call");
-        c.r[2] = 5;
-        p.entry(SEED_CALL.0, &mut c);
-        assert_eq!((c.r[2], p.calls), (7, 2));
-        c.r[2] = 5;
-        c.r[13] -= 8;
-        p.entry(SEED_CALL.0, &mut c);
-        assert_eq!((c.r[2], p.calls), (5, 3), "beyond the list: unchanged");
-        let mut l = SeedPin::parse("log");
-        c.r[2] = 42;
-        l.entry(SEED_CALL.0, &mut c);
-        assert_eq!((c.r[2], l.calls), (42, 1));
+        p.entry(OS_GET_TICK, &mut c);
+        c.r[0] = 9;
+        p.returned(0x0200_0001, &mut c);
+        assert_eq!(c.r[0], 9);
+        // the listed site, twice (entry dispatched again after a slice end), returning through a flat dispatch
+        c.r[14] = 0x0204_03FC;
+        p.entry(OS_GET_TICK, &mut c);
+        p.entry(OS_GET_TICK, &mut c);
+        c.r[0] = 77;
+        p.entry(0x0204_03FC, &mut c);
+        assert_eq!((c.r[0], p.pinned), (0x1234, 1));
+        p.entry(0x0204_03FC, &mut c);
+        assert_eq!(p.pinned, 1, "returned once");
+        // second call: 64-bit value, returning through the fiber runtime's call
+        p.entry(OS_GET_TICK, &mut c);
+        c.r[13] -= 8; // a nested call (an IRQ handler) returning to the same pc does not match
+        p.returned(0x0204_03FC, &mut c);
+        assert_eq!(p.pinned, 1);
+        c.r[13] += 8;
+        p.returned(0x0204_03FC, &mut c);
+        assert_eq!((c.r[0], c.r[1]), (7, 5));
+        // a third call is not in the log
+        p.entry(OS_GET_TICK, &mut c);
+        c.r[0] = 3;
+        p.returned(0x0204_03FC, &mut c);
+        assert_eq!((c.r[0], p.pinned), (3, 2));
     }
 }

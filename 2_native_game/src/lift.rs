@@ -10,6 +10,31 @@
 //! before every branch target, so a block always runs to its end.
 use crate::arm::{self, pc_read, Decoded, HalfMul, Inst, Off, Op2};
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Block 5.4 (`mkds_gen --timing native`, off by default): ARM9 code is emitted without the per-block
+/// instruction budget. Only blocks inside the census busy-wait loops ([`crate::os_hle::SAFE_LOOPS`]) keep
+/// it, as poll points where a slice may end and a pending IRQ be taken. The ARM7 table (it charges
+/// cycles, `cost` is `Some`) is unchanged: the ARM7 CPU still runs on hardware time.
+static TIMING_NATIVE: AtomicBool = AtomicBool::new(false);
+static POLL_LOOPS: std::sync::OnceLock<&'static [(u32, u32, &'static str)]> = std::sync::OnceLock::new();
+
+/// Sets the generator's timing model (`true`: `--timing native`) and, for `native`, the busy-wait loops
+/// whose blocks keep their budget as poll points (the generator passes `recomp::os_hle::SAFE_LOOPS`).
+pub fn set_timing_native(on: bool, poll_loops: &'static [(u32, u32, &'static str)]) {
+    TIMING_NATIVE.store(on, Ordering::Relaxed);
+    let _ = POLL_LOOPS.set(poll_loops);
+}
+
+/// `--timing native` is in force.
+pub fn timing_native() -> bool {
+    TIMING_NATIVE.load(Ordering::Relaxed)
+}
+
+/// Under `--timing native`, does the ARM9 block at `start` keep its budget (a busy-wait poll point)?
+pub fn polls(start: u32) -> bool {
+    POLL_LOOPS.get().is_some_and(|l| l.iter().any(|&(lo, hi, _)| (lo..hi).contains(&(start & !1))))
+}
 use std::fmt::Write;
 
 /// Code memory for discovery: one or more loaded segments (ARM9 main, ITCM, overlays).
@@ -770,7 +795,12 @@ pub fn emit_full(f: &Func, id: &str, img: Option<&Image>, cost: Option<&dyn Fn(&
             None => insts.len() as u32,
             Some(cost) => insts.iter().enumerate().map(|(i, (_, d))| cost(d, i + 1 == insts.len() && (d.inst.writes_pc() || d.inst.is_call()))).sum(),
         };
-        let _ = writeln!(s, "            {start:#X} => {{ if !R::spend(c, {charge}) && !m.slice_end(c, pc, {charge}) {{ c.r[15] = pc; return R::BUDGET_EXHAUSTED; }}");
+        if cost.is_none() && timing_native() && !polls(start) {
+            // Block 5.4: no budget outside poll points
+            let _ = writeln!(s, "            {start:#X} => {{");
+        } else {
+            let _ = writeln!(s, "            {start:#X} => {{ if !R::spend(c, {charge}) && !m.slice_end(c, pc, {charge}) {{ c.r[15] = pc; return R::BUDGET_EXHAUSTED; }}");
+        }
         let mut end = start;
         for (a, d) in &insts {
             let next = Func::next(*a, d);

@@ -248,7 +248,7 @@ impl<'a> Session<'a> {
         if let Some(g) = self.machine.os_gate.as_mut() {
             g.entry(self.pc, self.cpu.r[0]);
         }
-        if let Some(p) = self.machine.seed_pin.as_mut() {
+        if let Some(p) = self.machine.tick_pin.as_mut() {
             p.entry(self.pc, &mut self.cpu);
         }
         let overlay = in_overlay(&self.overlay_windows, &self.resident_overlays, self.pc);
@@ -289,7 +289,7 @@ impl<'a> Session<'a> {
                 if let Some(g) = bus.m.os_gate.as_mut() {
                     g.entry(self.pc, self.cpu.r[0]);
                 }
-                if let Some(p) = bus.m.seed_pin.as_mut() {
+                if let Some(p) = bus.m.tick_pin.as_mut() {
                     p.entry(self.pc, &mut self.cpu);
                 }
                 overlay = in_overlay(&self.overlay_windows, &self.resident_overlays, self.pc);
@@ -306,7 +306,7 @@ impl<'a> Session<'a> {
         let used = limit
             .checked_sub(self.cpu.budget)
             .ok_or("Runtime instruction budget underflow")?;
-        if used == 0 {
+        if used == 0 && !self.machine.budget_free {
             return Err(format!(
                 "No execution progress at ARM9 PC {:#010x}",
                 self.pc
@@ -348,6 +348,24 @@ impl<'a> Session<'a> {
             }
         }
         Ok(used)
+    }
+
+    /// Block 5.4: runs slices until the next logical frame starts (the SDK V-blank count changes): with
+    /// `MKDS_TIMING=native` the ARM9 runs without an instruction budget, so one frame is a handful of
+    /// slices that end at the frame's waits. Returns the slices run. Works in any mode (exact builds run
+    /// their 32-instruction slices). `max_slices` guards against a frame that never ends.
+    pub fn step_frame(&mut self, max_slices: u64) -> Result<u64, String> {
+        use crate::rt::Mem;
+        let start = self.machine.hw.r32(crate::ds_mem::VBLANK_COUNT);
+        let mut n = 0;
+        while self.machine.hw.r32(crate::ds_mem::VBLANK_COUNT) == start {
+            if n == max_slices {
+                return Err(format!("step_frame: no frame end after {n} slices (ARM9 PC {:#010x})", self.pc));
+            }
+            self.step(32)?;
+            n += 1;
+        }
+        Ok(n)
     }
 
     /// At a slice start at `pc`: is an IRQ ready (IME, IE & IF, CPSR I clear) and, with native OS time
@@ -393,7 +411,7 @@ impl<'a> Session<'a> {
             return Err(e);
         }
         let used = limit.checked_sub(self.cpu.budget).ok_or("Runtime instruction budget underflow")?;
-        if used == 0 {
+        if used == 0 && !self.machine.budget_free {
             let f = self.fibers.as_ref().unwrap();
             return Err(format!("No execution progress in a fiber slice: ended at {:#010x} ({}), thread {:#010x}, {} switches", f.last_end.0, f.last_end.1, f.current, f.switches));
         }

@@ -80,8 +80,11 @@ pub struct Machine<'a> {
     /// Block 5.3 (`MKDS_HW_TIME=native`): IRQs are delivered only at safe points ([`crate::os_hle::IrqGate`]).
     /// `None` (the default): at every slice start, as the hardware model always did.
     pub os_gate: Option<crate::os_hle::IrqGate>,
-    /// Test-only (`MKDS_RACE_SEED`): pins race setup's RNG seed ([`crate::os_hle::SeedPin`]). `None` by default.
-    pub seed_pin: Option<crate::os_hle::SeedPin>,
+    /// Test-only (`MKDS_TICK_PIN`): pins `OS_GetTick` results that seed game randomness ([`crate::os_hle::TickPin`]). `None` by default.
+    pub tick_pin: Option<crate::os_hle::TickPin>,
+    /// Block 5.4 (`MKDS_TIMING=native`, a build generated with `--timing native`): the ARM9 code pays no
+    /// instruction budget, so a wait for an interrupt ends the slice (budget 0) to let the IRQ be taken.
+    pub budget_free: bool,
 }
 
 /// Longest stretch (in 1000-cycle steps) a wait-for-interrupt may fast-forward before giving up.
@@ -118,7 +121,8 @@ impl<'a> Machine<'a> {
             host_quit: false,
             wait_hook: None,
             os_gate: None,
-            seed_pin: crate::os_hle::SeedPin::from_env(),
+            tick_pin: crate::os_hle::TickPin::from_env(),
+            budget_free: crate::os_hle::budget_free(),
         }
     }
 
@@ -201,7 +205,10 @@ impl Bus for Machine<'_> {
             // Halt / IntrWait / VBlankIntrWait: run the hardware until an interrupt is pending
             bios::Swi::Wait { .. } => {
                 self.oracle_wait(n);
-                self.wait_for_interrupt()
+                self.wait_for_interrupt();
+                if self.budget_free {
+                    c.budget = 0; // Block 5.4: the slice ends here, so the IRQ that woke the wait is taken
+                }
             }
             bios::Swi::Reset => self.note("swi SoftReset".into()),
             bios::Swi::Unsupported(n) => self.note(format!("swi {n:#04x}")),
@@ -220,7 +227,7 @@ impl Bus for Machine<'_> {
         *self.cp15.get(&(crn, crm, op1, op2)).unwrap_or(&0)
     }
 
-    fn mcr(&mut self, _c: &mut Cpu, cp: u8, op1: u8, crn: u8, crm: u8, op2: u8, v: u32) {
+    fn mcr(&mut self, c: &mut Cpu, cp: u8, op1: u8, crn: u8, crm: u8, op2: u8, v: u32) {
         if cp != 15 {
             self.note(format!("mcr p{cp}"));
             return;
@@ -228,7 +235,10 @@ impl Bus for Machine<'_> {
         match (crn, crm, op1, op2) {
             (7, 0, 0, 4) => {
                 self.oracle_wait(0x100);
-                self.wait_for_interrupt() // wait for interrupt
+                self.wait_for_interrupt(); // wait for interrupt
+                if self.budget_free {
+                    c.budget = 0; // Block 5.4: the slice ends here, so the IRQ that woke the wait is taken
+                }
             }
             (7, _, _, _) => {}                         // cache maintenance: memory is coherent
             (9, 1, 0, 0) => self.hw.dtcm_base = Some(v & 0xFFFF_F000),
