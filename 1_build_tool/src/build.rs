@@ -5,6 +5,26 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn AllocConsole() -> i32;
+    fn FreeConsole() -> i32;
+    fn GetConsoleWindow() -> *mut std::ffi::c_void;
+}
+#[cfg(windows)]
+struct GameConsole(bool);
+#[cfg(windows)]
+impl GameConsole {
+    fn new(verbose: bool) -> Self {
+        Self(verbose && unsafe { GetConsoleWindow().is_null() && AllocConsole() != 0 })
+    }
+}
+#[cfg(windows)]
+impl Drop for GameConsole {
+    fn drop(&mut self) { if self.0 { unsafe { FreeConsole(); } } }
+}
+
 /// Finds a checkout containing the recompiler or reference game, searching upward from `start`.
 pub fn find_source(start: &Path) -> Option<PathBuf> {
     start
@@ -538,7 +558,7 @@ pub fn recompile_with_toolchain(
                 1,
             )
         } else {
-            main
+            main.replacen("fn main() {\n", "fn main() {\n    unsafe { std::env::set_var(\"MKDS_NO_MODS\", \"1\") };\n", 1)
         }
     };
     let out = gen_cmd.output()?;
@@ -1068,7 +1088,49 @@ pub fn launch_with_env(
             command.env_remove(key);
         }
     }
-    let status = command.status()?;
+    let verbose = env.iter().rev().find(|(k, _)| *k == "MKDS_VERBOSE")
+        .map(|(_, v)| *v == Some("1"))
+        .unwrap_or_else(|| std::env::var("MKDS_VERBOSE").as_deref() == Ok("1"));
+    #[cfg(windows)]
+    let _console = GameConsole::new(verbose);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(if verbose { 0 } else { 0x08000000 });
+    }
+    let logs = bundle.join("logs");
+    std::fs::create_dir_all(&logs)?;
+    if logs.join("game.log.3").exists() { std::fs::remove_file(logs.join("game.log.3"))?; }
+    for (from, to) in [("game.log.2", "game.log.3"), ("game.log.1", "game.log.2"), ("game.log", "game.log.1")] {
+        if logs.join(from).exists() { std::fs::rename(logs.join(from), logs.join(to))?; }
+    }
+    let log = std::sync::Arc::new(std::sync::Mutex::new(std::fs::File::create(logs.join("game.log"))?));
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn()?;
+    fn drain<R: std::io::Read + Send + 'static>(mut reader: R, log: std::sync::Arc<std::sync::Mutex<std::fs::File>>, verbose: bool, stderr: bool) -> std::thread::JoinHandle<std::io::Result<()>> {
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let mut buffer = [0; 8192];
+            loop {
+                let n = reader.read(&mut buffer)?;
+                if n == 0 { return Ok(()); }
+                log.lock().unwrap().write_all(&buffer[..n])?;
+                if verbose {
+                    // CONOUT$ also works when the parent is the GUI launcher.
+                    #[cfg(windows)]
+                    if let Ok(mut console) = std::fs::OpenOptions::new().write(true).open("CONOUT$") { let _ = console.write_all(&buffer[..n]); }
+                    #[cfg(not(windows))]
+                    if stderr { let _ = std::io::stderr().write_all(&buffer[..n]); }
+                    else { let _ = std::io::stdout().write_all(&buffer[..n]); }
+                    let _ = stderr;
+                }
+            }
+        })
+    }
+    let stdout = drain(child.stdout.take().unwrap(), log.clone(), verbose, false);
+    let stderr = drain(child.stderr.take().unwrap(), log, verbose, true);
+    let status = child.wait()?;
+    for worker in [stdout, stderr] { worker.join().map_err(|_| BuildError("Game log worker panicked".into()))??; }
     Ok(status.code().unwrap_or(1))
 }
 
@@ -1139,6 +1201,22 @@ fn dictionary_tables(source: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn game_streams_are_logged_and_three_previous_runs_are_rotated() {
+        let d = tempfile::tempdir().unwrap();
+        let system = std::env::var_os("SystemRoot").unwrap();
+        std::fs::copy(Path::new(&system).join("System32/cmd.exe"), d.path().join("probe.exe")).unwrap();
+        let m = json!({"rom":{"path":"unused"},"executable":"probe.exe", "launch_args":["/C", "echo stdout-probe & echo stderr-probe 1>&2"]});
+        std::fs::write(d.path().join("manifest.json"), m.to_string()).unwrap();
+        for _ in 0..4 { assert_eq!(launch_with_env(d.path(), &[], &[("MKDS_VERBOSE", Some("0"))]).unwrap(), 0); }
+        for name in ["game.log", "game.log.1", "game.log.2", "game.log.3"] {
+            let log = std::fs::read_to_string(d.path().join("logs").join(name)).unwrap();
+            assert!(log.contains("stdout-probe")); assert!(log.contains("stderr-probe"));
+        }
+        assert!(!d.path().join("logs/game.log.4").exists());
+    }
 
     #[test]
     fn portable_gnu_links_with_lld_and_llvm_dlltool() {

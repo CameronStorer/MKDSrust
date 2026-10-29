@@ -7,6 +7,7 @@ pub mod gpu;
 mod pad;
 pub mod window;
 mod script;
+mod mods;
 use mkds_builder::controls::{self, Controls};
 use mkds_builder::settings::{Layout, Renderer, Settings};
 use window::HostLink;
@@ -55,6 +56,7 @@ pub struct Options {
 impl Options {
     pub fn from_args(args: impl IntoIterator<Item = String>) -> Result<Self, String> {
         let mut result = Self::default();
+        result.stats = std::env::var("MKDS_VERBOSE").as_deref() == Ok("1");
         let mut args = args.into_iter();
         while let Some(arg) = args.next() {
             match arg.as_str() {
@@ -349,6 +351,23 @@ fn run_internal(
     table7: Option<&'static [Lifted]>, options: Options,
 ) -> Result<RunReport, String> {
     recomp::player_defaults();
+    let mut options = options;
+    // This runs only in the player. The independent acceptance driver never enters here.
+    let mut modded_card = None;
+    if mods::allowed(options.headless) {
+        if let Some(game) = std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from)) {
+            if !mkds_builder::modpkg::enabled(&game).is_empty() {
+                // Saves belong to the original cartridge even when the virtual files change.
+                options.save_rom_sha1.get_or_insert_with(|| mkds_builder::rom::sha1(rom));
+                let mut card = rom.to_vec();
+                match mods::apply(&mut card, &game, &mut |s| eprintln!("{s}")) {
+                    Ok(()) => modded_card = Some(card),
+                    Err(e) => eprintln!("[mods] overlay skipped: {e}"),
+                }
+            }
+        }
+    } else { eprintln!("[mods] disabled (exact timing, diagnostics, or MKDS_NO_MODS=1)"); }
+    let rom = modded_card.as_deref().unwrap_or(rom);
     if options.headless && options.instruction_limit.is_none() {
         return Err("Headless diagnostics require a finite instruction limit".into());
     }
