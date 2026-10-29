@@ -13,6 +13,13 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + S
 pub const MAX_ZIP: u64 = 100 * 1024 * 1024;
 pub const MAX_UNPACKED: u64 = 400 * 1024 * 1024;
 pub const MAX_FILES: usize = 5000;
+/// PLUGIN_FORMAT.md rule 1: never ROMs, saves, executables or scripts.
+pub const BLOCKED_EXTENSIONS: [&str; 23] = [
+    "nds", "srl", "dsi", "sav", "dsv", "gba", "3ds", "cia", "nsp", "xci", "exe", "dll", "bat", "cmd", "com", "scr",
+    "msi", "ps1", "vbs", "sh", "jar", "app", "apk",
+];
+/// Package `type` values (PLUGIN_FORMAT.md) in display order.
+pub const TYPES: [&str; 8] = ["character", "kart", "track", "battle", "music", "texture", "gameplay", "other"];
 
 pub fn hash(bytes: &[u8]) -> String {
     crate::rom::hex(&Sha256::digest(bytes))
@@ -148,18 +155,14 @@ impl Manifest {
         if m.format != 1
             || m.game != "AMCE"
             || !valid_id(&m.id)
-            || ![
-                "character",
-                "track",
-                "kart",
-                "battle",
-                "music",
-                "texture",
-                "other",
-            ]
-            .contains(&m.kind.as_str())
+            || !TYPES.contains(&m.kind.as_str())
             || m.name.trim().is_empty()
+            || m.name.chars().count() > 100
             || m.author.trim().is_empty()
+            || m.author.chars().count() > 100
+            || m.license.as_ref().is_some_and(|l| l.chars().count() > 100)
+            || m.depends.len() > 64
+            || m.conflicts.len() > 64
             || m.description.chars().count() > 2000
             || m.files.is_empty()
             || m.files.len() > MAX_FILES
@@ -173,7 +176,13 @@ impl Manifest {
                 || !safe_path(entry.source())
                 || !targets.insert(target.to_ascii_lowercase())
             {
-                return Err("Unsafe or duplicate mod path".into());
+                return Err(format!("Unsafe or duplicate mod path: {target}").into());
+            }
+            if entry.source() == "manifest.json" {
+                return Err(format!("manifest.files[\"{target}\"] cannot point at manifest.json").into());
+            }
+            if BLOCKED_EXTENSIONS.contains(&crate::dsfiles::ext_of(target).as_str()) {
+                return Err(format!("manifest.files target has a blocked file type: {target}").into());
             }
         }
         for dep in &m.depends {
@@ -296,25 +305,42 @@ fn rolling_hash(data: &[u8]) -> u64 {
         .fold(0u64, |h, b| h.wrapping_mul(257).wrapping_add(*b as u64))
 }
 
-fn ds_header(bytes: &[u8]) -> bool {
-    // Nintendo logo prefix or a structurally plausible NDS header, including homebrew.
+/// CRC-16/MODBUS, the checksum a DS header uses for itself (at 0x15E over 0x000-0x15D).
+fn crc16(bytes: &[u8]) -> u16 {
+    let mut crc = 0xffffu16;
+    for &b in bytes {
+        crc ^= b as u16;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xa001 } else { crc >> 1 };
+        }
+    }
+    crc
+}
+/// Where a DS cartridge header starts in `bytes` (the site's `findDsRomHeader`): at offset 0 the logo checksum
+/// 0xCF56, the logo itself, or a structurally plausible header (homebrew too); at every later 512-byte boundary the
+/// logo checksum plus a valid header CRC (an image embedded in another file).
+fn ds_rom_header(bytes: &[u8]) -> Option<usize> {
     if bytes.len() < 0x160 {
-        return false;
+        return None;
     }
-    if bytes[0xc0..0xc8] == [0x24, 0xff, 0xae, 0x51, 0x69, 0x9a, 0xa2, 0x21] {
-        return true;
+    let u16at = |o: usize| u16::from_le_bytes([bytes[o], bytes[o + 1]]);
+    if u16at(0x15c) == 0xcf56 || bytes[0xc0..0xc8] == [0x24, 0xff, 0xae, 0x51, 0x69, 0x9a, 0xa2, 0x21] {
+        return Some(0);
     }
-    let word = |off| u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
+    let word = |off: usize| u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
     let section = |off, len| {
-        word(off) >= 0x200
-            && word(len) > 0
-            && word(off)
-                .checked_add(word(len))
-                .is_some_and(|end| end <= bytes.len())
+        word(off) >= 0x200 && word(len) > 0 && word(off).checked_add(word(len)).is_some_and(|end| end <= bytes.len())
     };
-    bytes[12..16].iter().all(|b| b.is_ascii_alphanumeric())
-        && section(0x20, 0x2c)
-        && section(0x30, 0x3c)
+    if bytes[12..16].iter().all(|b| b.is_ascii_alphanumeric()) && section(0x20, 0x2c) && section(0x30, 0x3c) {
+        return Some(0);
+    }
+    (0x200..)
+        .step_by(0x200)
+        .take_while(|off| off + 0x160 <= bytes.len())
+        .find(|&off| u16at(off + 0x15c) == 0xcf56 && crc16(&bytes[off..off + 0x15e]) == u16at(off + 0x15e))
+}
+fn ds_header(bytes: &[u8]) -> bool {
+    ds_rom_header(bytes).is_some()
 }
 fn near_retail(data: &[u8], f: &RetailFile) -> bool {
     let size = data.len() as u64;
@@ -371,7 +397,7 @@ impl Package {
         let mut total = 0u64;
         for i in 0..zip.len() {
             let mut file = zip.by_index(i)?;
-            let name = file.name().to_string();
+            let name = file.name()?.to_string();
             let rel = if file.is_dir() {
                 name.trim_end_matches('/')
             } else {
@@ -403,45 +429,40 @@ impl Package {
         }
         Self::validate(contents, retail)
     }
+    /// Screen a package exactly as the site does (`screen.ts`), except that the launcher has no moderator: things the
+    /// site holds for review become warnings here, and everything the site rejects is rejected.
     pub fn validate(contents: BTreeMap<String, Vec<u8>>, retail: &RetailIndex) -> Result<Self> {
+        use crate::dsfiles;
         if retail.format != 1 || retail.game != "AMCE" {
             return Err("Unsupported retail index".into());
         }
         let manifest = Manifest::parse(
             contents
                 .get("manifest.json")
-                .ok_or("Missing root manifest.json")?,
+                .ok_or("manifest.json is missing from the top of the ZIP")?,
         )?;
         if contents.len() > MAX_FILES
             || contents.values().map(|b| b.len() as u64).sum::<u64>() > MAX_UNPACKED
         {
             return Err("Package exceeds limits".into());
         }
-        let mut warnings = Vec::new();
-        for (name, bytes) in &contents {
-            let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
-            if !safe_path(name) || "nds srl dsi sav dsv gba 3ds cia nsp xci exe dll bat cmd com scr msi ps1 vbs sh jar app apk".split(' ').any(|x| x == ext) || ds_header(bytes) {
-                return Err(format!("Forbidden package file: {name}").into());
-            }
-            let sha = hash(bytes);
-            if retail
-                .files
-                .iter()
-                .chain(&retail.system_files)
-                .any(|f| f.sha256 == sha)
-            {
-                return Err(format!("Retail bytes in package: {name}").into());
-            }
-            if retail
-                .files
-                .iter()
-                .chain(&retail.system_files)
-                .any(|f| near_retail(bytes, f))
-            {
-                return Err(format!("Near-retail bytes in package: {name}").into());
-            }
-        }
+        // which package file produces which ROM path
+        let mut roles: BTreeMap<&str, (bool, Vec<&str>)> = BTreeMap::new(); // (is_patch, targets)
+        let mut problems = Vec::new();
         for (target, entry) in &manifest.files {
+            let src = entry.source();
+            let patch = matches!(entry, Entry::Patch(_));
+            if !contents.contains_key(src) {
+                problems.push(format!("manifest.files[\"{target}\"] points at {src}, which is not in the ZIP"));
+                continue;
+            }
+            match roles.get_mut(src) {
+                Some(r) if r.0 != patch => problems.push(format!("{src} is used both as a patch and as an added file")),
+                Some(r) => r.1.push(target),
+                None => {
+                    roles.insert(src, (patch, vec![target]));
+                }
+            }
             if retail
                 .files
                 .iter()
@@ -453,31 +474,88 @@ impl Package {
                             || target.starts_with(&(p.to_string() + "/")))
                 })
             {
-                return Err("File/directory path collision".into());
+                problems.push(format!("{target}: a file and a folder would have the same path"));
             }
-            let bytes = contents.get(entry.source()).ok_or("Missing payload")?;
-            let original = retail.files.iter().find(|f| &f.path == target);
-            match entry {
-                Entry::Patch(_) => {
-                    let f = original.ok_or("Patch target is absent from ROM")?;
-                    let patch = qbsdiff::Bspatch::new(bytes)?;
-                    if patch.hint_target_size() > MAX_UNPACKED {
-                        return Err("Patch output too large".into());
-                    }
-                    if f.size >= 65536 && bytes.len() as u64 * 100 >= f.size * 60 {
-                        // Local installer cannot provide the site's moderator review.
-                        return Err("Patch >=60% of target: manual review required".into());
-                    }
-                    if f.size < 65536 {
-                        warnings.push(format!("Small patch target: {target}"));
+        }
+        let mut warnings = Vec::new();
+        let mut budget = MAX_UNPACKED as usize;
+        let mut previews = 0;
+        for (name, bytes) in &contents {
+            let mut reject = |n: String| problems.push(format!("{name}: {n}"));
+            if !safe_path(name) {
+                reject("unsafe path".into());
+                continue;
+            }
+            if let Some(at) = ds_rom_header(bytes) {
+                reject(if at > 0 { format!("contains a Nintendo DS ROM header at offset {at:#x}") } else { "contains a Nintendo DS ROM header".into() });
+            }
+            let sha = hash(bytes);
+            if let Some(f) = retail.files.iter().chain(&retail.system_files).find(|f| f.sha256 == sha) {
+                reject(format!("identical to a retail game file ({})", f.path));
+            }
+            let role = roles.get(name.as_str());
+            if role.is_none_or(|r| !r.0) {
+                if let Some(a) = dsfiles::detect_archive(bytes, name) {
+                    reject(format!("{a} inside the package (archives other than .narc/.carc are not allowed)"));
+                }
+            }
+            match role {
+                _ if name == "manifest.json" => {}
+                None if dsfiles::is_readme(name) => {
+                    if bytes.len() > dsfiles::MAX_README_BYTES {
+                        reject("README is larger than 1 MB".into());
                     }
                 }
-                Entry::Add(_) => {
-                    if original.is_some() {
-                        return Err("add may not replace a ROM file".into());
+                None if dsfiles::is_preview_path(name) => {
+                    previews += 1;
+                    if let Some(p) = dsfiles::preview_problem(bytes, name) {
+                        reject(p);
+                    }
+                    if previews > dsfiles::MAX_PREVIEWS {
+                        reject(format!("more than {} preview images", dsfiles::MAX_PREVIEWS));
+                    }
+                }
+                None => reject("not an allowed file: not listed in manifest.files and not package metadata (README.md/README.txt at the top, preview .png/.jpg/.webp)".into()),
+                Some((true, targets)) => {
+                    if dsfiles::ext_of(name) != "bsdiff" {
+                        reject("patch files must use the .bsdiff extension".into());
+                    }
+                    match qbsdiff::Bspatch::new(bytes) {
+                        Err(_) => reject("not a bsdiff 4 patch (BSDIFF40)".into()),
+                        Ok(p) if p.hint_target_size() > MAX_UNPACKED => reject("patch output would be larger than 400 MB".into()),
+                        Ok(_) => {}
+                    }
+                    for target in targets {
+                        match retail.files.iter().find(|f| f.path.eq_ignore_ascii_case(target)) {
+                            None => reject(format!("patch target {target} is not a file in the game ROM")),
+                            Some(f) if f.size >= 65536 && bytes.len() as u64 * 100 >= f.size * 60 => warnings.push(format!(
+                                "{name}: patch is {}% of {target} (over 60%); the site holds such packages for a moderator",
+                                bytes.len() as u64 * 100 / f.size
+                            )),
+                            Some(_) => {}
+                        }
+                    }
+                }
+                Some((false, targets)) => {
+                    for p in dsfiles::check_game_file(bytes, name, &mut budget, 0) {
+                        reject(p);
+                    }
+                    for target in targets {
+                        if dsfiles::ext_of(target) != dsfiles::ext_of(name) {
+                            reject(format!("added file must keep its extension at {target} (.{})", dsfiles::ext_of(name)));
+                        }
+                        if retail.files.iter().any(|f| f.path.eq_ignore_ascii_case(target)) {
+                            reject(format!("\"add\" target {target} already exists in the ROM; existing files may only be changed with a patch"));
+                        }
+                    }
+                    if let Some(f) = retail.files.iter().chain(&retail.system_files).find(|f| near_retail(bytes, f)) {
+                        reject(format!("near-identical to retail file {} (≥50% equal 4 KiB blocks)", f.path));
                     }
                 }
             }
+        }
+        if !problems.is_empty() {
+            return Err(problems.join("\n").into());
         }
         Ok(Self {
             manifest,
@@ -524,13 +602,13 @@ mod tests {
         }
     }
     fn package(payload: &[u8]) -> BTreeMap<String, Vec<u8>> {
-        let manifest = serde_json::json!({"format":1,"type":"other","id":"test.synthetic","name":"Synthetic","version":"1.0.0","author":"Test","game":"AMCE","files":{"new.bin":{"add":"files/new.bin"}}});
+        let manifest = serde_json::json!({"format":1,"type":"other","id":"test.synthetic","name":"Synthetic","version":"1.0.0","author":"Test","game":"AMCE","files":{"new.bmg":{"add":"files/new.bmg"}}});
         BTreeMap::from([
             (
                 "manifest.json".into(),
                 serde_json::to_vec(&manifest).unwrap(),
             ),
-            ("files/new.bin".into(), payload.to_vec()),
+            ("files/new.bmg".into(), payload.to_vec()),
         ])
     }
     #[test]
@@ -596,7 +674,7 @@ mod tests {
             serde_json::json!({"replace":"x"}),
             serde_json::json!({"add":"../x"}),
         ] {
-            json["files"]["new.bin"] = bad;
+            json["files"]["new.bmg"] = bad;
             assert!(Manifest::parse(&serde_json::to_vec(&json).unwrap()).is_err());
         }
     }
@@ -612,7 +690,7 @@ mod tests {
         near.truncate(data.len());
         assert!(near_retail(&near, &index.files[0]));
         assert!(Package::validate(package(&near), &index).is_err());
-        assert!(Package::validate(package(b"entirely original content"), &index).is_ok());
+        assert!(Package::validate(package(b"MESGbmg1 entirely original content"), &index).is_ok());
     }
     #[test]
     fn core_detects_rom_headers_and_blocked_extensions_in_unreferenced_files() {
@@ -628,9 +706,9 @@ mod tests {
     #[test]
     fn core_add_cannot_replace_a_rom_path_and_installs_atomically() {
         let index = retail(b"retail fixture");
-        let p = package(b"original creation");
+        let p = package(b"MESGbmg1 original creation");
         let mut json: serde_json::Value = serde_json::from_slice(&p["manifest.json"]).unwrap();
-        json["files"] = serde_json::json!({"original.bin":{"add":"files/new.bin"}});
+        json["files"] = serde_json::json!({"original.bin":{"add":"files/new.bmg"}});
         let mut bad = p.clone();
         bad.insert("manifest.json".into(), serde_json::to_vec(&json).unwrap());
         assert!(Package::validate(bad, &index).is_err());
@@ -639,8 +717,8 @@ mod tests {
         pkg.install(game.path()).unwrap();
         assert!(pkg.install(game.path()).is_err());
         assert_eq!(
-            std::fs::read(game.path().join("mods/test.synthetic/files/new.bin")).unwrap(),
-            b"original creation"
+            std::fs::read(game.path().join("mods/test.synthetic/files/new.bmg")).unwrap(),
+            b"MESGbmg1 original creation"
         );
         save_enabled(game.path(), &[pkg.manifest.id.clone()]).unwrap();
         assert_eq!(enabled(game.path()), ["test.synthetic"]);
@@ -663,6 +741,55 @@ mod tests {
             format_timestamp(253402300799).unwrap(),
             "9999-12-31T23:59:59Z"
         );
+    }
+    #[test]
+    fn allowlist_and_metadata_match_the_site() {
+        let index = retail(b"retail fixture");
+        let ok = |p: BTreeMap<String, Vec<u8>>| Package::validate(p, &index).map(|_| ());
+        // top-level README and up to 8 previews are allowed without being in the manifest
+        let mut p = package(b"MESGbmg1 mine");
+        p.insert("README.md".into(), b"# hello".to_vec());
+        p.insert("readme.txt".into(), b"hello".to_vec());
+        for i in 0..8 {
+            p.insert(format!("shots/{i}.png"), b"\x89PNG\r\n\x1a\n....".to_vec());
+        }
+        assert!(ok(p.clone()).is_ok());
+        let mut nine = p.clone();
+        nine.insert("shots/9.png".into(), b"\x89PNG\r\n\x1a\n....".to_vec());
+        assert!(ok(nine).unwrap_err().to_string().contains("more than 8 preview"));
+        let mut fake = p.clone();
+        fake.insert("shots/0.png".into(), b"GIF89a".to_vec());
+        assert!(ok(fake).is_err());
+        for (name, data) in [("docs/README.md", &b"x"[..]), ("notes.txt", b"x"), ("extra.bmg", b"MESGbmg1"), ("README.md", b"PK")] {
+            let mut bad = p.clone();
+            bad.insert(name.into(), data.to_vec());
+            assert!(ok(bad).is_err(), "{name}");
+        }
+        // add files: allowlisted, magic must match, extension kept
+        assert!(ok(package(b"RLCN not a bmg")).unwrap_err().to_string().contains("but this is a .nclr"));
+        let mut json: serde_json::Value = serde_json::from_slice(&p["manifest.json"]).unwrap();
+        json["files"] = serde_json::json!({"new.nclr":{"add":"files/new.bmg"}});
+        json["type"] = "gameplay".into();
+        let mut renamed = p.clone();
+        renamed.insert("manifest.json".into(), serde_json::to_vec(&json).unwrap());
+        assert!(ok(renamed).unwrap_err().to_string().contains("keep its extension"));
+        // manifest.json as a source, blocked target types
+        for files in [serde_json::json!({"a.bmg":{"add":"manifest.json"}}), serde_json::json!({"a.exe":{"add":"files/new.bmg"}})] {
+            json["files"] = files;
+            assert!(Manifest::parse(&serde_json::to_vec(&json).unwrap()).is_err());
+        }
+    }
+    #[test]
+    fn large_patches_warn_instead_of_failing() {
+        let original: Vec<u8> = (0..70000u32).map(|i| (i * 31 % 251) as u8).collect();
+        let mut seed = 12345u32;
+        let modified: Vec<u8> = original.iter().map(|_| { seed = seed.wrapping_mul(1664525).wrapping_add(1013904223); (seed >> 24) as u8 }).collect();
+        let mut patch = Vec::new();
+        qbsdiff::Bsdiff::new(&original, &modified).compare(&mut patch).unwrap();
+        let manifest = serde_json::json!({"format":1,"type":"gameplay","id":"test.big","name":"Big","version":"1.0.0","author":"Test","game":"AMCE","files":{"original.bin":{"patch":"p.bsdiff"}}});
+        let contents = BTreeMap::from([("manifest.json".to_string(), serde_json::to_vec(&manifest).unwrap()), ("p.bsdiff".to_string(), patch)]);
+        let pkg = Package::validate(contents, &retail(&original)).unwrap();
+        assert!(pkg.warnings.iter().any(|w| w.contains("over 60%")), "{:?}", pkg.warnings);
     }
     #[test]
     fn patch_helpers_round_trip_and_zip_installs() {
