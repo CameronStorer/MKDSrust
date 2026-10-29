@@ -61,6 +61,36 @@ fn chip(ui: &mut egui::Ui, kind: &str) {
         .inner_margin(egui::Margin::symmetric(8., 1.))
         .show(ui, |ui| ui.label(RichText::new(kind_label(kind)).small().color(c)));
 }
+/// The drag handle: three short bars (egui's bundled fonts have no reliable "≡").
+fn grip(ui: &mut egui::Ui) {
+    let (r, resp) = ui.allocate_exact_size(egui::vec2(18., 22.), egui::Sense::hover());
+    let color = if resp.hovered() { TEAL } else { Color32::GRAY };
+    for dy in [-5., 0., 5.] {
+        let y = r.center().y + dy;
+        ui.painter().line_segment([egui::pos2(r.left() + 3., y), egui::pos2(r.right() - 3., y)], egui::Stroke::new(2., color));
+    }
+}
+/// A small up/down arrow button, painted (no font glyph needed).
+fn arrow_button(ui: &mut egui::Ui, up: bool, enabled: bool) -> egui::Response {
+    let (r, resp) = ui.allocate_exact_size(egui::vec2(28., 24.), if enabled { egui::Sense::click() } else { egui::Sense::hover() });
+    let fill = if !enabled {
+        Color32::from_rgb(34, 40, 46)
+    } else if resp.hovered() {
+        Color32::from_rgb(70, 82, 92)
+    } else {
+        Color32::from_rgb(52, 61, 69)
+    };
+    ui.painter().rect_filled(r, 6., fill);
+    let c = r.center();
+    let (a, b) = if up { (-4., 3.) } else { (4., -3.) };
+    let color = if enabled { Color32::WHITE } else { Color32::DARK_GRAY };
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![c + egui::vec2(0., a), c + egui::vec2(5., b), c + egui::vec2(-5., b)],
+        color,
+        egui::Stroke::NONE,
+    ));
+    resp
+}
 fn open_folder(path: &Path) -> Result<(), String> {
     std::fs::create_dir_all(path).map_err(|e| e.to_string())?;
     std::process::Command::new("explorer.exe").arg(path).spawn().map(|_| ()).map_err(|e| e.to_string())
@@ -317,9 +347,7 @@ impl Launcher {
                     .show(ui, |ui| {
                         ui.set_min_width(ui.available_width());
                         ui.horizontal(|ui| {
-                            ui.dnd_drag_source(egui::Id::new(("mod-order", id.as_str())), i, |ui| {
-                                ui.label(RichText::new("≡").size(20.).color(Color32::GRAY));
-                            })
+                            ui.dnd_drag_source(egui::Id::new(("mod-order", id.as_str())), i, grip)
                             .response
                             .on_hover_text("Drag to change the load order");
                             ui.label(RichText::new(format!("{:>2}", i + 1)).monospace().color(Color32::GRAY));
@@ -369,10 +397,10 @@ impl Launcher {
                                 if ui.small_button("Remove").clicked() {
                                     remove = Some(id.clone());
                                 }
-                                if ui.add_enabled(i + 1 < order.len(), egui::Button::new("▼").small()).on_hover_text("Later (higher priority)").clicked() {
+                                if arrow_button(ui, false, i + 1 < order.len()).on_hover_text("Move down (higher priority)").clicked() {
                                     moved = Some((i, i + 1));
                                 }
-                                if ui.add_enabled(i > 0, egui::Button::new("▲").small()).on_hover_text("Earlier (lower priority)").clicked() {
+                                if arrow_button(ui, true, i > 0).on_hover_text("Move up (lower priority)").clicked() {
                                     moved = Some((i, i - 1));
                                 }
                             });
@@ -443,7 +471,8 @@ impl Launcher {
                                 ui.label(RichText::new(format!("v{}", ws.draft.version)).small().color(Color32::GRAY));
                                 chip(ui, &ws.draft.kind);
                             });
-                            ui.label(RichText::new(ws.dir.display().to_string()).small().color(Color32::GRAY));
+                            let short = format!("modding/{}", ws.dir.file_name().map(|n| n.to_string_lossy()).unwrap_or_default());
+                            ui.label(RichText::new(short).small().color(Color32::GRAY)).on_hover_text(ws.dir.display().to_string());
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.button("Pack").on_hover_text("Write a ready-to-upload zip with only your changes").clicked() {
