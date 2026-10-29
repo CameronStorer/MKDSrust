@@ -459,6 +459,54 @@ pub fn test_install(ws: &Workspace, rom: &[u8], retail: &modpkg::RetailIndex, ga
     Ok((id, report))
 }
 
+/// Screen a mod zip against the player's ROM and install it into `game` (the launcher's Install and the
+/// `mkds_builder mod install` command). A newer copy of an installed mod replaces it in place, keeping its load-order
+/// slot (the old copy is restored if the new one fails); a new mod is enabled and goes last (highest priority).
+/// Returns a one-line summary.
+pub fn install_zip(game: &Path, rom: &[u8], archive: &Path) -> Result<String> {
+    if !game.join("manifest.json").is_file() {
+        return Err("Build your game first (Setup), then install mods.".into());
+    }
+    let retail = modpkg::RetailIndex::from_rom(rom)?;
+    let pkg = modpkg::Package::read(archive, &retail)?;
+    let id = pkg.manifest.id.clone();
+    let dest = game.join("mods").join(&id);
+    let fresh = !dest.exists();
+    let backup = game.join("mods").join(format!(".replaced-{id}"));
+    if !fresh {
+        let meta = std::fs::symlink_metadata(&dest)?;
+        if !meta.is_dir() || meta.file_type().is_symlink() {
+            return Err("Unsafe mod folder; remove it manually".into());
+        }
+        let _ = std::fs::remove_dir_all(&backup);
+        std::fs::rename(&dest, &backup)?;
+    }
+    if let Err(e) = pkg.install(game) {
+        if !fresh {
+            let _ = std::fs::rename(&backup, &dest);
+        }
+        return Err(e);
+    }
+    let _ = std::fs::remove_dir_all(&backup);
+    let mut order = modpkg::load_order(game);
+    let mut on: BTreeSet<String> = modpkg::enabled(game).into_iter().collect();
+    if fresh {
+        order.retain(|x| x != &id);
+        order.push(id.clone());
+        on.insert(id.clone());
+    }
+    modpkg::save_load_order(game, &order, &on)?;
+    let mut msg = if fresh {
+        format!("Installed {} {} and enabled it (last in the load order).", pkg.manifest.name, pkg.manifest.version)
+    } else {
+        format!("Updated {} to {} in place.", pkg.manifest.name, pkg.manifest.version)
+    };
+    if !pkg.warnings.is_empty() {
+        msg += &format!(" Notes: {}", pkg.warnings.join("; "));
+    }
+    Ok(msg)
+}
+
 /// Remove an installed mod folder and its load-order entries (no-op when absent).
 pub fn remove_installed(game: &Path, id: &str) -> Result<()> {
     if !modpkg::valid_id(id) {
@@ -612,6 +660,16 @@ mod tests {
         test_install(&ws, &image, &retail, game.path()).unwrap();
         remove_installed(game.path(), &id).unwrap();
         assert!(modpkg::enabled(game.path()).is_empty() && !game.path().join("mods/me.test.dev").exists());
+
+        // installing the packed zip: needs a built game, enables it last, updates in place keeping its slot
+        assert!(install_zip(game.path(), &image, &zip).is_err());
+        std::fs::write(game.path().join("manifest.json"), b"{}").unwrap();
+        assert!(install_zip(game.path(), &image, &zip).unwrap().starts_with("Installed Test 1.0.0"));
+        test_install(&ws, &image, &retail, game.path()).unwrap();
+        assert_eq!(modpkg::load_order(game.path()), ["me.test", "me.test.dev"]);
+        assert!(install_zip(game.path(), &image, &zip).unwrap().starts_with("Updated Test"));
+        assert_eq!(modpkg::load_order(game.path()), ["me.test", "me.test.dev"]);
+        assert!(game.path().join("mods/me.test/patches/a.bmg.bsdiff").is_file());
     }
 
     #[test]

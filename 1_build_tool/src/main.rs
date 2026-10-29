@@ -166,6 +166,16 @@ enum ModCommand {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Check a mod zip against your ROM and install it into a built game (enabled, last in the load order)
+    Install {
+        zip: PathBuf,
+        /// The built game folder (the one holding manifest.json)
+        #[arg(long)]
+        game: PathBuf,
+        /// Your .nds file
+        #[arg(long)]
+        rom: PathBuf,
+    },
 }
 
 fn mod_command(cli: ModCli) -> Result<i32, BuildError> {
@@ -190,6 +200,9 @@ fn mod_command(cli: ModCli) -> Result<i32, BuildError> {
             let rom = rom.or_else(|| ws.rom()).ok_or_else(|| BuildError("Pass --rom <your .nds>".into()))?;
             let report = modding::pack(&ws, &read_rom(&rom)?, out.as_deref()).map_err(e)?;
             print!("{}", report.summary());
+        }
+        ModCommand::Install { zip, game, rom } => {
+            println!("{}", modding::install_zip(&game, &read_rom(&rom)?, &zip).map_err(e)?);
         }
     }
     Ok(0)

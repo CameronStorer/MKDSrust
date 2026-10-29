@@ -66,56 +66,12 @@ fn open_folder(path: &Path) -> Result<(), String> {
     std::process::Command::new("explorer.exe").arg(path).spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
-/// Screen a downloaded/dropped zip against the player's ROM and install it (replacing an older copy of the same
-/// mod in place, keeping its load-order slot). New mods are enabled and go last (highest priority).
+/// Screen a downloaded/dropped zip against the player's ROM and install it (see [`modding::install_zip`]).
 fn screen_and_install(game: &Path, rom: &Path, archive: &Path) -> modpkg::Result<String> {
-    if !game.join("manifest.json").is_file() {
-        return Err("Build your game first (Setup), then install mods.".into());
-    }
-    let info = rom::inspect_rom(rom)?;
-    if !info.reference_match {
+    if !rom::inspect_rom(rom)?.reference_match {
         return Err("Mod screening needs the supported Mario Kart DS (USA, rev 0) ROM".into());
     }
-    let retail = modpkg::RetailIndex::from_rom(&std::fs::read(rom)?)?;
-    let pkg = modpkg::Package::read(archive, &retail)?;
-    let id = pkg.manifest.id.clone();
-    let dest = game.join("mods").join(&id);
-    let fresh = !dest.exists();
-    let backup = game.join("mods").join(format!(".replaced-{id}"));
-    if !fresh {
-        let meta = std::fs::symlink_metadata(&dest)?;
-        if !meta.is_dir() || meta.file_type().is_symlink() {
-            return Err("Unsafe mod folder; remove it manually".into());
-        }
-        let _ = std::fs::remove_dir_all(&backup);
-        std::fs::rename(&dest, &backup)?;
-    }
-    if let Err(e) = pkg.install(game) {
-        if !fresh {
-            let _ = std::fs::rename(&backup, &dest);
-        }
-        return Err(e);
-    }
-    let _ = std::fs::remove_dir_all(&backup);
-    let mut order = modpkg::load_order(game);
-    let mut on: BTreeSet<String> = modpkg::enabled(game).into_iter().collect();
-    if fresh {
-        order.retain(|x| x != &id);
-        order.push(id.clone());
-        on.insert(id.clone());
-    }
-    modpkg::save_load_order(game, &order, &on)?;
-    let mut msg = format!(
-        "{} {} {} {}.",
-        if fresh { "Installed" } else { "Updated" },
-        pkg.manifest.name,
-        pkg.manifest.version,
-        if fresh { "and enabled it (last in the load order)" } else { "in place" }
-    );
-    if !pkg.warnings.is_empty() {
-        msg += &format!(" Notes: {}", pkg.warnings.join("; "));
-    }
-    Ok(msg)
+    modding::install_zip(game, &std::fs::read(rom)?, archive)
 }
 
 impl Launcher {
