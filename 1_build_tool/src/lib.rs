@@ -5,6 +5,7 @@ pub mod rip;
 pub mod rom;
 pub mod settings;
 pub mod dsfiles;
+pub mod modding;
 pub mod modpkg;
 
 extern crate self as mkds_builder;
