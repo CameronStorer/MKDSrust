@@ -468,7 +468,7 @@ impl Launcher {
                         self.message = e;
                     }
                 }
-                ui.hyperlink_to("How to make a mod", "https://docs.mkdsrust.com/modding/first-mod");
+                ui.hyperlink_to("How to make a mod", "https://docs.mkdsrust.com/guides--first-mod.html");
             });
         });
         let projects = modding::list(&root);
