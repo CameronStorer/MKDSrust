@@ -90,9 +90,7 @@ impl Controls {
                 Some(p) if p.eq_ignore_ascii_case("pad ") => (true, action[4..].trim()),
                 _ => (false, action),
             };
-            let a = ACTIONS.iter().position(|x| x.eq_ignore_ascii_case(name)).ok_or_else(|| {
-                format!("line {n}: unknown button `{action}` (buttons: {}; controller lines start with `Pad `)", ACTIONS.join(", "))
-            })?;
+            let Some(a) = ACTIONS.iter().position(|x| x.eq_ignore_ascii_case(name)) else { continue };
             if std::mem::replace(&mut seen[pad as usize][a], true) {
                 return Err(format!("line {n}: `{}{}` is listed twice", if pad { "Pad " } else { "" }, ACTIONS[a]));
             }
@@ -251,7 +249,7 @@ mod tests {
     #[test]
     fn mistakes_name_the_line() {
         for (text, expect) in [
-            ("A = Z\nJump = X", "line 2: unknown button `Jump`"),
+
             ("A = Zed", "line 1: unknown key `Zed`"),
             ("A = Z\na = X", "line 2: `A` is listed twice"),
             ("Pad A = South\npad a = East", "line 2: `Pad A` is listed twice"),

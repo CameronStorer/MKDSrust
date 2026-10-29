@@ -1,5 +1,6 @@
 //! Native host for the locally generated game. Call `run` with the generated lift table.
 mod audio;
+mod menu;
 pub mod saves;
 pub mod assets;
 pub mod gpu;
@@ -360,6 +361,8 @@ fn run_internal(
     let mut options = options;
     options.software_renderer = Some(options.software_renderer.unwrap_or(settings.renderer == Renderer::Software));
     let display = window::Display {
+        settings: settings.clone(),
+        controls_path: options.controls.clone().or_else(controls::default_path),
         scale: options.scale.or(settings.scale),
         smooth: settings.smooth,
         side_by_side: settings.layout == Layout::SideBySide,
@@ -485,6 +488,10 @@ fn emulate(
     session.machine.display_latch = window.is_some() || options.snapshots.is_some();
     // Wall-clock time spent re-anchoring the schedule after a slow stretch (no catch-up sprint).
     let mut skew = Duration::ZERO;
+    let mut pace_speed = 100;
+    let mut pace_limited = true;
+    let mut pace_guest_anchor = Duration::ZERO;
+    let mut pace_wall_anchor = Duration::ZERO;
     let mut parity: Option<Vec<u32>> = None;
     let mut jobs = 0u64;
     let mut stats = PacingStats::new(start);
@@ -589,13 +596,23 @@ fn emulate(
                 }
                 let samples = session.machine.take_audio();
                 if let Some(sound) = &sound {
+                    let gain = window.as_ref().and_then(|w| w.preferences.lock().unwrap().as_ref().map(|(s,_)| if s.mute { 0.0 } else { s.volume as f32 / 100.0 })).unwrap_or(1.0);
+                    let samples = if gain == 1.0 { samples } else { samples.into_iter().map(|p| p.map(|x| (x as f32 * gain) as i16)).collect() };
                     sound.push(samples)?;
                 }
                 if let Some(w) = window.as_ref() {
                     let frame = session.frame_number();
-                    let emulated = Duration::from_secs_f64(
-                        session.machine.hw.cycles as f64 / recomp::ds_mem::BUS_HZ as f64,
-                    );
+                    let guest = Duration::from_secs_f64(session.machine.hw.cycles as f64 / recomp::ds_mem::BUS_HZ as f64);
+                    let (limited, speed, verbose) = w.preferences.lock().unwrap().as_ref().map_or((true,100,false), |(s,_)| (s.frame_limiter,s.speed,s.verbose));
+                    if speed != pace_speed || limited != pace_limited {
+                        pace_limited = limited;
+                        pace_guest_anchor = guest;
+                        pace_wall_anchor = start.elapsed().saturating_sub(skew);
+                        pace_speed = speed;
+                    }
+                    let emulated = if pace_speed == 100 && pace_guest_anchor.is_zero() { guest } else {
+                        pace_wall_anchor + guest.saturating_sub(pace_guest_anchor).mul_f64(100.0 / pace_speed as f64)
+                    };
                     // A slow stretch must not turn into a catch-up sprint (that overflows audio
                     // and starves video): past 100 ms behind, move the schedule instead.
                     let lag = start.elapsed().saturating_sub(skew).saturating_sub(emulated);
@@ -641,7 +658,7 @@ fn emulate(
                             last_frame = frame;
                         }
                     }
-                    if options.stats {
+                    if options.stats || verbose {
                         stats.report(
                             emulated,
                             session.frame_number(),
@@ -657,7 +674,7 @@ fn emulate(
                     // Hold emulation to real time. One step can move guest time forward by many
                     // milliseconds (the guest idling on a load), so wait until the wall clock
                     // catches up instead of sleeping a fixed 2 ms per step (the window has its own thread).
-                    while let Some(ahead) = emulated.checked_sub(start.elapsed().saturating_sub(skew)) {
+                    while let Some(ahead) = limited.then(|| emulated.checked_sub(start.elapsed().saturating_sub(skew))).flatten() {
                         if ahead < Duration::from_millis(1) || !w.is_open() || bindings.quit(w, &pads.borrow()) {
                             break;
                         }
@@ -784,7 +801,7 @@ impl From<&Controls> for Bindings {
             pad: std::array::from_fn(|a| c.pad[a].clone()),
             quit_pad: c.pad[controls::QUIT].clone(),
             title: format!(
-                "MKDSrust | A={} B={} L={} R={} Start={} | mouse = touch | F11 = fullscreen | {} = quit",
+                "MKDSrust | A={} B={} L={} R={} Start={} | mouse = touch | F10 = menu | F11 = fullscreen | {} = quit",
                 hint(0), hint(1), hint(9), hint(8), hint(3), hint(controls::QUIT)
             ),
         }
@@ -793,7 +810,11 @@ impl From<&Controls> for Bindings {
 
 impl Bindings {
     fn quit(&self, window: &HostLink, pads: &pad::Pads) -> bool {
-        window.any_down(&self.quit_keys) || window.focused() && pads.any_down(&self.quit_pad)
+        if !window.focused() { return false; }
+        let live = window.preferences.lock().unwrap();
+        let keys = live.as_ref().map_or(&self.quit_keys, |(_,c)| &c.keys[controls::QUIT]);
+        let buttons = live.as_ref().map_or(&self.quit_pad, |(_,c)| &c.pad[controls::QUIT]);
+        window.any_down(keys) || pads.any_down_at(buttons, live.as_ref().map_or(0.5, |(s,_)| s.deadzone as f32 / 100.0))
     }
 }
 
@@ -821,11 +842,14 @@ Fix it, or delete it to get the default controls back."))?;
 }
 
 fn input(window: &HostLink, bindings: &Bindings, pads: &pad::Pads) -> (u16, Option<(u8, u8)>) {
+    let live = window.preferences.lock().unwrap();
     if !window.focused() {
         return (0, None); // an inactive window releases all guest input
     }
     let buttons = (0..12).fold(0, |bits, i| {
-        bits | if window.any_down(&bindings.buttons[i]) || pads.any_down(&bindings.pad[i]) { 1 << i } else { 0 }
+        let keys = live.as_ref().map_or(&bindings.buttons[i], |(_,c)| &c.keys[i]);
+        let buttons = live.as_ref().map_or(&bindings.pad[i], |(_,c)| &c.pad[i]);
+        bits | if window.any_down(keys) || pads.any_down_at(buttons, live.as_ref().map_or(0.5, |(s,_)| s.deadzone as f32 / 100.0)) { 1 << i } else { 0 }
     });
     let buttons = DPAD.with(|d| {
         let mut state = d.get();
@@ -865,6 +889,24 @@ fn capture(session: &mut Session<'_>, dir: &std::path::Path) -> Result<(), Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn live_bindings_and_overlay_suppression_reach_guest_input() {
+        let w = HostLink::for_tests();
+        let mut c = Controls::default();
+        let q = controls::key_index("Q").unwrap();
+        c.keys[0] = vec![q];
+        c.keys[controls::QUIT] = vec![q];
+        *w.preferences.lock().unwrap() = Some((Settings::default(),c));
+        w.set_for_tests(&[q], Some((9,12)), true);
+        let defaults = Bindings::from(&Controls::default());
+        let pads = pad::Pads::none();
+        assert_eq!(input(&w,&defaults,&pads),(1,Some((9,12))));
+        assert!(defaults.quit(&w,&pads));
+        w.menu_open.store(true, Ordering::Release);
+        assert_eq!(input(&w,&defaults,&pads),(0,None));
+        assert!(!defaults.quit(&w,&pads));
+    }
+
     #[test]
     fn default_bindings_read_the_documented_keys_through_the_window_link() {
         let key = |n: &str| controls::key_index(n).unwrap();

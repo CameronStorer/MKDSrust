@@ -20,6 +20,20 @@ pub enum Layout {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Settings {
+    pub vsync: bool,
+    pub single_screen: bool,
+    pub swap_screens: bool,
+    pub gap: u32,
+    pub window_size: u32,
+    pub fps: bool,
+    pub fps_position: u32,
+    pub frame_limiter: bool,
+    pub speed: u32,
+    pub volume: u32,
+    pub mute: bool,
+    pub deadzone: u32,
+    pub touch_mouse: bool,
+    pub verbose: bool,
     pub renderer: Renderer,
     /// Internal resolution as a multiple of 256x192 (1-8); `None` = the sharpest that fits the window (the default).
     /// 1 is the original look.
@@ -37,6 +51,9 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
+            vsync: true, single_screen: false, swap_screens: false, gap: 0,
+            window_size: 2, fps: false, fps_position: 0, frame_limiter: true,
+            speed: 100, volume: 100, mute: false, deadzone: 50, touch_mouse: true, verbose: false,
             renderer: Renderer::Gpu,
             scale: None,
             smooth: false,
@@ -68,6 +85,19 @@ impl Settings {
             let (key, value) = (key.trim().to_ascii_lowercase(), value.trim());
             let bad = |what: &str| format!("line {n}: {what}, not `{value}`");
             match key.as_str() {
+                "vsync" => s.vsync = yes_no(value).ok_or_else(|| bad("Vsync must be Yes or No"))?,
+                "singlescreen" => s.single_screen = yes_no(value).ok_or_else(|| bad("SingleScreen must be Yes or No"))?,
+                "swapscreens" => s.swap_screens = yes_no(value).ok_or_else(|| bad("SwapScreens must be Yes or No"))?,
+                "fps" => s.fps = yes_no(value).ok_or_else(|| bad("FPS must be Yes or No"))?,
+                "framelimiter" => s.frame_limiter = yes_no(value).ok_or_else(|| bad("FrameLimiter must be Yes or No"))?,
+                "mute" => s.mute = yes_no(value).ok_or_else(|| bad("Mute must be Yes or No"))?,
+                "touchmouse" => s.touch_mouse = yes_no(value).ok_or_else(|| bad("TouchMouse must be Yes or No"))?,
+                "verbose" => s.verbose = yes_no(value).ok_or_else(|| bad("Verbose must be Yes or No"))?,
+                "gap" | "windowsize" | "fpsposition" | "speed" | "volume" | "deadzone" => {
+                    let (min,max) = match key.as_str() { "gap" => (0,192), "windowsize" => (1,4), "fpsposition" => (0,3), "speed" => (25,400), "volume" => (0,100), _ => (5,95) };
+                    let n = value.parse::<u32>().ok().filter(|n| (min..=max).contains(n)).ok_or_else(|| bad(&format!("{key} must be {min}-{max}")))?;
+                    match key.as_str() { "gap" => s.gap=n, "windowsize" => s.window_size=n, "fpsposition" => s.fps_position=n, "speed" => s.speed=n, "volume" => s.volume=n, _ => s.deadzone=n }
+                }
                 "renderer" => {
                     s.renderer = match value.to_ascii_lowercase().as_str() {
                         "gpu" => Renderer::Gpu,
@@ -99,7 +129,7 @@ impl Settings {
                 "fullscreen" => s.fullscreen = yes_no(value).ok_or_else(|| bad("Fullscreen must be Yes or No"))?,
                 "texturepack" => s.texture_pack = (!value.is_empty()).then(|| PathBuf::from(value)),
                 "dumptextures" => s.dump_textures = (!value.is_empty()).then(|| PathBuf::from(value)),
-                _ => return Err(format!("line {n}: unknown setting `{}`", line.split('=').next().unwrap_or("").trim())),
+                _ => {},
             }
         }
         Ok(s)
@@ -107,7 +137,7 @@ impl Settings {
 
     pub fn to_text(&self) -> String {
         let path = |p: &Option<PathBuf>| p.as_ref().map(|p| p.display().to_string()).unwrap_or_default();
-        format!(
+        let mut text = format!(
             "# MKDSrust display settings\n\
              #\n\
              # By default the 3D is drawn sharper than on a DS, as sharp as your window allows; everything else looks like\n\
@@ -153,7 +183,12 @@ impl Settings {
             if self.fullscreen { "Yes" } else { "No" },
             path(&self.texture_pack),
             path(&self.dump_textures),
-        )
+        );
+        let yn = |v| if v { "Yes" } else { "No" };
+        text += &format!("\nVsync = {}\nSingleScreen = {}\nSwapScreens = {}\nGap = {}\nWindowSize = {}\nFPS = {}\nFPSPosition = {}\nFrameLimiter = {}\nSpeed = {}\nVolume = {}\nMute = {}\nDeadzone = {}\nTouchMouse = {}\nVerbose = {}\n",
+            yn(self.vsync), yn(self.single_screen), yn(self.swap_screens), self.gap, self.window_size,
+            yn(self.fps), self.fps_position, yn(self.frame_limiter), self.speed, self.volume, yn(self.mute), self.deadzone, yn(self.touch_mouse), yn(self.verbose));
+        text
     }
 
     /// Reads `path`, writing the defaults there first when it does not exist yet.
@@ -208,11 +243,23 @@ mod tests {
     }
 
     #[test]
+    fn overlay_values_round_trip_and_unknown_keys_are_ignored() {
+        let text = "Vsync=off\nSingleScreen=yes\nSwapScreens=yes\nGap=32\nWindowSize=3\nFPS=yes\nFPSPosition=3\nFrameLimiter=no\nSpeed=200\nVolume=42\nMute=yes\nDeadzone=25\nTouchMouse=no\nVerbose=yes\nFuturePreference=1";
+        let s = Settings::parse(text).unwrap();
+        assert!(!s.vsync && s.single_screen && s.swap_screens && s.fps && s.mute && s.verbose);
+        assert!(!s.frame_limiter && !s.touch_mouse);
+        assert_eq!((s.gap,s.window_size,s.fps_position,s.speed,s.volume,s.deadzone),(32,3,3,200,42,25));
+        assert_eq!(Settings::parse(&s.to_text()).unwrap(),s);
+        for text in ["Speed=0", "Volume=101", "Deadzone=100", "Gap=193", "WindowSize=0", "FPSPosition=4"] { assert!(Settings::parse(text).is_err(), "{text}"); }
+        assert!(!Settings::default().fps);
+    }
+
+    #[test]
     fn mistakes_name_the_line() {
         for (text, expect) in [
             ("Scale = 9", "line 1: Scale must be 1-8 or Auto"),
             ("Renderer = gpu\nRenderer = vulkan", "line 2: Renderer must be GPU or Software"),
-            ("Brightness = 3", "line 1: unknown setting `Brightness`"),
+
             ("Fullscreen", "line 1: expected"),
         ] {
             let e = Settings::parse(text).unwrap_err();

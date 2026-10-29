@@ -56,6 +56,8 @@ struct InputState {
 /// What the emulation thread and the window share.
 pub struct HostLink {
     input: Mutex<InputState>,
+    pub(crate) preferences: Mutex<Option<(mkds_builder::settings::Settings, controls::Controls)>>,
+    pub(crate) menu_open: AtomicBool,
     /// Frames not yet shown, oldest first.
     frames: Mutex<VecDeque<Frame>>,
     closed: AtomicBool,
@@ -68,6 +70,8 @@ impl HostLink {
     fn new() -> Arc<HostLink> {
         Arc::new(HostLink {
             input: Mutex::new(InputState::default()),
+            preferences: Mutex::new(None),
+            menu_open: AtomicBool::new(false),
             frames: Mutex::new(VecDeque::new()),
             closed: AtomicBool::new(false),
             finished: AtomicBool::new(false),
@@ -81,24 +85,26 @@ impl HostLink {
     }
 
     /// False once the player closed the window.
+    pub(crate) fn close(&self) { self.closed.store(true, Ordering::Release); self.wake(); }
+
     pub fn is_open(&self) -> bool {
         !self.closed.load(Ordering::Acquire)
     }
 
     pub fn focused(&self) -> bool {
-        self.input.lock().unwrap().focused
+        !self.menu_open.load(Ordering::Acquire) && self.input.lock().unwrap().focused
     }
 
     /// Whether any of `keys` (`controls::KEYS` indexes) is held in the focused window.
     pub fn any_down(&self, keys: &[usize]) -> bool {
         let s = self.input.lock().unwrap();
-        s.focused && s.held.values().any(|k| keys.contains(k))
+        !self.menu_open.load(Ordering::Acquire) && s.focused && s.held.values().any(|k| keys.contains(k))
     }
 
     /// The stylus position on the bottom screen while the left mouse button is held there.
     pub fn touch(&self) -> Option<(u8, u8)> {
         let s = self.input.lock().unwrap();
-        s.touch.filter(|_| s.focused)
+        s.touch.filter(|_| s.focused && !self.menu_open.load(Ordering::Acquire))
     }
 
     /// Queues `frame`; each screen refresh shows the next one. Frames arrive unevenly (the emulation runs in
@@ -149,6 +155,8 @@ const MAX_QUEUED: usize = 2;
 /// How the window shows the screens (from `settings.txt` and the command line).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Display {
+    pub settings: mkds_builder::settings::Settings,
+    pub controls_path: Option<std::path::PathBuf>,
     /// GPU resolution as a multiple of 256x192 (1 = the original look); `None` (the default) = the sharpest that fits
     /// the window (up to 4x).
     pub scale: Option<u32>,
@@ -168,6 +176,8 @@ const AUTO_MAX: u32 = 4;
 pub fn run<T: Send>(title: &str, display: Display, emulation: impl FnOnce(Arc<HostLink>) -> T + Send) -> Result<T, String> {
     let event_loop = EventLoop::<()>::with_user_event().build().map_err(|e| format!("Cannot start the window system: {e}"))?;
     let link = HostLink::new();
+    let controls = display.controls_path.as_ref().map(|p| controls::Controls::load_or_create(p)).transpose()?.unwrap_or_default();
+    *link.preferences.lock().unwrap() = Some((display.settings.clone(), controls));
     *link.proxy.lock().unwrap() = Some(event_loop.create_proxy());
     std::thread::scope(|scope| {
         let worker_link = Arc::clone(&link);
@@ -234,7 +244,8 @@ struct App {
 
 impl App {
     fn update_touch(&self) {
-        let touch = match (self.mouse_down, self.cursor, &self.gfx) {
+        let enabled = !self.link.menu_open.load(Ordering::Acquire) && self.link.preferences.lock().unwrap().as_ref().is_none_or(|(s,_)| s.touch_mouse);
+        let touch = match (self.mouse_down && enabled, self.cursor, &self.gfx) {
             (true, Some(c), Some(g)) => g.layout.touch(c.x, c.y),
             _ => None,
         };
@@ -248,10 +259,11 @@ impl ApplicationHandler for App {
             return;
         }
         let (w, h) = if self.display.side_by_side { (W * 2, H / 2) } else { (W, H) };
+        let factor = self.display.settings.window_size;
         let attrs = Window::default_attributes()
             .with_title(self.title.clone())
             .with_window_icon(Some(brand_icon()))
-            .with_inner_size(LogicalSize::new(w * 2, h * 2))
+            .with_inner_size(LogicalSize::new(w * factor, h * factor))
             .with_min_inner_size(LogicalSize::new(w / 2, h / 2))
             .with_fullscreen(self.display.fullscreen.then_some(Fullscreen::Borderless(None)));
         let made = event_loop.create_window(attrs).map_err(|e| format!("Cannot open game window: {e}")).and_then(|w| {
@@ -280,6 +292,35 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
+        if let (Some(g), Some(w)) = (&mut self.gfx, &self.window) {
+            g.menu.event(w, &event);
+            if let WindowEvent::KeyboardInput { event, .. } = &event {
+                if event.state == ElementState::Pressed && !event.repeat {
+                    if event.physical_key == PhysicalKey::Code(KeyCode::F10) {
+                        g.menu.open = !g.menu.open;
+                        g.menu.cancel_capture();
+                        self.mouse_down = false;
+                        let mut input = self.link.input.lock().unwrap();
+                        input.held.clear(); input.touch = None;
+                        w.request_redraw();
+                        self.link.menu_open.store(g.menu.open, Ordering::Release);
+                        return;
+                    } else if g.menu.open {
+                        g.menu.key(event);
+                        self.link.menu_open.store(g.menu.open, Ordering::Release);
+                        w.request_redraw();
+                        return;
+                    }
+                }
+            }
+            self.link.menu_open.store(g.menu.open, Ordering::Release);
+            if g.menu.open {
+                match &event {
+                    WindowEvent::KeyboardInput { .. } | WindowEvent::CursorMoved { .. } | WindowEvent::CursorLeft { .. } | WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. } => { w.request_redraw(); return; }
+                    _ => {}
+                }
+            }
+        }
         match event {
             WindowEvent::CloseRequested => {
                 self.link.closed.store(true, Ordering::Release);
@@ -295,7 +336,8 @@ impl ApplicationHandler for App {
                 let PhysicalKey::Code(code) = event.physical_key else { return };
                 if event.state == ElementState::Pressed && !event.repeat && code == KeyCode::F11 {
                     if let Some(w) = &self.window {
-                        w.set_fullscreen(if w.fullscreen().is_some() { None } else { Some(Fullscreen::Borderless(None)) });
+                        if let Some(g) = &mut self.gfx { g.menu.settings.fullscreen = w.fullscreen().is_none(); }
+                        w.request_redraw();
                     }
                 }
                 let mut s = self.link.input.lock().unwrap();
@@ -430,6 +472,17 @@ impl Layout {
         Layout { top, bottom, side_by_side }
     }
 
+    fn configured(width: u32, height: u32, settings: &mkds_builder::settings::Settings) -> Layout {
+        let side = settings.layout == mkds_builder::settings::Layout::SideBySide;
+        let gap = settings.gap as f64;
+        let (cw,ch) = if settings.single_screen { (256.0,192.0) } else if side { (512.0+gap,192.0) } else { (256.0,384.0+gap) };
+        let scale = (width as f64 / cw).min(height as f64 / ch);
+        let first = Rect { x: (width as f64-cw*scale)/2.0, y: (height as f64-ch*scale)/2.0, w: 256.0*scale, h: 192.0*scale };
+        let second = if settings.single_screen { Rect { w: 0.0, h: 0.0, ..first } } else if side { Rect { x: first.x+(256.0+gap)*scale, ..first } } else { Rect { y: first.y+(192.0+gap)*scale, ..first } };
+        let (top,bottom) = if settings.swap_screens { (second,first) } else { (first,second) };
+        Layout { top,bottom,side_by_side: side }
+    }
+
     /// Window pixel -> bottom-screen pixel, if it lies on the bottom screen.
     pub fn touch(&self, px: f64, py: f64) -> Option<(u8, u8)> {
         let r = self.bottom;
@@ -443,7 +496,7 @@ impl Layout {
 
     /// The scale `Auto` uses: enough GPU pixels for every window pixel of a screen, 1 to [`AUTO_MAX`].
     pub fn auto_scale(&self) -> u32 {
-        ((self.top.h / 192.0).ceil() as u32).clamp(1, AUTO_MAX)
+        ((self.top.h.max(self.bottom.h) / 192.0).ceil() as u32).clamp(1, AUTO_MAX)
     }
 }
 
@@ -486,6 +539,7 @@ struct Presenter {
     /// The adapter can run the GPU renderer (compute shaders, writable RGBA8 storage textures); otherwise GPU frames
     /// are finished on the CPU.
     compute_ok: bool,
+    menu: crate::menu::Menu,
 }
 
 impl Presenter {
@@ -503,7 +557,7 @@ impl Presenter {
         let mut config = surface
             .get_default_config(&gpu.adapter, size.width.max(1), size.height.max(1))
             .ok_or("The graphics adapter cannot draw into this window")?;
-        config.present_mode = wgpu::PresentMode::AutoVsync;
+        config.present_mode = if display.settings.vsync { wgpu::PresentMode::AutoVsync } else { wgpu::PresentMode::AutoNoVsync };
         surface.configure(&gpu.device, &config);
         let screens = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("screens"),
@@ -518,7 +572,7 @@ impl Presenter {
         });
         let sampler = gpu.device.create_sampler(&wgpu::SamplerDescriptor {
             mag_filter: if display.smooth { wgpu::FilterMode::Linear } else { wgpu::FilterMode::Nearest },
-            min_filter: wgpu::FilterMode::Linear,
+            min_filter: if display.smooth { wgpu::FilterMode::Linear } else { wgpu::FilterMode::Nearest },
             ..Default::default()
         });
         let bind_layout = gpu.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -582,13 +636,44 @@ impl Presenter {
         if !compute_ok {
             eprintln!("This graphics adapter cannot run the GPU renderer; the CPU finishes each frame (as --renderer software).");
         }
-        let layout = Layout::fit(config.width, config.height, display.side_by_side);
+        let layout = Layout::configured(config.width, config.height, &display.settings);
         let scale = display.scale.unwrap_or_else(|| layout.auto_scale());
         eprintln!("Display: {} renderer at {scale}x, {}", gpu.adapter.get_info().name, if display.scale.is_none() { "Auto" } else { "fixed" });
+        let menu = crate::menu::Menu::new(&window, &gpu, config.format, &display);
         Ok(Presenter {
             window, gpu, surface, config, screens, bind, bind_layout, sampler, pipeline, layout,
-            rgba: vec![0; (W * H * 4) as usize], gpu_path: None, scale, display, showing_gpu: false, compute_ok,
+            rgba: vec![0; (W * H * 4) as usize], gpu_path: None, scale, display, showing_gpu: false, compute_ok, menu,
         })
+    }
+
+    fn apply_settings(&mut self) {
+        let settings = self.menu.settings.clone();
+        let old = self.display.settings.clone();
+        if settings == old { return; }
+        self.display.scale = settings.scale;
+        self.display.smooth = settings.smooth;
+        self.display.side_by_side = settings.layout == mkds_builder::settings::Layout::SideBySide;
+        if settings.fullscreen != old.fullscreen {
+            self.window.set_fullscreen(settings.fullscreen.then_some(Fullscreen::Borderless(None)));
+        }
+        if settings.window_size != old.window_size {
+            let (w,h) = if self.display.side_by_side { (512,192) } else { (256,384) };
+            let _ = self.window.request_inner_size(LogicalSize::new(w * settings.window_size, h * settings.window_size));
+        }
+        self.config.present_mode = if settings.vsync { wgpu::PresentMode::AutoVsync } else { wgpu::PresentMode::AutoNoVsync };
+        if settings.smooth != old.smooth {
+            self.sampler = self.gpu.device.create_sampler(&wgpu::SamplerDescriptor {
+                mag_filter: if settings.smooth { wgpu::FilterMode::Linear } else { wgpu::FilterMode::Nearest },
+                min_filter: if settings.smooth { wgpu::FilterMode::Linear } else { wgpu::FilterMode::Nearest },
+                ..Default::default()
+            });
+            self.bind = self.bind_texture(&self.screens, false);
+            self.gpu_path = None;
+        }
+        self.display.settings = settings;
+        self.resize(self.window.inner_size());
+        let scale = self.display.scale.unwrap_or_else(|| self.layout.auto_scale());
+        if scale != self.scale { self.scale = scale; self.gpu_path = None; }
     }
 
     fn resize(&mut self, size: PhysicalSize<u32>) {
@@ -598,7 +683,7 @@ impl Presenter {
         self.config.width = size.width;
         self.config.height = size.height;
         self.surface.configure(&self.gpu.device, &self.config);
-        self.layout = Layout::fit(size.width, size.height, self.display.side_by_side);
+        self.layout = Layout::configured(size.width, size.height, &self.display.settings);
         if self.display.scale.is_none() && self.layout.auto_scale() != self.scale {
             self.scale = self.layout.auto_scale();
             self.gpu_path = None; // rebuilt at the new scale with the next frame
@@ -622,6 +707,8 @@ impl Presenter {
     }
 
     fn draw(&mut self, frame: Option<Frame>, link: &HostLink) -> Result<(), String> {
+        self.menu.prepare(&self.window, link, frame.is_some());
+        self.apply_settings();
         let frame = match frame {
             // Adapters without compute keep the complete software renderer.
             Some(Frame::Gpu(f)) if !self.compute_ok => Some(Frame::Pixels(f.snap.screens())),
@@ -688,24 +775,21 @@ impl Presenter {
                 ..Default::default()
             });
             let l = self.layout;
-            if l.top.w >= 1.0 && l.top.h >= 1.0 {
+            if l.top.w >= 1.0 || l.bottom.w >= 1.0 {
                 pass.set_pipeline(&self.pipeline);
                 let bind = match (&self.gpu_path, self.showing_gpu) {
                     (Some((_, _, gpu_bind)), true) => gpu_bind,
                     _ => &self.bind,
                 };
                 pass.set_bind_group(0, bind, &[]);
-                if l.side_by_side {
-                    for (part, r) in [(1u32, l.top), (2, l.bottom)] {
-                        pass.set_viewport(r.x as f32, r.y as f32, r.w as f32, r.h as f32, 0.0, 1.0);
-                        pass.draw(0..3, part..part + 1);
-                    }
-                } else {
-                    pass.set_viewport(l.top.x as f32, l.top.y as f32, l.top.w as f32, (l.top.h * 2.0) as f32, 0.0, 1.0);
-                    pass.draw(0..3, 0..1);
+                for (part, r) in [(1u32, l.top), (2, l.bottom)] {
+                    if r.w < 1.0 || r.h < 1.0 { continue; }
+                    pass.set_viewport(r.x as f32, r.y as f32, r.w as f32, r.h as f32, 0.0, 1.0);
+                    pass.draw(0..3, part..part + 1);
                 }
             }
         }
+        self.menu.paint(&self.gpu, &self.window, &view, &mut encoder);
         self.gpu.queue.submit([encoder.finish()]);
         self.window.pre_present_notify();
         self.gpu.queue.present(surface_texture);
@@ -716,6 +800,36 @@ impl Presenter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overlay_blocks_all_input_until_closed() {
+        let link = HostLink::for_tests();
+        link.set_for_tests(&[0], Some((42,64)), true);
+        assert!(link.any_down(&[0]) && link.focused());
+        link.menu_open.store(true, Ordering::Release);
+        assert!(!link.any_down(&[0]) && !link.focused());
+        assert_eq!(link.touch(), None);
+        link.menu_open.store(false, Ordering::Release);
+        assert_eq!(link.touch(), Some((42,64)));
+    }
+
+    #[test]
+    fn gap_swap_and_single_screen_keep_touch_on_the_visible_bottom_screen() {
+        let mut s = mkds_builder::settings::Settings::default();
+        assert_eq!(Layout::configured(512,768,&s), Layout::fit(512,768,false));
+        s.gap = 32;
+        let l = Layout::configured(256,416,&s);
+        assert_eq!(l.touch(128.0,200.0),None);
+        assert_eq!(l.touch(128.0,224.0),Some((128,0)));
+        s.swap_screens = true;
+        assert_eq!(Layout::configured(256,416,&s).touch(128.0,0.0),Some((128,0)));
+        s.single_screen = true;
+        let l = Layout::configured(512,384,&s);
+        assert_eq!(l.touch(256.0,192.0),Some((128,96)));
+        assert_eq!(l.auto_scale(),2);
+        s.swap_screens = false;
+        assert_eq!(Layout::configured(512,384,&s).touch(256.0,192.0),None);
+    }
 
     #[test]
     fn letters_follow_the_label_other_keys_their_position() {
