@@ -20,8 +20,11 @@ pub fn command_for(exe: &Path) -> String {
 
 /// Register (or repair) the handler for this launcher. Cheap when it is already correct.
 pub fn register(exe: &Path) -> Result<bool, String> {
+    register_at(KEY, exe)
+}
+fn register_at(key: &str, exe: &Path) -> Result<bool, String> {
     let wanted = command_for(exe);
-    let current = hidden(Command::new("reg.exe").args(["query", &format!(r"{KEY}\shell\open\command"), "/ve"]))
+    let current = hidden(Command::new("reg.exe").args(["query", &format!(r"{key}\shell\open\command"), "/ve"]))
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default();
@@ -38,10 +41,10 @@ pub fn register(exe: &Path) -> Result<bool, String> {
         let ok = hidden(c.args(["/t", "REG_SZ", "/d", value, "/f"])).status().map_err(|e| e.to_string())?.success();
         if ok { Ok(()) } else { Err(format!("reg add {key} failed")) }
     };
-    add(KEY.into(), None, "URL:MKDSrust mod install")?;
-    add(KEY.into(), Some("URL Protocol"), "")?;
-    add(format!(r"{KEY}\DefaultIcon"), None, &format!("\"{}\",0", exe.display()))?;
-    add(format!(r"{KEY}\shell\open\command"), None, &wanted)?;
+    add(key.into(), None, "URL:MKDSrust mod install")?;
+    add(key.into(), Some("URL Protocol"), "")?;
+    add(format!(r"{key}\DefaultIcon"), None, &format!("\"{}\",0", exe.display()))?;
+    add(format!(r"{key}\shell\open\command"), None, &wanted)?;
     Ok(true)
 }
 
@@ -168,5 +171,22 @@ mod tests {
             assert!(install_url(bad).is_err(), "{bad}");
         }
         assert_eq!(command_for(Path::new(r"C:\a b\MKDSrust.exe")), r#""C:\a b\MKDSrust.exe" "%1""#);
+    }
+    #[cfg(windows)]
+    #[test]
+    fn registration_writes_a_url_protocol_and_is_idempotent() {
+        let key = format!(r"HKCU\Software\Classes\mkdsrust-selftest-{}", std::process::id());
+        let exe = Path::new(r"C:\a b\MKDSrust.exe");
+        let query = |args: &[&str]| String::from_utf8_lossy(&hidden(Command::new("reg.exe").args(args)).output().unwrap().stdout).into_owned();
+        let result = (|| {
+            assert!(register_at(&key, exe)?);
+            assert!(!register_at(&key, exe)?, "second call must see the existing registration");
+            let all = query(&["query", &key, "/s"]);
+            assert!(all.contains("URL Protocol"), "{all}");
+            assert!(all.contains(r#""C:\a b\MKDSrust.exe" "%1""#), "{all}");
+            Ok::<_, String>(())
+        })();
+        let _ = hidden(Command::new("reg.exe").args(["delete", &key, "/f"])).status();
+        result.unwrap();
     }
 }
