@@ -877,6 +877,34 @@ pub fn save_enabled(game: &Path, ids: &[String]) -> Result<()> {
     staged.persist(game.join("mods/enabled.txt"))?;
     Ok(())
 }
+/// The full load order shown in the launcher: `mods/order.txt` (launcher-only; disabled mods keep their place), then
+/// anything else in `enabled.txt`, then other installed mods by id. Only installed mods are listed. Top to bottom;
+/// later wins. The game itself reads only `enabled.txt`.
+pub fn load_order(game: &Path) -> Vec<String> {
+    let installed: BTreeSet<String> = installed(game).into_iter().map(|m| m.id).collect();
+    let saved = std::fs::read_to_string(game.join("mods/order.txt")).unwrap_or_default();
+    let mut out: Vec<String> = Vec::new();
+    for id in saved.lines().map(str::trim).map(str::to_string).chain(enabled(game)).chain(installed.iter().cloned()) {
+        if installed.contains(&id) && !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    out
+}
+/// Save the load order and which mods are on (`enabled.txt` = `order` filtered by `on`, same order).
+pub fn save_load_order(game: &Path, order: &[String], on: &BTreeSet<String>) -> Result<()> {
+    if order.iter().any(|s| !valid_id(s)) {
+        return Err("Invalid mod ID".into());
+    }
+    std::fs::create_dir_all(game.join("mods"))?;
+    let mut staged = tempfile::NamedTempFile::new_in(game.join("mods"))?;
+    staged.write_all((order.join("
+") + "
+").as_bytes())?;
+    staged.persist(game.join("mods/order.txt"))?;
+    let enabled: Vec<String> = order.iter().filter(|id| on.contains(*id)).cloned().collect();
+    save_enabled(game, &enabled)
+}
 pub fn installed(game: &Path) -> Vec<Manifest> {
     let mut mods = Vec::new();
     if let Ok(entries) = std::fs::read_dir(game.join("mods")) {

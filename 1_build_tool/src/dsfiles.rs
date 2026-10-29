@@ -149,6 +149,11 @@ pub fn lz77_compress(data: &[u8]) -> Vec<u8> {
                 let mut cand = head[key(i)];
                 let mut tries = 0;
                 while cand != NONE && i - cand <= 0x1000 && tries < 256 {
+                    if i - cand < 2 {
+                        cand = prev[cand];
+                        tries += 1;
+                        continue;
+                    }
                     let disp = i - cand;
                     // disp 1 is legal for this format (VRAM-safe variants avoid it; the game's decoder accepts it)
                     let max = 18.min(n - i);
@@ -313,6 +318,9 @@ fn narc_names(b: &[u8], base: usize, end: usize, count: usize) -> Vec<Option<Str
 /// The same archive with each file's bytes replaced by `files[i]` (header, name table and order kept; data 4-byte
 /// aligned with 0xFF padding as the SDK packer does).
 pub fn rebuild_narc(original: &[u8], files: &[Vec<u8>]) -> Result<Vec<u8>, String> {
+    rebuild_narc_with(original, files, 4, 0xff)
+}
+fn rebuild_narc_with(original: &[u8], files: &[Vec<u8>], align: usize, pad: u8) -> Result<Vec<u8>, String> {
     let l = narc_layout(original)?;
     if files.len() != l.count {
         return Err(format!("archive has {} files, got {}", l.count, files.len()));
@@ -320,15 +328,15 @@ pub fn rebuild_narc(original: &[u8], files: &[Vec<u8>]) -> Result<Vec<u8>, Strin
     let mut gmif_data = Vec::new();
     let mut table = Vec::with_capacity(l.count * 8);
     for f in files {
-        while gmif_data.len() % 4 != 0 {
-            gmif_data.push(0xff);
+        while gmif_data.len() % align != 0 {
+            gmif_data.push(pad);
         }
         table.extend_from_slice(&(gmif_data.len() as u32).to_le_bytes());
         gmif_data.extend_from_slice(f);
         table.extend_from_slice(&(gmif_data.len() as u32).to_le_bytes());
     }
     while gmif_data.len() % 4 != 0 {
-        gmif_data.push(0xff);
+        gmif_data.push(pad);
     }
     let mut out = original[..l.btaf + 12].to_vec();
     out.extend_from_slice(&table);
@@ -341,6 +349,221 @@ pub fn rebuild_narc(original: &[u8], files: &[Vec<u8>]) -> Result<Vec<u8>, Strin
     let total = out.len() as u32;
     out[8..12].copy_from_slice(&total.to_le_bytes());
     Ok(out)
+}
+
+// ---------------------------------------------------------------- minimal-change recompression
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Tok {
+    len: usize,
+    /// 0 = literal
+    disp: usize,
+}
+
+/// Tokens of an LZ77 type 0x10 stream with their output positions, plus the header length and the stream end.
+fn lz77_tokens(b: &[u8]) -> Option<(Vec<(usize, Tok)>, usize, usize)> {
+    if b.len() < 4 || b[0] != 0x10 {
+        return None;
+    }
+    let mut size = b[1] as usize | (b[2] as usize) << 8 | (b[3] as usize) << 16;
+    let mut p = 4;
+    if size == 0 {
+        size = le32(b, 4)?;
+        p = 8;
+    }
+    let header = p;
+    let mut out = 0;
+    let mut toks = Vec::new();
+    while out < size {
+        let flags = *b.get(p)?;
+        p += 1;
+        for bit in (0..8).rev() {
+            if out >= size {
+                break;
+            }
+            if flags & (1 << bit) != 0 {
+                let (x, y) = (*b.get(p)?, *b.get(p + 1)?);
+                p += 2;
+                let t = Tok { len: (x >> 4) as usize + 3, disp: (((x & 0x0f) as usize) << 8 | y as usize) + 1 };
+                toks.push((out, t));
+                out += t.len;
+            } else {
+                p += 1;
+                toks.push((out, Tok { len: 1, disp: 0 }));
+                out += 1;
+            }
+        }
+    }
+    Some((toks, header, p))
+}
+
+fn emit(data: &[u8], toks: &[Tok], header: usize) -> Vec<u8> {
+    let n = data.len();
+    let mut out = Vec::with_capacity(n / 2 + 16);
+    if header == 4 && n < 1 << 24 {
+        out.extend_from_slice(&[0x10, n as u8, (n >> 8) as u8, (n >> 16) as u8]);
+    } else {
+        out.extend_from_slice(&[0x10, 0, 0, 0]);
+        out.extend_from_slice(&(n as u32).to_le_bytes());
+    }
+    let mut pos = 0;
+    for group in toks.chunks(8) {
+        let flag_at = out.len();
+        out.push(0);
+        let mut flags = 0u8;
+        for (k, t) in group.iter().enumerate() {
+            if t.disp == 0 {
+                out.push(data[pos]);
+            } else {
+                flags |= 0x80 >> k;
+                let d = t.disp - 1;
+                out.push(((t.len - 3) as u8) << 4 | (d >> 8) as u8);
+                out.push(d as u8);
+            }
+            pos += t.len;
+        }
+        out[flag_at] = flags;
+    }
+    out
+}
+
+/// Does `t` at position `p` reproduce `data`?
+fn valid(data: &[u8], p: usize, t: Tok) -> bool {
+    if p + t.len > data.len() {
+        return false;
+    }
+    t.disp == 0 || (t.disp <= p && (0..t.len).all(|i| data[p + i] == data[p + i - t.disp]))
+}
+
+/// Longest match at `p` (distance 2..=4096, length 3..=`cap`), or a literal.
+fn greedy_at(data: &[u8], p: usize, cap: usize) -> Tok {
+    let max = 18.min(cap).min(data.len() - p);
+    let mut best = Tok { len: 1, disp: 0 };
+    if max >= 3 {
+        for d in 2..=p.min(0x1000) {
+            let mut l = 0;
+            while l < max && data[p + l] == data[p + l - d] {
+                l += 1;
+            }
+            if l >= 3 && l > best.len.max(2) {
+                best = Tok { len: l, disp: d };
+                if l == max {
+                    break;
+                }
+            }
+        }
+    }
+    best
+}
+
+/// Compress `new` to LZ77 type 0x10 so that it differs from `original` (an LZ77 stream of similar data) as little
+/// as possible: the original tokens are reused wherever they still decode correctly, only the edited region is
+/// re-encoded, and the 8-token flag groups are kept aligned, so a binary diff against the original stays small.
+/// Falls back to [`lz77_compress`] when `original` is not LZ77.
+pub fn lz77_recompress(original: &[u8], new: &[u8]) -> Vec<u8> {
+    let Some((old_toks, header, end)) = lz77_tokens(original) else { return lz77_compress(new) };
+    let Ok(old) = lz77_decompress(original, usize::MAX) else { return lz77_compress(new) };
+    let a = old.iter().zip(new).take_while(|(x, y)| x == y).count();
+    let max_suffix = old.len().min(new.len()) - a;
+    let s = old.iter().rev().zip(new.iter().rev()).take(max_suffix).take_while(|(x, y)| x == y).count();
+    if new.len() - a - s > 256 * 1024 {
+        return lz77_compress(new); // a rewrite, not an edit: the fast compressor
+    }
+    let delta = new.len() as isize - old.len() as isize;
+    // old tokens by their position in `new` (outside the edited region), with their old index
+    let mapped: Vec<(usize, usize, Tok)> = old_toks
+        .iter()
+        .enumerate()
+        .filter_map(|(k, &(q, t))| {
+            if q < a {
+                Some((q, k, t))
+            } else if q >= old.len() - s {
+                Some(((q as isize + delta) as usize, k, t))
+            } else {
+                None
+            }
+        })
+        .collect();
+    let mut out: Vec<Tok> = Vec::with_capacity(old_toks.len() + 16);
+    let mut out_pos: Vec<usize> = Vec::with_capacity(old_toks.len() + 16);
+    let mut greedy_from: Option<usize> = None; // index in `out` where the current re-encoded run starts
+    let mut m = 0; // next candidate in `mapped`
+    let mut p = 0;
+    while p < new.len() {
+        while m < mapped.len() && mapped[m].0 < p {
+            m += 1;
+        }
+        if m < mapped.len() && mapped[m].0 == p && valid(new, p, mapped[m].2) {
+            let (_, k, t) = mapped[m];
+            if let Some(start) = greedy_from.take() {
+                align(new, &mut out, &mut out_pos, start, k);
+            }
+            out.push(t);
+            out_pos.push(p);
+            p += t.len;
+            continue;
+        }
+        greedy_from.get_or_insert(out.len());
+        let next = mapped.get(m..).and_then(|r| r.iter().find(|x| x.0 > p)).map_or(new.len(), |x| x.0);
+        let t = greedy_at(new, p, next - p);
+        out.push(t);
+        out_pos.push(p);
+        p += t.len;
+    }
+    let mut bytes = emit(new, &out, header);
+    bytes.extend_from_slice(&original[end..]); // the original's trailing padding
+    debug_assert_eq!(lz77_decompress(&bytes, usize::MAX).ok().as_deref(), Some(new));
+    bytes
+}
+
+/// Split tokens of the re-encoded run `out[start..]` until the next kept token (old index `k`) lands in the same
+/// slot of its 8-token flag group as in the original stream.
+fn align(data: &[u8], out: &mut Vec<Tok>, pos: &mut Vec<usize>, start: usize, k: usize) {
+    let mut need = (k % 8 + 8 - out.len() % 8) % 8;
+    let mut i = start;
+    while need > 0 && i < out.len() {
+        let t = out[i];
+        if t.disp != 0 && t.len >= 4 {
+            // match(L) at p == literal at p + match(L-1) at p+1 with the same distance
+            let p = pos[i];
+            out[i] = Tok { len: 1, disp: 0 };
+            out.insert(i + 1, Tok { len: t.len - 1, disp: t.disp });
+            pos.insert(i + 1, p + 1);
+            need -= 1;
+            debug_assert!(valid(data, p + 1, out[i + 1]));
+        }
+        i += 1;
+    }
+}
+
+/// The same archive with each file replaced by `files[i]`, changing as few bytes as possible: when every file keeps
+/// its size the data is spliced in place; otherwise the archive is rebuilt with the original's alignment padding.
+pub fn update_narc(original: &[u8], files: &[Vec<u8>]) -> Result<Vec<u8>, String> {
+    let entries = parse_narc(original)?;
+    if files.len() != entries.len() {
+        return Err(format!("archive has {} files, got {}", entries.len(), files.len()));
+    }
+    if entries.iter().zip(files).all(|(e, f)| e.data.len() == f.len()) {
+        let mut out = original.to_vec();
+        for (e, f) in entries.iter().zip(files) {
+            let at = e.data.as_ptr() as usize - original.as_ptr() as usize;
+            out[at..at + f.len()].copy_from_slice(f);
+        }
+        return Ok(out);
+    }
+    let l = narc_layout(original)?;
+    let data = l.gmif + 8;
+    let pad = entries
+        .iter()
+        .zip(entries.iter().skip(1))
+        .find_map(|(x, y)| {
+            let end = x.data.as_ptr() as usize + x.data.len() - original.as_ptr() as usize;
+            let next = y.data.as_ptr() as usize - original.as_ptr() as usize;
+            (next > end).then(|| original[end])
+        })
+        .unwrap_or(0xff);
+    let aligned4 = entries.iter().all(|e| (e.data.as_ptr() as usize - original.as_ptr() as usize - data) % 4 == 0);
+    rebuild_narc_with(original, files, if aligned4 { 4 } else { 1 }, pad)
 }
 
 // ---------------------------------------------------------------- the checks
@@ -506,6 +729,42 @@ mod tests {
         assert!(lz77_decompress(b"\x11\x04\0\0abcd", 100).is_err());
         assert!(lz77_decompress(b"\x10\x10\0\0\x80\x00\x05", 100).is_err());
         assert!(lz77_decompress(&lz77_compress(&[1; 100]), 50).is_err());
+    }
+
+    #[test]
+    fn recompression_keeps_the_original_stream_outside_the_edit() {
+        let mut data: Vec<u8> = Vec::new();
+        for i in 0..20000u32 {
+            data.extend_from_slice(format!("entry {} value {}; ", i % 300, i * 7 % 1000).as_bytes());
+        }
+        let original = lz77_compress(&data);
+        assert_eq!(lz77_recompress(&original, &data), original);
+        for (at, insert) in [(5000usize, 0usize), (100000, 0), (60000, 5), (data.len() - 3, 0)] {
+            let mut edited = data.clone();
+            edited[at] ^= 0x20;
+            for _ in 0..insert {
+                edited.insert(at, b'#');
+            }
+            let new = lz77_recompress(&original, &edited);
+            assert_eq!(lz77_decompress(&new, 1 << 24).unwrap(), edited);
+            let mut patch = Vec::new();
+            crate::modpkg::qbsdiff::Bsdiff::new(&original, &new).compare(&mut patch).unwrap();
+            assert!(patch.len() < 1000, "edit at {at} (+{insert}): patch {} bytes for {}", patch.len(), original.len());
+        }
+        let other: Vec<u8> = (0..5000u32).map(|i| (i * i % 251) as u8).collect();
+        assert_eq!(lz77_decompress(&lz77_recompress(&original, &other), 1 << 20).unwrap(), other);
+        assert_eq!(lz77_decompress(&lz77_recompress(b"not lz", &other), 1 << 20).unwrap(), other);
+    }
+
+    #[test]
+    fn narc_updates_splice_same_size_files() {
+        let a = narc(&[("one.bmg", b"MESGbmg1 hello"), ("two.nclr", b"RLCNxx")]);
+        let same = update_narc(&a, &[b"MESGbmg1 HELLO".to_vec(), b"RLCNxx".to_vec()]).unwrap();
+        assert_eq!(same.len(), a.len());
+        assert_eq!(same.iter().zip(&a).filter(|(x, y)| x != y).count(), 5);
+        let grown = update_narc(&a, &[b"MESGbmg1 hello world".to_vec(), b"RLCNxx".to_vec()]).unwrap();
+        assert_eq!(parse_narc(&grown).unwrap()[0].data, b"MESGbmg1 hello world");
+        assert_eq!(parse_narc(&grown).unwrap()[1].data, b"RLCNxx");
     }
 
     #[test]

@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod mods_ui;
 mod portable;
+mod protocol;
 use eframe::egui::{self, Color32, RichText};
 use mkds_builder::{
     build,
@@ -33,6 +35,9 @@ fn build_date(stored: &str) -> String {
 }
 enum Event {
     ModInstalled(Result<String, String>),
+    ModCreated(Result<PathBuf, String>),
+    ModPacked(Result<String, String>),
+    ModTest(Result<(String, String), String>),
     Inspected(Result<RomInfo, String>, String),
     Log(String),
     Built(Result<PathBuf, String>, String),
@@ -41,7 +46,6 @@ enum Event {
 }
 struct Launcher {
     branding: egui::TextureHandle,
-    icon: egui::TextureHandle,
     prefs: Preferences,
     dir: PathBuf,
     settings: Settings,
@@ -57,6 +61,7 @@ struct Launcher {
     source_stamp: String,
     smoke_frame: Option<u8>,
     wizard: usize,
+    mods: mods_ui::ModsState,
 }
 fn fingerprint() -> String {
     use sha2::{Digest, Sha256};
@@ -199,10 +204,6 @@ impl Launcher {
                 "MKDSrust wordmark",
                 include_bytes!("../../assets/branding/logo_dark.png"),
             ),
-            icon: load_texture(
-                "MKDSrust icon",
-                include_bytes!("../../assets/branding/icon.png"),
-            ),
             prefs,
             dir,
             settings,
@@ -218,6 +219,7 @@ impl Launcher {
             source_stamp: fingerprint(),
             smoke_frame: std::env::args().any(|a| a == "--smoke-test").then_some(0),
             wizard: 0,
+            mods: Default::default(),
         };
         if let Some(bundle) = std::env::current_exe()
             .ok()
@@ -231,6 +233,17 @@ impl Launcher {
         }
         if !app.prefs.setup_done {
             app.page = 6;
+        }
+        // mkdsrust:// links from the site's "Install with MKDSrust" button (per user, repaired if the exe moved)
+        if app.smoke_frame.is_none() {
+            if let Ok(exe) = std::env::current_exe() {
+                if let Err(e) = protocol::register(&exe) {
+                    app.message = format!("Could not register mkdsrust:// links: {e}");
+                }
+            }
+        }
+        if let Some(link) = std::env::args().find(|a| a.to_ascii_lowercase().starts_with("mkdsrust:")) {
+            app.install_link(&link);
         }
         app
     }
@@ -276,6 +289,9 @@ impl Launcher {
             .map(|r| r.try_iter().collect())
             .unwrap_or_default();
         for event in events {
+            if self.mod_event(&event) {
+                continue;
+            }
             match event {
                 Event::Installed(result) => {
                     self.busy = false;
@@ -327,12 +343,10 @@ impl Launcher {
                         self.message = format!("Could not save build log: {e}");
                     }
                 }
-                Event::ModInstalled(result) => {
-                    self.busy = false;
-                    self.message = result.unwrap_or_else(|e| format!("Mod installation failed: {e}"));
-                }
+                Event::ModInstalled(_) | Event::ModCreated(_) | Event::ModPacked(_) | Event::ModTest(_) => {}
                 Event::Played(result) => {
                     self.busy = false;
+                    self.finish_test();
                     self.message = match result {
                         Ok(0) => "Game closed.".into(),
                         Ok(n) => format!("Game exited with code {n}."),
@@ -985,89 +999,6 @@ impl Launcher {
                 .show(ui, |ui| self.log_panel(ui));
         }
     }
-    fn install_mod(&mut self, archive: PathBuf) {
-        if self.busy { return; }
-        let game = self.prefs.output.clone(); let rom = self.prefs.rom.clone();
-        let (tx, rx) = mpsc::channel(); self.rx = Some(rx); self.busy = true;
-        self.message = "Screening mod against your ROM…".into();
-        std::thread::spawn(move || {
-            let result = (|| -> mkds_builder::modpkg::Result<String> {
-                if !game.join("manifest.json").is_file() { return Err("Build a game first".into()); }
-                let info = rom::inspect_rom(&rom)?;
-                if !info.reference_match { return Err("Mod screening requires the supported AMCE rev 0 ROM".into()); }
-                let retail = mkds_builder::modpkg::RetailIndex::from_rom(&std::fs::read(&rom)?)?;
-                let pkg = mkds_builder::modpkg::Package::read(&archive, &retail)?;
-                pkg.install(&game)?;
-                Ok(format!("Installed {}. Enable it below. {}", pkg.manifest.name, pkg.warnings.join("; ")))
-            })().map_err(|e| e.to_string());
-            let _ = tx.send(Event::ModInstalled(result));
-        });
-    }
-    fn mods_page(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        use mkds_builder::modpkg;
-        ui.heading("Mods");
-        ui.hyperlink_to("Browse mods on mkdsrust.com", "https://mkdsrust.com");
-        ui.label("Install a .zip or drop it here. Later enabled mods win. Place dependencies first.");
-        ui.label("Mods are disabled in exact timing and acceptance runs.");
-        ui.add_enabled_ui(!self.busy, |ui| {
-            if ui.button("Install from .zip").clicked() {
-                if let Some(path) = rfd::FileDialog::new().add_filter("Mod package", &["zip"]).pick_file() { self.install_mod(path); }
-            }
-            if ui.button("Open mods folder").clicked() {
-                let path = self.prefs.output.join("mods");
-                if let Err(e) = std::fs::create_dir_all(&path).and_then(|_| std::process::Command::new("explorer.exe").arg(path).spawn().map(|_| ())) { self.message = e.to_string(); }
-            }
-        });
-        if !self.busy {
-            if let Some(path) = ctx.input(|i| i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).next()) { self.install_mod(path); }
-        }
-        let installed = modpkg::installed(&self.prefs.output);
-        let mut enabled = modpkg::enabled(&self.prefs.output);
-        let active: Vec<_> = enabled.iter().filter_map(|id| installed.iter().find(|m| &m.id == id).cloned()).collect();
-        let mut displayed = installed.clone();
-        displayed.sort_by_key(|m| enabled.iter().position(|id| id == &m.id).unwrap_or(usize::MAX));
-        let mut changed = false; let mut remove = None;
-        ui.add_enabled_ui(!self.busy, |ui| {
-            for m in &displayed {
-                ui.separator();
-                ui.horizontal(|ui| {
-                    let mut on = enabled.contains(&m.id);
-                    if ui.checkbox(&mut on, format!("{} {} ({})", m.name, m.version, m.id)).changed() {
-                        enabled.retain(|id| id != &m.id); if on { enabled.push(m.id.clone()); } changed = true;
-                    }
-                    if let Some(i) = enabled.iter().position(|id| id == &m.id) {
-                        if ui.add_enabled(i > 0, egui::Button::new("Up")).clicked() { enabled.swap(i, i-1); changed = true; }
-                        if ui.add_enabled(i+1 < enabled.len(), egui::Button::new("Down")).clicked() { enabled.swap(i, i+1); changed = true; }
-                    }
-                    if ui.button("Remove").clicked() { remove = Some(m.id.clone()); }
-                });
-                if !m.description.is_empty() { ui.label(&m.description); }
-                for warning in modpkg::issues(m, &active) { ui.colored_label(Color32::YELLOW, warning); }
-            }
-        });
-        let mut owners = std::collections::BTreeMap::new();
-        for m in &active {
-            for target in m.files.keys() {
-                if let Some(previous) = owners.insert(target, &m.id) {
-                    ui.colored_label(Color32::YELLOW, format!("Load order: {} overrides {} for {}", m.id, previous, target));
-                }
-            }
-        }
-        if let Some(id) = remove {
-            let path = self.prefs.output.join("mods").join(&id);
-            // IDs were validated; do not follow a directory link during removal.
-            match std::fs::symlink_metadata(&path) {
-                Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
-                    match std::fs::remove_dir_all(&path) {
-                        Ok(()) => { enabled.retain(|x| x != &id); changed = true; }
-                        Err(e) => self.message = e.to_string(),
-                    }
-                }
-                _ => self.message = "Unsafe mod folder; remove it manually".into(),
-            }
-        }
-        if changed { if let Err(e) = modpkg::save_enabled(&self.prefs.output, &enabled) { self.message = e.to_string(); } }
-    }
     fn advanced(&mut self, ui: &mut egui::Ui) {
         ui.heading("Advanced");
         ui.label("Build tools and diagnostics");
@@ -1119,7 +1050,6 @@ impl Launcher {
         self.log_panel(ui);
     }
     fn about(&self, ui: &mut egui::Ui) {
-        ui.add(egui::Image::new(&self.icon).fit_to_exact_size(egui::vec2(40., 40.)));
         ui.add(egui::Image::new(&self.branding).fit_to_exact_size(egui::vec2(440., 110.)));
         ui.heading(format!("MKDSrust {}", env!("CARGO_PKG_VERSION")));
         ui.label("Licensed under GPL-3.0-or-later");
@@ -1159,6 +1089,25 @@ impl Launcher {
     }
     fn draw(&mut self, ctx: &egui::Context) {
         self.poll();
+        // a mod .zip dropped on any page installs it
+        let dropped = ctx.input(|i| {
+            i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).find(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")))
+        });
+        if let Some(path) = dropped {
+            self.page = 3;
+            if self.busy {
+                self.message = "Busy: drop the mod again when the current task finishes.".into();
+            } else {
+                self.install_mod(path);
+            }
+        }
+        if ctx.input(|i| !i.raw.hovered_files.is_empty()) {
+            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("mod-drop")));
+            let rect = ctx.screen_rect();
+            painter.rect_filled(rect, 0., Color32::from_black_alpha(170));
+            painter.rect_stroke(rect.shrink(16.), 12., egui::Stroke::new(3., TEAL));
+            painter.text(rect.center(), egui::Align2::CENTER_CENTER, "Drop a mod .zip to install it", egui::FontId::proportional(30.), Color32::WHITE);
+        }
         ctx.request_repaint_after(Duration::from_millis(100));
         egui::SidePanel::left("navigation")
             .exact_width(175.)
@@ -1216,7 +1165,7 @@ impl Launcher {
             let frame = if self.page == 0 { egui::Frame::none().inner_margin(12.) } else { card() };
             frame.show(ui, |ui| { ui.set_min_width(ui.available_width()); match self.page {
                 0 => self.home(ui), 1 => self.settings_page(ui), 2 => self.controls_page(ui, ctx),
-                3 => self.mods_page(ui, ctx),
+                3 => self.mods_page(ui),
                 4 => self.advanced(ui), 5 => self.about(ui), _ => self.setup(ui),
             } });       }); });
         if self.busy && ctx.input(|i| i.viewport().close_requested()) {
@@ -1342,11 +1291,6 @@ mod tests {
                 egui::ColorImage::new([1, 1], Color32::WHITE),
                 Default::default(),
             ),
-            icon: ctx.load_texture(
-                "test icon",
-                egui::ColorImage::new([1, 1], Color32::WHITE),
-                Default::default(),
-            ),
             wizard: 0,
             prefs: Preferences::default(),
             dir: dir.path().into(),
@@ -1362,6 +1306,7 @@ mod tests {
             capture: None,
             source_stamp: String::new(),
             smoke_frame: None,
+            mods: Default::default(),
         };
         for page in 0..7 {
             app.page = page;

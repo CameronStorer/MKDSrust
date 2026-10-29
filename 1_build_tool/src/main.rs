@@ -124,6 +124,90 @@ fn find_source(explicit: Option<PathBuf>) -> Result<PathBuf, BuildError> {
     )
 }
 
+/// `mkds_builder mod ...`: mod projects (see `mkds_builder::modding`).
+#[derive(Parser)]
+#[command(name = "mkds_builder mod", about = "Make MKDSrust mods from your own ROM")]
+struct ModCli {
+    #[command(subcommand)]
+    command: ModCommand,
+}
+#[derive(clap::Subcommand)]
+enum ModCommand {
+    /// Create a mod project folder holding your ROM's files (romfs/), a draft manifest.json and a README
+    Create {
+        /// Your .nds file
+        #[arg(long)]
+        rom: PathBuf,
+        /// Mod name, e.g. "Faster Karts"
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        author: String,
+        /// character, kart, track, battle, music, texture, gameplay or other
+        #[arg(long = "type", default_value = "other")]
+        kind: String,
+        /// Mod id (default: author.name)
+        #[arg(long)]
+        id: Option<String>,
+        /// Extract .carc/.narc archives into <name>.unpacked/ folders (re-packed automatically)
+        #[arg(long)]
+        extract: bool,
+        /// Folder that holds your mod projects
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+    },
+    /// Pack a mod project into a ready-to-upload zip (patches against the ROM, screened like an upload)
+    Pack {
+        dir: PathBuf,
+        /// Your .nds file (default: the one the project was made from)
+        #[arg(long)]
+        rom: Option<PathBuf>,
+        /// Output zip (default: <projects>/packages/<id>-<version>.zip)
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Check a mod zip against your ROM and install it into a built game (enabled, last in the load order)
+    Install {
+        zip: PathBuf,
+        /// The built game folder (the one holding manifest.json)
+        #[arg(long)]
+        game: PathBuf,
+        /// Your .nds file
+        #[arg(long)]
+        rom: PathBuf,
+    },
+}
+
+fn mod_command(cli: ModCli) -> Result<i32, BuildError> {
+    use mkds_builder::modding;
+    let e = |e: Box<dyn std::error::Error + Send + Sync>| BuildError(e.to_string());
+    let read_rom = |rom: &PathBuf| -> Result<Vec<u8>, BuildError> {
+        if !rom::inspect_rom(rom)?.reference_match {
+            return err("Mod projects need the supported Mario Kart DS (USA, rev 0) ROM");
+        }
+        Ok(std::fs::read(rom)?)
+    };
+    match cli.command {
+        ModCommand::Create { rom, name, author, kind, id, extract, root } => {
+            let id = id.unwrap_or_else(|| modding::suggest_id(&author, &name));
+            let draft = modding::Draft::new(&id, &name, &kind, &author);
+            let rom_abs = std::fs::canonicalize(&rom).unwrap_or(rom.clone());
+            let dir = modding::create(&root, &draft, &rom_abs, &read_rom(&rom)?, extract).map_err(e)?;
+            println!("Created {}\nEdit files under romfs/, then: mkds_builder mod pack \"{}\"", dir.display(), dir.display());
+        }
+        ModCommand::Pack { dir, rom, out } => {
+            let ws = modding::Workspace::open(&dir).map_err(e)?;
+            let rom = rom.or_else(|| ws.rom()).ok_or_else(|| BuildError("Pass --rom <your .nds>".into()))?;
+            let report = modding::pack(&ws, &read_rom(&rom)?, out.as_deref()).map_err(e)?;
+            print!("{}", report.summary());
+        }
+        ModCommand::Install { zip, game, rom } => {
+            println!("{}", modding::install_zip(&game, &read_rom(&rom)?, &zip).map_err(e)?);
+        }
+    }
+    Ok(0)
+}
+
 fn run() -> Result<i32, BuildError> {
     // Launcher mode: a copy of this binary named play(.exe) beside manifest.json.
     if let Ok(exe) = std::env::current_exe() {
@@ -133,6 +217,9 @@ fn run() -> Result<i32, BuildError> {
             let extra: Vec<String> = std::env::args().skip(1).collect();
             return build::launch(&dir, &extra);
         }
+    }
+    if std::env::args().nth(1).as_deref() == Some("mod") {
+        return mod_command(ModCli::parse_from(std::env::args().skip(1)));
     }
     let args = Args::parse();
     let mod_error = |e: Box<dyn std::error::Error + Send + Sync>| BuildError(e.to_string());
