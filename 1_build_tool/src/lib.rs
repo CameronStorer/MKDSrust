@@ -5,6 +5,7 @@ pub mod rip;
 pub mod rom;
 pub mod settings;
 pub mod dsfiles;
+#[cfg(feature = "diff")]
 pub mod modding;
 pub mod modpkg;
 

@@ -10,7 +10,16 @@ $ProgressPreference = 'SilentlyContinue'
 $target = 'x86_64-pc-windows-gnu'
 $downloads = Join-Path $Destination 'downloads'
 New-Item -ItemType Directory -Force $downloads | Out-Null
-Remove-Item -LiteralPath (Join-Path $Destination 'complete') -ErrorAction SilentlyContinue
+$marker = Join-Path $Destination 'complete'
+$rustMarker = Join-Path $Destination 'rust.complete'
+# An older install (marker "<Version>" or "<Version> llvm-mingw-<release>") already has this Rust; only llvm-mingw
+# is (re)extracted then, from the cached archive when present.
+if ((Test-Path -LiteralPath $marker) -and ((Get-Content -LiteralPath $marker -TotalCount 1) -split ' ')[0] -eq $Version) {
+    Set-Content -LiteralPath $rustMarker -Value $Version
+}
+Remove-Item -LiteralPath $marker -ErrorAction SilentlyContinue
+$rustReady = (Test-Path -LiteralPath $rustMarker) -and (Get-Content -LiteralPath $rustMarker -TotalCount 1) -eq $Version -and
+    (Test-Path -LiteralPath (Join-Path $Destination 'bin/rustc.exe')) -and (Test-Path -LiteralPath (Join-Path $Destination 'bin/cargo.exe'))
 
 # Downloads $url to $archive (resuming a partial file) unless it already has SHA-256 $expected.
 function Get-Verified([string]$label, [string]$url, [string]$archive, [string]$expected) {
@@ -32,7 +41,8 @@ function Get-Verified([string]$label, [string]$url, [string]$archive, [string]$e
     Write-Output "Verified SHA-256: $label ($((Get-Item -LiteralPath $archive).Length) bytes). Extracting..."
 }
 
-foreach ($component in @('rustc','cargo','rust-std','rust-mingw')) {
+if ($rustReady) { Write-Output "Rust $Version already installed; updating llvm-mingw only." }
+foreach ($component in @('rustc','cargo','rust-std','rust-mingw') | Where-Object { !$rustReady }) {
     $name = "$component-$Version-$target"
     $archive = Join-Path $downloads "$name.tar.xz"
     $url = "https://static.rust-lang.org/dist/$name.tar.xz"
@@ -49,17 +59,22 @@ foreach ($component in @('rustc','cargo','rust-std','rust-mingw')) {
             if (Test-Path -LiteralPath $item) { Copy-Item -LiteralPath $item -Destination $Destination -Recurse -Force }
         }
     }
+    Remove-Item -LiteralPath $package -Recurse -Force
 }
+Set-Content -LiteralPath $rustMarker -Value $Version
 
 # llvm-mingw: its llvm-dlltool makes the import libraries for raw-dylib crates (Rust's own dlltool needs as.exe,
-# which isn't shipped). Pinned release, SHA-256 checked against the pinned value; only bin/ is extracted.
+# which isn't shipped), and its clang is the C/C++ compiler for crates with build scripts using cc (see
+# Toolchain::portable_gnu). Pinned release, SHA-256 checked against the pinned value. Extracted: the host tools,
+# the shared headers, the x86_64 sysroot and clang's own headers/builtins; other architectures, docs, python and
+# lldb support are skipped.
 $llvmName = "llvm-mingw-$LlvmMingw-ucrt-x86_64"
 $llvmArchive = Join-Path $downloads "$llvmName.zip"
 Get-Verified "llvm-mingw $LlvmMingw" "https://github.com/mstorsjo/llvm-mingw/releases/download/$LlvmMingw/$llvmName.zip" $llvmArchive $LlvmMingwSha256
 $llvmDir = Join-Path $Destination 'llvm-mingw'
 if (Test-Path -LiteralPath $llvmDir) { Remove-Item -LiteralPath $llvmDir -Recurse -Force }
 if (Test-Path -LiteralPath (Join-Path $downloads $llvmName)) { Remove-Item -LiteralPath (Join-Path $downloads $llvmName) -Recurse -Force }
-& "$env:SystemRoot\System32\tar.exe" -xf $llvmArchive -C $downloads "$llvmName/bin"
+& "$env:SystemRoot\System32\tar.exe" -xf $llvmArchive -C $downloads "$llvmName/bin" "$llvmName/include" "$llvmName/x86_64-w64-mingw32" "$llvmName/lib/clang/*/include" "$llvmName/lib/clang/*/lib/windows/libclang_rt.builtins-x86_64.a"
 if ($LASTEXITCODE -ne 0) { throw "Could not extract $llvmName" }
 Move-Item -LiteralPath (Join-Path $downloads $llvmName) -Destination $llvmDir
 $dlltool = Join-Path $llvmDir 'bin/x86_64-w64-mingw32-dlltool.exe'
@@ -84,5 +99,39 @@ fn main() { assert!(unsafe { GetCurrentThreadId() } != 0); }
 if ($LASTEXITCODE -ne 0) { throw 'Portable GNU linker validation failed. See the compiler error above; retry installation.' }
 & $probeExe
 if ($LASTEXITCODE -ne 0) { throw 'Portable GNU toolchain check program failed to run; retry installation.' }
-Set-Content -LiteralPath (Join-Path $Destination 'complete') -Value "$Version llvm-mingw-$LlvmMingw"
+# C probe: a crate whose build script compiles C with the cc crate, using the same compiler settings as the builder
+# (CC/CXX/AR from llvm-mingw, see Toolchain::portable_gnu), linked and run. Needs crates.io access like any build.
+$clang = Join-Path $llvmDir 'bin/x86_64-w64-mingw32-clang.exe'
+foreach ($name in @('CC', 'CC_x86_64_pc_windows_gnu')) { Set-Item "env:$name" $clang }
+foreach ($name in @('CXX', 'CXX_x86_64_pc_windows_gnu')) { Set-Item "env:$name" (Join-Path $llvmDir 'bin/x86_64-w64-mingw32-clang++.exe') }
+foreach ($name in @('AR', 'AR_x86_64_pc_windows_gnu')) { Set-Item "env:$name" (Join-Path $llvmDir 'bin/llvm-ar.exe') }
+Remove-Item env:RUSTFLAGS, env:CARGO_BUILD_TARGET, env:CFLAGS, env:CXXFLAGS -ErrorAction SilentlyContinue
+$env:RUSTC = Join-Path $Destination 'bin/rustc.exe'
+$env:CARGO_ENCODED_RUSTFLAGS = @("-Cdlltool=$dlltool", "-Clinker=$(Join-Path $rustlib 'rust-lld.exe')", '-Clinker-flavor=ld.lld', '-Clink-self-contained=yes') -join [char]0x1f
+$cprobe = Join-Path $Destination 'toolchain-check-c'
+if (Test-Path -LiteralPath $cprobe) { Remove-Item -LiteralPath $cprobe -Recurse -Force }
+New-Item -ItemType Directory -Force (Join-Path $cprobe 'src') | Out-Null
+Set-Content -LiteralPath (Join-Path $cprobe 'Cargo.toml') -Encoding ASCII -Value @'
+[package]
+name = "toolchain_check_c"
+version = "0.1.0"
+edition = "2024"
+
+[build-dependencies]
+cc = "=1.8.0"
+'@
+Set-Content -LiteralPath (Join-Path $cprobe 'build.rs') -Encoding ASCII -Value 'fn main() { cc::Build::new().file("src/probe.c").compile("probe"); }'
+Set-Content -LiteralPath (Join-Path $cprobe 'src/probe.c') -Encoding ASCII -Value @'
+#include <assert.h>
+#include <stdlib.h>
+int probe(int x) { assert(x > 0); return abs(-x) + (int)strtol("1", NULL, 10); }
+'@
+Set-Content -LiteralPath (Join-Path $cprobe 'src/main.rs') -Encoding ASCII -Value @'
+unsafe extern "C" { fn probe(x: i32) -> i32; }
+fn main() { assert_eq!(unsafe { probe(41) }, 42); }
+'@
+& (Join-Path $Destination 'bin/cargo.exe') run --release --quiet --manifest-path (Join-Path $cprobe 'Cargo.toml') --target-dir (Join-Path $cprobe 'target')
+if ($LASTEXITCODE -ne 0) { throw 'Portable C compiler validation failed. See the error above; check internet access and retry installation.' }
+Remove-Item -LiteralPath $cprobe -Recurse -Force
+Set-Content -LiteralPath (Join-Path $Destination 'complete') -Value "$Version llvm-mingw-$LlvmMingw cc"
 Write-Output 'Portable toolchain ready. No system settings were changed.'

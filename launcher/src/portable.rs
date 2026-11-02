@@ -7,8 +7,9 @@ use std::{
 };
 pub const VERSION: &str = "1.96.0";
 pub const TARGET: &str = mkds_builder::build::PORTABLE_GNU_TARGET;
-/// llvm-mingw (github.com/mstorsjo/llvm-mingw) supplies the dlltool for raw-dylib imports. Pinned release and the
-/// SHA-256 GitHub publishes for `llvm-mingw-<release>-ucrt-x86_64.zip`.
+/// llvm-mingw (github.com/mstorsjo/llvm-mingw) supplies the dlltool for raw-dylib imports and the C/C++ compiler
+/// (clang, headers, x86_64 sysroot) for crates whose build scripts compile C. Pinned release and the SHA-256 GitHub
+/// publishes for `llvm-mingw-<release>-ucrt-x86_64.zip`.
 pub const LLVM_MINGW: &str = "20261020";
 pub const LLVM_MINGW_SHA256: &str = "fd5462b7f5d93b2ff981fcd3f9c7e427e47f3203c64ea91c27bcc444eebd74cd";
 pub fn root(data: &Path) -> PathBuf {
@@ -17,15 +18,24 @@ pub fn root(data: &Path) -> PathBuf {
 fn llvm_mingw(dir: &Path) -> PathBuf {
     dir.join("llvm-mingw")
 }
+/// Written by install-toolchain.ps1 once every probe passed. Older markers (no " cc": llvm-mingw `bin/` only, no C
+/// compiler) make `install` run again, which reuses the installed Rust and the cached llvm-mingw archive.
+fn marker() -> String {
+    format!("{VERSION} llvm-mingw-{LLVM_MINGW} cc")
+}
 pub fn ready(data: &Path) -> bool {
     let complete = std::fs::read_to_string(root(data).join("complete")).unwrap_or_default();
-    complete.trim() == format!("{VERSION} llvm-mingw-{LLVM_MINGW}")
+    complete.trim() == marker()
         && [
             "bin/rustc.exe",
             "bin/cargo.exe",
             "lib/rustlib/x86_64-pc-windows-gnu/lib",
             "lib/rustlib/x86_64-pc-windows-gnu/bin/rust-lld.exe",
             "llvm-mingw/bin/x86_64-w64-mingw32-dlltool.exe",
+            "llvm-mingw/bin/x86_64-w64-mingw32-clang.exe",
+            "llvm-mingw/bin/llvm-ar.exe",
+            "llvm-mingw/include/assert.h",
+            "llvm-mingw/x86_64-w64-mingw32/lib",
         ]
         .iter()
         .all(|p| root(data).join(p).exists())
@@ -127,6 +137,10 @@ mod tests {
             "lib/rustlib/x86_64-pc-windows-gnu/lib/x",
             "lib/rustlib/x86_64-pc-windows-gnu/bin/rust-lld.exe",
             "llvm-mingw/bin/x86_64-w64-mingw32-dlltool.exe",
+            "llvm-mingw/bin/x86_64-w64-mingw32-clang.exe",
+            "llvm-mingw/bin/llvm-ar.exe",
+            "llvm-mingw/include/assert.h",
+            "llvm-mingw/x86_64-w64-mingw32/lib/x",
         ] {
             std::fs::create_dir_all(dir.join(p).parent().unwrap()).unwrap();
             std::fs::write(dir.join(p), "").unwrap();
@@ -134,8 +148,17 @@ mod tests {
         // An older install (Rust only) is completed again with llvm-mingw.
         std::fs::write(dir.join("complete"), VERSION).unwrap();
         assert!(!ready(data.path()));
+        // v0.2.0 installs (llvm-mingw bin/ only, no C compiler) are repaired too.
         std::fs::write(dir.join("complete"), format!("{VERSION} llvm-mingw-{LLVM_MINGW}\r\n")).unwrap();
+        assert!(!ready(data.path()));
+        std::fs::write(dir.join("complete"), format!("{VERSION} llvm-mingw-{LLVM_MINGW} cc\r\n")).unwrap();
         assert!(ready(data.path()));
+        std::fs::remove_file(dir.join("llvm-mingw/include/assert.h")).unwrap();
+        assert!(!ready(data.path()));
+        let cc: std::collections::HashMap<_, _> = t.env.iter().cloned().collect();
+        assert!(cc["CC_x86_64_pc_windows_gnu"].ends_with("llvm-mingw/bin/x86_64-w64-mingw32-clang.exe"));
+        assert!(cc["CXX"].ends_with("llvm-mingw/bin/x86_64-w64-mingw32-clang++.exe"));
+        assert!(cc["AR"].ends_with("llvm-mingw/bin/llvm-ar.exe"));
         assert_eq!(LLVM_MINGW_SHA256.len(), 64);
     }
     #[test]

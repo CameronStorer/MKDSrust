@@ -3,7 +3,7 @@ use mkds_builder::{
     modpkg::{self, Entry, Manifest},
     rom,
 };
-use modpkg::qbsdiff;
+use modpkg::bspatch;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
@@ -122,7 +122,7 @@ pub fn apply(card: &mut Vec<u8>, game: &Path, log: &mut dyn FnMut(String)) -> Re
                         if let Some(bytes) = cached {
                             bytes
                         } else {
-                            let patcher = qbsdiff::Bspatch::new(&payload)?;
+                            let patcher = bspatch::Bspatch::new(&payload)?;
                             if patcher.hint_target_size() > modpkg::MAX_UNPACKED {
                                 return Err("Patch result too large".into());
                             }
@@ -302,7 +302,7 @@ mod tests {
             let root = game.path().join("mods").join(id);
             std::fs::create_dir_all(&root).unwrap();
             let mut patch = Vec::new();
-            qbsdiff::Bsdiff::new(from, to).compare(&mut patch).unwrap();
+            modpkg::qbsdiff::Bsdiff::new(from, to).compare(&mut patch).unwrap();
             std::fs::write(root.join("patch.bsdiff"), patch).unwrap();
             let mut files = serde_json::json!({"a":{"patch":"patch.bsdiff"}});
             if bad {

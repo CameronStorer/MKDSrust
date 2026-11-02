@@ -374,6 +374,8 @@ pub struct Toolchain {
     pub rustflags: Vec<String>,
     /// Prepended to the child PATH (linker helpers and the DLLs they load).
     pub path: Vec<PathBuf>,
+    /// Extra child environment (the C/C++ compiler and archiver for `cc` build scripts).
+    pub env: Vec<(&'static str, PathBuf)>,
 }
 
 /// Host triple of the portable toolchain. It is the host, so Cargo gets no `--target`: the flags below then
@@ -390,9 +392,17 @@ impl Toolchain {
     ///   the loader never binds them and the first call (winit's start-up initializer) jumps to a hint/name RVA
     ///   and crashes before `main`. lld builds the import table itself and links them correctly.
     /// - `-Clink-self-contained=yes`: rust-mingw's CRT objects and import libraries (no system MinGW needed).
+    /// - `CC`/`CXX`/`AR` (plain and `_x86_64_pc_windows_gnu`): llvm-mingw's clang and llvm-ar for build scripts
+    ///   that compile C (cc-rs); otherwise cc-rs picks whatever `gcc`/`cc` is first on PATH.
     pub fn portable_gnu(root: &Path, llvm_mingw: &Path) -> Toolchain {
         let rustlib = root.join("lib/rustlib").join(PORTABLE_GNU_TARGET).join("bin");
         let flag = |name: &str, p: PathBuf| format!("-C{name}={}", p.display());
+        let bin = llvm_mingw.join("bin");
+        let (cc, cxx, ar) = (
+            bin.join("x86_64-w64-mingw32-clang.exe"),
+            bin.join("x86_64-w64-mingw32-clang++.exe"),
+            bin.join("llvm-ar.exe"),
+        );
         Toolchain {
             cargo: root.join("bin/cargo.exe"),
             rustc: root.join("bin/rustc.exe"),
@@ -407,6 +417,14 @@ impl Toolchain {
                 rustlib.clone(),
                 rustlib.join("self-contained"),
                 llvm_mingw.join("bin"),
+            ],
+            env: vec![
+                ("CC", cc.clone()),
+                ("CC_x86_64_pc_windows_gnu", cc),
+                ("CXX", cxx.clone()),
+                ("CXX_x86_64_pc_windows_gnu", cxx),
+                ("AR", ar.clone()),
+                ("AR_x86_64_pc_windows_gnu", ar),
             ],
         }
     }
@@ -483,6 +501,7 @@ pub fn recompile_with_toolchain(
             if let Ok(path) = std::env::join_paths(paths) {
                 c.env("PATH", path);
             }
+            c.envs(t.env.iter().map(|(k, v)| (k, v)));
         }
         if opts.offline {
             c.arg("--offline");
@@ -606,7 +625,7 @@ pub fn recompile_with_toolchain(
     std::fs::write(
         gdir.join("Cargo.toml"),
         format!(
-            "[package]\nname = \"game\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nrecomp = {{ path = {} }}\nlifted = {{ path = \"../lifted\" }}\nmkds_builder = {{ path = {} }}\nmkds_native = {{ path = {} }}\n",
+            "[package]\nname = \"game\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nrecomp = {{ path = {} }}\nlifted = {{ path = \"../lifted\" }}\nmkds_builder = {{ path = {}, default-features = false }}\nmkds_native = {{ path = {} }}\n",
             toml_path(&opts.source.join("2_native_game")),
             toml_path(&opts.source.join("1_build_tool")),
             toml_path(&native),

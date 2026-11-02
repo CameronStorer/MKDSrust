@@ -1,6 +1,8 @@
 //! Package contract shared by the builder, installer and native overlay.
 //! All screening happens before extraction; no archive paths are trusted.
+#[cfg(feature = "diff")]
 pub use qbsdiff;
+pub mod bspatch;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -520,7 +522,7 @@ impl Package {
                     if dsfiles::ext_of(name) != "bsdiff" {
                         reject("patch files must use the .bsdiff extension".into());
                     }
-                    match qbsdiff::Bspatch::new(bytes) {
+                    match bspatch::Bspatch::new(bytes) {
                         Err(_) => reject("not a bsdiff 4 patch (BSDIFF40)".into()),
                         Ok(p) if p.hint_target_size() > MAX_UNPACKED => reject("patch output would be larger than 400 MB".into()),
                         Ok(_) => {}
@@ -945,6 +947,7 @@ pub fn issues(m: &Manifest, active: &[Manifest]) -> Vec<String> {
     }
     warnings
 }
+#[cfg(feature = "diff")]
 pub fn make_patch(original: &Path, modified: &Path, out: &Path) -> Result<()> {
     let source = std::fs::read(original)?;
     let target = std::fs::read(modified)?;
@@ -982,7 +985,7 @@ pub fn pack(dir: &Path) -> Result<std::path::PathBuf> {
         if data.len() as u64 > MAX_ZIP {
             return Err("Patch too large".into());
         }
-        qbsdiff::Bspatch::new(&data)?;
+        bspatch::Bspatch::new(&data)?;
         contents.insert(e.source().into(), data);
     }
     if contents.len() > MAX_FILES
