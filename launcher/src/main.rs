@@ -1002,9 +1002,9 @@ impl Launcher {
         }
     }
     fn advanced(&mut self, ui: &mut egui::Ui) {
-        ui.label(format!("Data location: {}", self.dir.display()));
         ui.heading("Advanced");
         ui.label("Build tools and diagnostics");
+        ui.small(format!("Data folder: {}", self.dir.display()));
         ui.add_space(20.);
         let mut changed = ui
             .checkbox(&mut self.prefs.accuracy, "Accuracy mode (exact hardware)")
