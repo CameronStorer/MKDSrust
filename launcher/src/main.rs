@@ -435,6 +435,7 @@ impl Launcher {
         });
     }
     fn home(&mut self, ui: &mut egui::Ui) {
+        path_warning(ui);
         let width = ui.available_width();
         let (hero, _) = ui.allocate_exact_size(egui::vec2(width, 220.), egui::Sense::hover());
         let mut mesh = egui::Mesh::default();
@@ -924,6 +925,7 @@ impl Launcher {
         });
     }
     fn setup(&mut self, ui: &mut egui::Ui) {
+        path_warning(ui);
         ui.heading("Let's get you on the grid");
         ui.label("A one-time setup. Your ROM stays on your computer.");
         ui.add_space(20.);
@@ -1000,6 +1002,7 @@ impl Launcher {
         }
     }
     fn advanced(&mut self, ui: &mut egui::Ui) {
+        ui.label(format!("Data location: {}", self.dir.display()));
         ui.heading("Advanced");
         ui.label("Build tools and diagnostics");
         ui.add_space(20.);
@@ -1031,7 +1034,7 @@ impl Launcher {
             self.wizard = 3;
         }
         for (label, path) in [
-            ("Open launcher data", self.dir.clone()),
+            ("Open data folder", self.dir.clone()),
             ("Open build cache", build::default_cache_dir()),
             ("Open game folder", self.prefs.output.clone()),
             ("Open logs", self.prefs.output.join("logs")),
@@ -1234,6 +1237,7 @@ impl eframe::App for Launcher {
     }
 }
 fn main() -> eframe::Result<()> {
+    portable::initialize();
     let smoke_size = if std::env::args().any(|a| a == "--smoke-test") {
         std::env::var("MKDS_SMOKE_SIZE").ok().and_then(|s| {
             let (w, h) = s.split_once('x')?;
@@ -1425,5 +1429,11 @@ mod build_folder_tests {
         std::fs::write(root.join("MKDSrust/manifest.json"), "{}").unwrap();
         assert_eq!(build_folder(root), root.join("MKDSrust (2)"));
         assert_eq!(build_folder(&root.join("MKDSrust")), root.join("MKDSrust (2)"));
+    }
+}
+
+fn path_warning(ui: &mut egui::Ui) {
+    if std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.to_string_lossy().chars().count() > 60)).unwrap_or(false) {
+        ui.colored_label(Color32::YELLOW, "Long install path: move MKDSrust to a shorter folder like C:\\Games\\MKDSrust to avoid Windows path limits.");
     }
 }

@@ -175,7 +175,7 @@ pub fn source(data: &Path, log: &mut dyn FnMut(String)) -> Result<PathBuf, Strin
     use sha2::{Digest, Sha256};
     let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/source.tar.gz"));
     let id = mkds_builder::rom::hex(&Sha256::digest(bytes));
-    let dir = data.join("source").join(&id[..16]);
+    let dir = data.join("src").join(&id[..16]);
     if dir.join("complete").is_file() {
         return Ok(dir);
     }
@@ -229,3 +229,72 @@ pub fn install(data: &Path, log: &mut dyn FnMut(String)) -> Result<Toolchain, St
 fn toolchain(dir: &Path) -> Toolchain {
     Toolchain::portable_gnu(dir, &llvm_mingw(dir))
 }
+
+
+/// Select storage before any cached shared path is read. Migration always preserves originals.
+pub fn initialize() {
+    let Some(exe) = std::env::current_exe().ok() else { return };
+    let legacy = std::env::var_os("APPDATA").map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".")).join("MKDSrust");
+    let disabled = std::env::var_os("MKDSRUST_NOT_PORTABLE").is_some()
+        || legacy.join("MKDSRUST_NOT_PORTABLE").exists();
+    let (data, portable) = mkds_builder::paths::select(&exe, &legacy, disabled);
+    if portable && legacy.is_dir() && std::fs::read_dir(&data).map(|mut d| d.next().is_none()).unwrap_or(false) {
+        let answer = rfd::MessageDialog::new().set_title("Existing MKDSrust data")
+            .set_description("Copy existing data into this portable install? Yes: settings, controls, saves and launcher preferences. No: copy everything, including toolchain and cache (may take several minutes). Cancel: start fresh. Originals are always retained.")
+            .set_buttons(rfd::MessageButtons::YesNoCancel).show();
+        let result = match answer {
+            rfd::MessageDialogResult::Yes => {
+                (|| -> std::io::Result<()> {
+                    for name in ["settings.txt", "controls.txt", "launcher.json", "saves"] {
+                        let src = legacy.join(name); let dst = data.join(name);
+                        if src.is_dir() { mkds_builder::controls::migrate_data(&src, &dst)?; }
+                        else if src.is_file() { std::fs::copy(src, dst)?; }
+                    }
+                    Ok(())
+                })()
+            }
+            rfd::MessageDialogResult::No => {
+                mkds_builder::controls::migrate_data(&legacy, &data).and_then(|_| {
+                    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+                        mkds_builder::controls::migrate_data(&PathBuf::from(local).join("MKDSrust/cache"), &data.join("cache"))?;
+                    }
+                    Ok(())
+                })
+            }
+            _ => Ok(()),
+        };
+        if let Err(e) = result {
+            rfd::MessageDialog::new().set_title("Migration incomplete").set_description(format!("{e}\nOriginal data is intact. Copied files remain available.")).show();
+        }
+    }
+    if portable {
+        let prefs = data.join("launcher.json");
+        if let Ok(bytes) = std::fs::read(&prefs) {
+            if let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                if let Some(output) = value["output"].as_str() {
+                    let path = PathBuf::from(output);
+                    if path.is_absolute() && !path.exists() {
+                        value["output"] = serde_json::Value::String(exe.parent().unwrap().join("games").join(path.file_name().unwrap_or_default()).to_string_lossy().into_owned());
+                        if let Ok(bytes) = serde_json::to_vec_pretty(&value) { let _ = std::fs::write(&prefs, bytes); }
+                    }
+                }
+            }
+        }
+    }
+    // Initialization runs before worker threads or egui start.
+    unsafe {
+        std::env::set_var("MKDS_DATA_DIR", &data);
+        if portable {
+            std::env::set_var("MKDS_PORTABLE", "1");
+            std::env::set_var("CARGO_HOME", data.join("cache/cargo"));
+            let temp = data.join("cache/tmp");
+            if std::fs::create_dir_all(&temp).is_ok() {
+                std::env::set_var("TEMP", &temp);
+                std::env::set_var("TMP", &temp);
+            }
+        }
+        else { std::env::remove_var("MKDS_PORTABLE"); }
+    }
+}
+

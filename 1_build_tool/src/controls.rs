@@ -176,7 +176,7 @@ impl Controls {
 /// Shared MKDSrust data directory. Legacy data is copied without replacing newer files.
 pub fn default_path() -> Option<PathBuf> {
     static PATH: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
-    PATH.get_or_init(migrated_default_path).clone()
+    PATH.get_or_init(|| crate::paths::data_dir().map(|p| p.join("controls.txt")).or_else(migrated_default_path)).clone()
 }
 
 fn migrated_default_path() -> Option<PathBuf> {
@@ -280,3 +280,4 @@ mod tests {
         assert!(std::fs::read_to_string(&path).unwrap().contains("L = A"));
     }
 }
+

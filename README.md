@@ -166,3 +166,5 @@ See [the documentation](https://docs.mkdsrust.com) for technical details,
 research, verification procedures and the roadmap.
 
 Community mods: [mkdsrust.com](https://mkdsrust.com). Making one: [Making your first mod](https://docs.mkdsrust.com/guides--first-mod.html).
+
+Portable Windows installs keep data next to MKDSrust.exe; see [README.txt](README.txt) for storage, migration and fallback details.

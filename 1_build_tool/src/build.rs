@@ -60,6 +60,7 @@ pub fn cargo_path() -> Result<PathBuf, BuildError> {
 }
 
 pub fn default_output(info: &RomInfo) -> PathBuf {
+    if std::env::var_os("MKDS_PORTABLE").is_some() { if let Some(data) = mkds_builder::paths::data_dir() { return data.parent().unwrap_or(&data).join("games/MKDSrust"); } }
     home().join("MKDS Builds").join(&info.sha256[..16])
 }
 
@@ -133,6 +134,7 @@ fn recomp_without_defaults(ws: &Path, with_interpreter: bool) -> Result<usize, B
 
 /// Default cache: LocalAppData on Windows, Library/Caches on macOS, XDG cache on Linux.
 pub fn default_cache_dir() -> PathBuf {
+    if std::env::var_os("MKDS_PORTABLE").is_some() { if let Some(data) = mkds_builder::paths::data_dir() { return data.join("cache"); } }
     let base = if cfg!(windows) {
         std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
     } else if cfg!(target_os = "macos") {
@@ -1164,6 +1166,7 @@ fn launch_command(
     extra: &[String],
 ) -> Command {
     let mut command = Command::new(bundle.join(exe));
+    if let Some(data) = mkds_builder::paths::data_dir() { command.env("MKDS_DATA_DIR", data); }
     match m["launch_args"].as_array() {
         Some(template) => {
             let assets = bundle.join(m["assets"]["path"].as_str().unwrap_or("assets"));
@@ -1615,3 +1618,5 @@ mod tests {
         );
     }
 }
+
+

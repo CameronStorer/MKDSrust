@@ -219,7 +219,7 @@ pub fn default_path() -> Option<PathBuf> {
 
 /// Use the same platform directory selection as controls/settings, under the game name.
 pub fn save_folder() -> Option<PathBuf> {
-    default_path()?.parent()?.parent().map(|p| p.join("MKDSrust").join("saves"))
+    default_path()?.parent().map(|p| p.join("saves"))
 }
 
 #[cfg(test)]
@@ -267,3 +267,4 @@ mod tests {
         }
     }
 }
+

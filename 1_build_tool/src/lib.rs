@@ -11,3 +11,4 @@ pub mod modpkg;
 
 extern crate self as mkds_builder;
 pub mod build;
+pub mod paths;
