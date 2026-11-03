@@ -8,6 +8,8 @@ mod pad;
 pub mod window;
 mod script;
 mod mods;
+mod watch;
+pub mod race;
 use mkds_builder::controls::{self, Controls};
 use mkds_builder::settings::{Layout, Renderer, Settings};
 use window::HostLink;
@@ -51,6 +53,10 @@ pub struct Options {
     pub software_renderer: Option<bool>,
     /// `--scale N`: 3D and screen resolution as a multiple of the DS's 256x192 (GPU renderer, 1-8).
     pub scale: Option<u32>,
+    /// `--race SPEC`: skip the menus and start a race (see `race.rs`).
+    pub race: Option<race::RaceSpec>,
+    /// `--list-courses`: print the game's course table (id and internal name) and exit.
+    pub list_courses: bool,
 }
 
 impl Options {
@@ -61,6 +67,8 @@ impl Options {
         while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--headless" => result.headless = true,
+                "--race" => result.race = Some(race::RaceSpec::parse(&args.next().ok_or("--race needs a spec, e.g. course=1,character=0")?)?),
+                "--list-courses" => result.list_courses = true,
                 "--mute" => result.mute = true,
                 "--stats" => result.stats = true,
                 "--diagnostic-arm7-interpreter" => result.diagnostic_arm7_interpreter = true,
@@ -498,6 +506,9 @@ fn emulate(
     }
     let mut last_frame = u64::MAX;
     let mut last_snapshot = u64::MAX;
+    let mut watch = watch::Watch::from_env();
+    let mut poke = watch::Poke::from_env();
+    let mut race = options.race.clone().map(race::Race::new);
     if let Some(dir) = &options.snapshots {
         std::fs::create_dir_all(dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
     }
@@ -553,6 +564,27 @@ fn emulate(
                 let mut left = remaining;
                 while left > 0 && !session.machine.host_quit && session.frame_number() == frame_before {
                     left -= session.step(left)?;
+                }
+                if session.frame_number() != frame_before {
+                    if options.list_courses && session.frame_number() >= 10 {
+                        for (id, name) in race::courses(&mut session.machine) {
+                            println!("{id}	{name}");
+                        }
+                        break;
+                    }
+                    if let Some(r) = race.as_mut() {
+                        r.frame(session.frame_number(), &mut session.machine)?;
+                    }
+                }
+                if let Some(p) = poke.as_mut() {
+                    if session.frame_number() != frame_before {
+                        p.apply(session.frame_number(), &mut session.machine);
+                    }
+                }
+                if let Some(w) = watch.as_mut() {
+                    if session.frame_number() != frame_before {
+                        w.check(session.frame_number(), &mut session.machine);
+                    }
                 }
                 if let Some(dir) = &options.snapshots {
                     let frame = session.frame_number();
