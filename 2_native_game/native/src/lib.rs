@@ -486,9 +486,12 @@ fn emulate(
             last = buttons;
         }));
     }
+    // buttons a mod script holds this frame (`input.set`); they replace the player's for that frame
+    let script_input: Rc<std::cell::Cell<Option<u16>>> = Rc::new(std::cell::Cell::new(None));
     if let Some(window) = &window {
         let w = Arc::clone(window);
         let live_input = scripted.is_none();
+        let held = Rc::clone(&script_input);
         let bindings = Rc::clone(&bindings);
         let pads = Rc::clone(&pads);
         let mut last_poll = Instant::now();
@@ -503,7 +506,7 @@ fn emulate(
             let (buttons, touch) = if live_input { input(&w, &bindings, &pads) } else { (0, None) };
             Some(recomp::machine::IdleAction {
                 quit,
-                buttons: live_input.then_some(buttons),
+                buttons: live_input.then_some(held.get().unwrap_or(buttons)),
                 touch,
             })
         }));
@@ -567,6 +570,9 @@ fn emulate(
                 let remaining = options.instruction_limit.map_or(16_384, |n| {
                     n.saturating_sub(session.stats.instructions).min(16_384) as u32
                 });
+                if let Some(b) = script_input.get() {
+                    session.machine.set_input(b, None);
+                }
                 // Stop at a new frame so every frame is presented: without an instruction budget one step can
                 // hold a whole frame of guest work, and `advance(remaining)` then ran past frames unseen.
                 let frame_before = session.frame_number();
@@ -585,7 +591,7 @@ fn emulate(
                         r.frame(session.frame_number(), &mut session.machine)?;
                     }
                     if let Some(s) = scripts.as_mut() {
-                        s.frame(session.frame_number(), &mut session.machine);
+                        script_input.set(s.frame(session.frame_number(), &mut session.machine));
                     }
                 }
                 if let Some(p) = poke.as_mut() {
