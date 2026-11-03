@@ -396,6 +396,10 @@ impl Toolchain {
     /// - `-Clink-self-contained=yes`: rust-mingw's CRT objects and import libraries (no system MinGW needed).
     /// - `CC`/`CXX`/`AR` (plain and `_x86_64_pc_windows_gnu`): llvm-mingw's clang and llvm-ar for build scripts
     ///   that compile C (cc-rs); otherwise cc-rs picks whatever `gcc`/`cc` is first on PATH.
+    /// - C++ (Luau, for mod scripts): llvm-mingw's libc++, linked statically so the game needs no extra DLL.
+    ///   `CXXSTDLIB=static:-bundle=c++` makes cc-rs ask for libc++ (not GNU's libstdc++, which this toolchain
+    ///   doesn't have) as a static library resolved at the final link; the linker searches llvm-mingw's
+    ///   library folder and also gets `libc++abi` and `libunwind`.
     pub fn portable_gnu(root: &Path, llvm_mingw: &Path) -> Toolchain {
         let rustlib = root.join("lib/rustlib").join(PORTABLE_GNU_TARGET).join("bin");
         let flag = |name: &str, p: PathBuf| format!("-C{name}={}", p.display());
@@ -413,6 +417,9 @@ impl Toolchain {
                 flag("linker", rustlib.join("rust-lld.exe")),
                 "-Clinker-flavor=ld.lld".into(),
                 "-Clink-self-contained=yes".into(),
+                format!("-Clink-arg=-L{}", llvm_mingw.join("x86_64-w64-mingw32/lib").display()),
+                format!("-Clink-arg={}", llvm_mingw.join("x86_64-w64-mingw32/lib/libc++abi.a").display()),
+                format!("-Clink-arg={}", llvm_mingw.join("x86_64-w64-mingw32/lib/libunwind.a").display()),
             ],
             path: vec![
                 root.join("bin"),
@@ -427,6 +434,8 @@ impl Toolchain {
                 ("CXX_x86_64_pc_windows_gnu", cxx),
                 ("AR", ar.clone()),
                 ("AR_x86_64_pc_windows_gnu", ar),
+                ("CXXSTDLIB", PathBuf::from("static:-bundle=c++")),
+                ("CXXSTDLIB_x86_64_pc_windows_gnu", PathBuf::from("static:-bundle=c++")),
             ],
         }
     }
@@ -1250,7 +1259,10 @@ mod tests {
         assert!(f.iter().all(|a| !a.contains("--target")));
         assert!(f[0].starts_with("-Cdlltool=C:/tc dir/llvm-mingw") && f[0].ends_with("x86_64-w64-mingw32-dlltool.exe"));
         assert!(f[1].starts_with("-Clinker=C:/tc dir") && f[1].contains("x86_64-pc-windows-gnu") && f[1].ends_with("rust-lld.exe"));
-        assert_eq!(f[2..], ["-Clinker-flavor=ld.lld", "-Clink-self-contained=yes"]);
+        assert_eq!(f[2..4], ["-Clinker-flavor=ld.lld", "-Clink-self-contained=yes"]);
+        // C++ (Luau) links llvm-mingw's libc++ statically
+        assert!(f[4].starts_with("-Clink-arg=-LC:/tc dir/llvm-mingw") && f[5].ends_with("libc++abi.a") && f[6].ends_with("libunwind.a"));
+        assert!(t.env.iter().any(|(k, v)| *k == "CXXSTDLIB" && v.to_str() == Some("static:-bundle=c++")));
         assert!(t.path.iter().any(|p| p.ends_with("self-contained")));
         assert!(t.path.contains(&Path::new("C:/tc dir/llvm-mingw").join("bin")));
     }

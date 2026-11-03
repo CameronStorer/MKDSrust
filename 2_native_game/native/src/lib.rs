@@ -10,6 +10,7 @@ mod script;
 mod mods;
 mod watch;
 pub mod race;
+mod scripting;
 use mkds_builder::controls::{self, Controls};
 use mkds_builder::settings::{Layout, Renderer, Settings};
 use window::HostLink;
@@ -57,6 +58,8 @@ pub struct Options {
     pub race: Option<race::RaceSpec>,
     /// `--list-courses`: print the game's course table (id and internal name) and exit.
     pub list_courses: bool,
+    /// `--script FILE` (repeatable): Luau scripts to run (see `scripting.rs`), besides enabled mods' scripts.
+    pub scripts: Vec<PathBuf>,
 }
 
 impl Options {
@@ -69,6 +72,7 @@ impl Options {
                 "--headless" => result.headless = true,
                 "--race" => result.race = Some(race::RaceSpec::parse(&args.next().ok_or("--race needs a spec, e.g. course=1,character=0")?)?),
                 "--list-courses" => result.list_courses = true,
+                "--script" => result.scripts.push(args.next().ok_or("--script needs a .luau file")?.into()),
                 "--mute" => result.mute = true,
                 "--stats" => result.stats = true,
                 "--diagnostic-arm7-interpreter" => result.diagnostic_arm7_interpreter = true,
@@ -509,6 +513,11 @@ fn emulate(
     let mut watch = watch::Watch::from_env();
     let mut poke = watch::Poke::from_env();
     let mut race = options.race.clone().map(race::Race::new);
+    // mod scripts follow the same rule as mod files; `--script` files always run
+    let mod_dir = mods::allowed(options.headless)
+        .then(|| std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from)))
+        .flatten();
+    let mut scripts = scripting::Scripts::load(&options.scripts, mod_dir.as_deref());
     if let Some(dir) = &options.snapshots {
         std::fs::create_dir_all(dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
     }
@@ -574,6 +583,9 @@ fn emulate(
                     }
                     if let Some(r) = race.as_mut() {
                         r.frame(session.frame_number(), &mut session.machine)?;
+                    }
+                    if let Some(s) = scripts.as_mut() {
+                        s.frame(session.frame_number(), &mut session.machine);
                     }
                 }
                 if let Some(p) = poke.as_mut() {
