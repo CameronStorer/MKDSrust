@@ -1,5 +1,5 @@
 //! Production generator: user's ROM + address-only function metadata -> a Cargo workspace of
-//! lifted Rust (`part_NN` crates + a `lifted` crate holding `lifted::LIFTED`), with a complete
+//! lifted Rust (`code_<area>` crates + a `lifted` crate holding `lifted::LIFTED`), with a complete
 //! account of every metadata entry. Contains no game data; everything comes from the supplied ROM.
 //!
 //! ```text
@@ -343,6 +343,42 @@ const RUST_KEYWORDS: &[&str] = &[
 
 /// Gives every raised function its dictionary name (else `sub_<segment>_<address>`), unique across the
 /// generated code: a name used more than once gets the segment and address appended.
+/// The game area a function's crate is named after, from the first word of its readable name.
+/// Unknown or generic names go to `misc`; the ARM7 program has its own crate.
+fn area_of(name: &str, arm7: bool) -> &'static str {
+    if arm7 {
+        return "arm7";
+    }
+    let head = name.split('_').next().unwrap_or("").to_ascii_lowercase();
+    match head.as_str() {
+        "kart" | "driver" | "drift" => "kart",
+        "item" | "shell" | "banana" => "item",
+        "race" | "lap" | "racer" | "rank" => "race",
+        "course" | "kcl" | "map" | "nkm" | "path" => "course",
+        "cpu" | "ai" => "cpu_racer",
+        "battle" | "balloon" | "shine" => "battle",
+        "mission" | "boss" => "mission",
+        "results" | "award" | "trophy" => "results",
+        "hud" => "hud",
+        "camera" => "camera",
+        "ghost" | "record" | "replay" => "ghost",
+        "obj" | "object" | "npc" => "obj",
+        "effect" | "particle" | "spl" => "effect",
+        "menu" | "title" | "scene" | "flow" | "text" | "bmg" => "menu",
+        "sound" | "snd" | "stream" | "mic" | "sseq" | "seq" => "sound",
+        "net" | "wl" | "wm" | "wifi" | "mb" | "dwc" | "crypto" | "dgt" | "ssl" | "http" | "soc" | "wcm" => "net",
+        "save" | "nvram" | "backup" => "save",
+        "input" | "pad" | "tp" | "touch" | "key" => "input",
+        "os" | "thread" | "irq" | "itcm" | "svc" | "crt0" | "init" => "sys_os",
+        "fs" | "fsi" | "card" | "rom" | "file" | "archive" | "ctrdg" => "sys_fs",
+        "gx" | "gxs" | "g2d" | "g3d" | "nns" | "g2" | "g3" | "display" | "draw" | "vram" | "oam" | "bg" | "tex" => "sys_gfx",
+        "fx" | "mtx" | "vec" | "float" | "math" | "sin" | "cos" | "sqrt" | "div" | "rand" => "sys_math",
+        "mem" | "memory" | "mi" | "libc" | "heap" | "alloc" | "str" | "list" => "sys_mem",
+        "pm" | "rtc" | "spi" | "hw" | "power" | "pxi" => "sys_hw",
+        _ => "misc",
+    }
+}
+
 fn name_t1(funcs: &mut [Lifted]) {
     let ident = |f: &Lifted| -> Option<String> {
         let n = CALL_NAMES.get()?.get(&(f.segment.clone(), f.entry & !1))?;
@@ -1486,7 +1522,7 @@ fn run() -> Result<ExitCode, String> {
     if let Ok(dir) = std::fs::read_dir(&args.out) {
         for e in dir.flatten() {
             let n = e.file_name().to_string_lossy().into_owned();
-            if n.starts_with("part_") || n == "lifted" || n == "game" || n == "layout" || n == "direct" {
+            if n.starts_with("part_") || n.starts_with("code_") || n == "lifted" || n == "game" || n == "layout" || n == "direct" {
                 let _ = std::fs::remove_dir_all(e.path());
             }
         }
@@ -1519,18 +1555,32 @@ fn run() -> Result<ExitCode, String> {
     name_t1(&mut funcs);
     untyped_field_widths(&mut funcs);
 
-    // balanced parts by emitted source size
+    // one crate per game area (kart, item, menu, ...), split by emitted source size. The function
+    // table keeps the original order, so only the place where the code lives changes.
     let recomp_dep = format!("recomp = {{ path = {} }}", toml_path(&recomp_path));
-    let mut parts: Vec<Vec<&Lifted>> = vec![Vec::new()];
-    let mut cur = 0usize;
-    for f in &funcs {
-        let len = f.code.len() + f.t1.as_ref().map_or(0, |t| t.len());
-        if cur > 0 && cur + len > args.part_bytes {
-            parts.push(Vec::new());
-            cur = 0;
+    let mut by_area: BTreeMap<&'static str, Vec<usize>> = BTreeMap::new();
+    for (i, f) in funcs.iter().enumerate() {
+        by_area.entry(area_of(&f.t1_name, f.arm7)).or_default().push(i);
+    }
+    let mut parts: Vec<(String, Vec<usize>)> = Vec::new();
+    for (area, idx) in &by_area {
+        let mut chunks: Vec<Vec<usize>> = vec![Vec::new()];
+        let mut cur = 0usize;
+        for &i in idx {
+            let f = &funcs[i];
+            let len = f.code.len() + f.t1.as_ref().map_or(0, |t| t.len());
+            if cur > 0 && cur + len > args.part_bytes {
+                chunks.push(Vec::new());
+                cur = 0;
+            }
+            cur += len;
+            chunks.last_mut().unwrap().push(i);
         }
-        cur += len;
-        parts.last_mut().unwrap().push(f);
+        let n = chunks.len();
+        for (k, c) in chunks.into_iter().enumerate() {
+            let name = if n == 1 { format!("code_{area}") } else { format!("code_{area}_{}", k + 1) };
+            parts.push((name, c));
+        }
     }
     let gen_id = generator_id();
     let rom_sha = info.sha256.clone();
@@ -1562,16 +1612,18 @@ fn run() -> Result<ExitCode, String> {
     let mut part_of: HashMap<String, String> = HashMap::new();
     let mut deps = String::new();
     let mut bytes = 0usize;
-    for (n, chunk) in parts.iter().enumerate().filter(|(_, c)| !c.is_empty()) {
-        let name = format!("part_{n:02}");
+    let mut table_rows: Vec<String> = vec![String::new(); funcs.len()];
+    for (name, chunk) in parts.iter().filter(|(_, c)| !c.is_empty()) {
+        let name = name.clone();
         let dir = args.out.join(&name);
         std::fs::create_dir_all(dir.join("src")).map_err(|e| e.to_string())?;
         put(dir.join("Cargo.toml"), &format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n{recomp_dep}\nlayout = {{ path = \"../layout\" }}\n{direct_dep}"))?;
         let mut src = String::from("//! Generated from the user's ROM (lifted machine code).\n#![allow(non_snake_case, non_upper_case_globals, unused, clippy::all)]\n#[allow(unused_imports)]\nuse layout::*;\n");
-        for f in chunk {
+        for &i in chunk {
+            let f = &funcs[i];
             part_of.insert(f.id.clone(), name.clone());
             src.push_str(&f.code);
-            let t = if f.arm7 { &mut table7 } else { &mut table };
+            let t = &mut table_rows[i];
             if let Ok(t1) = &f.t1 {
                 // listed first: the dispatcher maps a block to the first row that has it, so the
                 // raised version runs at the entry and the translation everywhere else
@@ -1585,6 +1637,10 @@ fn run() -> Result<ExitCode, String> {
         put(dir.join("src/lib.rs"), &src)?;
         let _ = writeln!(deps, "{name} = {{ path = \"../{name}\" }}");
         members.push(name);
+    }
+    // the table in the original function order: the dispatcher maps a block to the first row that has it
+    for (f, r) in funcs.iter().zip(&table_rows) {
+        (if f.arm7 { &mut table7 } else { &mut table }).push_str(r);
     }
     table.push_str("];\n");
     table7.push_str("];\n");
