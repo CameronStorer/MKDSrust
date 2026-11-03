@@ -137,3 +137,343 @@ RaceGoalState,,,*0x0217B3C0,,global pointer *0x0217B3C0,"end-of-race goal presen
 MenuChoiceBox,,,*0x0217D3D4,,global pointer *0x0217D3D4,"two-way choice box: input, resources, highlight (menu_choice_*)"
 MenuReturnButton,,,*0x0217D3D8,,global pointer *0x0217D3D8,"the menu return button: press/appear/release animation, palette (menu_return_*)"
 ArchiveLoader,,,*0x0217A9F0,,global pointer *0x0217A9F0,"file-system archive loader: load buffer range, budgets, overlay archive requests (fs_*loader*, fs_*load_buffer)"
+AnimEntryArrays,,,,,,from the struct review of untyped arguments (2026-11-03): output record of allocated entry arrays sized by four count bytes
+AnimatedQuad,,,,,,from the struct review of untyped arguments (2026-11-03): Rotates four base vertices by a table angle into 4 current vertices with counter at +0x2C
+AxisRotationSpec,,,,,,from the struct review of untyped arguments (2026-11-03): Reads an angle and an axis selector 0/1/2 then builds an X/Y/Z rotation matrix.
+BalloonManager,,,,,,from the struct review of untyped arguments (2026-11-03): Balloon manager constructor: creates spawners then fills per-racer records starting at +0xa4 from a config pointer at +0x9c.
+BalloonObject,,,,,,from the struct review of untyped arguments (2026-11-03): Balloon grows by step each tick and sets a grown flag at scale 0x1000; same object as the balloon tick.
+BezierSegment,,,,,,from the struct review of untyped arguments (2026-11-03): output 84-byte path segment record filled from points and normalized directions
+BgAffineParams,,,,,,from the struct review of untyped arguments (2026-11-03): Output of the affine setup: packed 2x2 matrix halves and start position
+BlockHeap,,,,,,from the struct review of untyped arguments (2026-11-03): heap object with block list at +0x24 and flag bit at +0x36
+BlockList,,,,,,from the struct review of untyped arguments (2026-11-03): heap block list with head and tail pointers
+BlueChargeFlare,,,,,,from the struct review of untyped arguments (2026-11-03): Per-frame charge flare: active gate at +0x44 and s16 counter at +0x4a compared to 8
+ByteBuffer,,,,,,from the struct review of untyped arguments (2026-11-03): Allocates data of given size and stores pointer at +0 and capacity at +4
+CPContext,,,,,,from the struct review of untyped arguments (2026-11-03): Writes saved divider and square root hardware registers back from the block
+CallbackDispatcher,,,,,,from the struct review of untyped arguments (2026-11-03): Walks the list at +4 and invokes the callback at +0xC of each node.
+CameraIntroKey,,,,,,from the struct review of untyped arguments (2026-11-03): Initialises intro camera key state: record pointer at +0 and four-point path at +4 and three-point path at +0x40 then counters.
+CameraObject,,,,,,from the struct review of untyped arguments (2026-11-03): Advances to the next course camera record held at +0x218 and calls the camera dispatcher.
+CardCommon,,,,,,from the struct review of untyped arguments (2026-11-03): Backup transfer task works in 0x100-byte chunks through a buffer at +0x120 using src +0x1C dst +0x20 length +0x24 and flags at +0x114.
+CardRomPageCache,,,,,,from the struct review of untyped arguments (2026-11-03): Copies out of a 0x200-byte cached ROM page whose address is at +8 and data buffer at +0x20.
+ChainState,,,,,,from the struct review of untyped arguments (2026-11-03): Sub-block at object +0xA4 with link count at +0x20 and positions pointer at +0x44 drawn per link
+ContinuousWheelEffect,,,,,,from the struct review of untyped arguments (2026-11-03): Two active/counter pairs with 10-frame delay then an end callback; kart movement flags come from r1
+CourseCamera,,,,,,from the struct review of untyped arguments (2026-11-03): Course camera record: +0x40 selects the path from the course path table and +0x42 is read as a signed value.
+CoursePathCursor,,,,,,from the struct review of untyped arguments (2026-11-03): Path parameter advanced by step and wrapped at 0x1000 with segment counter against the path point count; 3 point slots of 12 bytes at +0.
+CourseRecordEntry,,,,,,"from the struct review of untyped arguments (2026-11-03): Unpacked 32-byte record: 10/7/7-bit time parts, 20 bytes at +4, valid flag at +0x18."
+CpuItemState,,,,,,from the struct review of untyped arguments (2026-11-03): First argument of the CPU item handler where the flag at +0x10 is set to 1.
+CpuItemTimers,,,,,,from the struct review of untyped arguments (2026-11-03): Pair of countdown timers (+0 and +2) with table-entry pointers (+4 and +8) reloaded with a random offset; init picks entry by item hand request
+CpuItemUseState,,,,,,from the struct review of untyped arguments (2026-11-03): CPU item-use state object whose timer and params pointer are reset then rearmed from a random roll
+CpuRouteState,,,,,,from the struct review of untyped arguments (2026-11-03): CPU route follower: node pointer array walk and kart looked up by the slot at +0x1c
+CpuSpeedState,,,,,,from the struct review of untyped arguments (2026-11-03): Speed state embedded in the CPU driver at +0xE8 and written with the capped speed
+CurveFollower,,,,,,from the struct review of untyped arguments (2026-11-03): Indexes 0x54-byte curve records through +0 and +0xC and blends with t at +0x14
+DListNode,,,,,,from the struct review of untyped arguments (2026-11-03): Circular doubly linked node: new node spliced after it under an interrupt mask
+DelayTask,,,,,,from the struct review of untyped arguments (2026-11-03): counts ticks up to a duration then clears active and destroys the task
+DisplayHalfwordRecord,,,,,,from the struct review of untyped arguments (2026-11-03): 40-byte record of 20 halfwords reset to defaults by this function
+DisplayModeRecord,,,,,,from the struct review of untyped arguments (2026-11-03): 68-byte mode record reset and filled from a mode id through switches
+DisplayState,,,,,,from the struct review of untyped arguments (2026-11-03): display setup block saved as the global display state; holds a settings record then two mode records
+DynTable,,,,,,from the struct review of untyped arguments (2026-11-03): Append inserts at the position given by the first word which is the element count.
+EffectAnimObject,,,,,,from the struct review of untyped arguments (2026-11-03): Resets three animation handles and three scale fields to 0x1000 and spawns emitters at +0x74.
+EffectEmitter,,,,,,from the struct review of untyped arguments (2026-11-03): Position from source plus kart offset; frame byte at +0x9a counts up to +0x99 then sets done bit
+EffectEmitterGroup,,,,,,from the struct review of untyped arguments (2026-11-03): group holding arrays of emitters at +0x10/+0x18 whose +0x24 visibility flag is cleared
+EffectSceneObject,,,,,,from the struct review of untyped arguments (2026-11-03): init of a scene effect object with three animation handles and scale triple
+EffectStatusRecord,,,,,,from the struct review of untyped arguments (2026-11-03): function fills a 12-byte output record from two linked-value lookups
+ExmemcntSaved,,,,,,from the struct review of untyped arguments (2026-11-03): Saves two bus ownership fields read from EXMEMCNT into a two-word record
+ExpHeap,,,,,,from the struct review of untyped arguments (2026-11-03): walks the free block list starting at +0x24
+FSFileId,,,,,,from the struct review of untyped arguments (2026-11-03): Output pair of an archive pointer and a file id.
+FadeRamp,,,,,,from the struct review of untyped arguments (2026-11-03): state machine with tick counting up to a duration producing a 0..16 level ramp
+FadeTask,,,,,,from the struct review of untyped arguments (2026-11-03): advances a frame counter against a duration and indexes a pattern table by a byte to compute a fade level
+FontCharMapBlock,,,,,,from the struct review of untyped arguments (2026-11-03): character map block with code range type and per-type lookup
+FontTextContext,,,,,,from the struct review of untyped arguments (2026-11-03): font text state with a font pointer and a character reader callback used to measure a line
+FrameHeap,,,,,,from the struct review of untyped arguments (2026-11-03): frame heap object with area bounds and cursors and a saved state list
+FsOverlayInfo,,,,,,from the struct review of untyped arguments (2026-11-03): Overlay table entry copied from the table: id and ram address first then extra status words after the 32-byte header.
+FsTableRef,,,,,,from the struct review of untyped arguments (2026-11-03): Pair of archive pointer and table offset used to read table data through the archive read callback.
+G2dAffineState,,,,,,from the struct review of untyped arguments (2026-11-03): Writes two 2x2 fixed-point matrices built from sin and cos into +0x14 and +0x24.
+G2dAnimCallback,,,,,,from the struct review of untyped arguments (2026-11-03): small callback block zeroed inside the animation controller at +0x1c
+G2dAnimController,,,,,,from the struct review of untyped arguments (2026-11-03): animation controller whose frame index is current frame pointer minus the sequence frame table base
+G2dCell,,,,,,from the struct review of untyped arguments (2026-11-03): cell record whose count and 6-byte object entries are copied into OAM
+G2dCellAnim,,,,,,from the struct review of untyped arguments (2026-11-03): cell animation object that starts with a controller then holds the current cell transform at +0x38
+G2dCellBank,,,,,,from the struct review of untyped arguments (2026-11-03): Relocation pass adding the base to three offset fields then to 16-byte entries (count at +0 pointer at +0xC) of an animation/cell resource.
+G2dCellRecord,,,,,,from the struct review of untyped arguments (2026-11-03): output record filled with a pointer and two sign-extended 12-bit coordinates read from a cell bank entry
+G2dCellTransform,,,,,,from the struct review of untyped arguments (2026-11-03): transform block cleared then scale set to 1.0 at +4 and +8
+G2dCharCanvas,,,,,,from the struct review of untyped arguments (2026-11-03): character canvas with data pointer size and 4 or 8 bit depth that glyphs are blitted into
+G2dEntryNode,,,,,,from the struct review of untyped arguments (2026-11-03): Recursive draw entry emitter compares an index against the u16 at +6 of the node.
+G2dGlyphBlitJob,,,,,,from the struct review of untyped arguments (2026-11-03): ten-word record with clipping to an 8-tile range and a depth check against 4
+G2dList,,,,,,from the struct review of untyped arguments (2026-11-03): two-word list header zeroed
+G2dResourceSet,,,,,,from the struct review of untyped arguments (2026-11-03): bind function stores loaded character cell bank and palette resources into slots
+G2dSpriteTexture,,,,,,from the struct review of untyped arguments (2026-11-03): texture upload descriptor with format bits and data pointer committed to texture VRAM
+G2dTextCanvas,,,,,,from the struct review of untyped arguments (2026-11-03): calls the function pointer stored at +0x18 of the canvas object
+G2dVariableRecordTable,,,,,,from the struct review of untyped arguments (2026-11-03): Relocation pass over a table of variable-size records with a count at +0 and offset fields at +4 and +0xC.
+G3dAnimObject,,,,,,from the struct review of untyped arguments (2026-11-03): Initializes the animation object base: frame 0 ratio 0x1000 and the animation resource pointer at +8.
+G3dJointAnimResult,,,,,,from the struct review of untyped arguments (2026-11-03): 88-byte joint result with flags at +0 a 3x3 matrix at +0x28 and translation at +0x4c.
+G3dJointTransform,,,,,,from the struct review of untyped arguments (2026-11-03): cache entry receiving a translation triple and a valid flag bit
+G3dMatAnimResult,,,,,,from the struct review of untyped arguments (2026-11-03): Output record: texture image parameter at +0x10 and size/ratio fields at +0x2c..+0x34.
+G3dRenderObj,,,,,,from the struct review of untyped arguments (2026-11-03): Draw entry clears three 8-byte masks at +0x3C/+0x44/+0x4C and fills them from lists at +8 +0x10 +0x18 when flag 0x10 is set.
+G3dRenderState,,,,,,"from the struct review of untyped arguments (2026-11-03): Material command handler: reads the command byte stream pointer at +0, advances it by 2 and uses the resource at +0xD8."
+G3dResAnimHeader,,,,,,from the struct review of untyped arguments (2026-11-03): Resource header matched against a table of (byte at +0 and halfword at +2) to pick the init function.
+G3dResJointAnim,,,,,,from the struct review of untyped arguments (2026-11-03): Joint animation resource with flags at +8 and offset words at +0xC and +0x10 plus a halfword offset table at +0x14.
+G3dResModel,,,,,,from the struct review of untyped arguments (2026-11-03): Loops over the material count byte at +0x18 calling the per-material bit setter.
+G3dResModelSet,,,,,,from the struct review of untyped arguments (2026-11-03): Block with a dictionary at +8 whose entries are models checked one by one.
+G3dResTexture,,,,,,from the struct review of untyped arguments (2026-11-03): Loads texture data to VRAM using keys and offsets at +8..+0x28 and marks the ready flags.
+GhostRecordBlock,,,,,,from the struct review of untyped arguments (2026-11-03): Reads valid bit0 of +8 then 3-byte packed entries starting at +0x20
+GhostSlotEntry,,,,,,"from the struct review of untyped arguments (2026-11-03): Unpacked slot entry being packed: 10-bit u16 and two 7-bit parts form the time, 20 bytes at +4"
+GhostSlotPacked,,,,,,"from the struct review of untyped arguments (2026-11-03): Packed 28-byte slot entry: bit0 valid, packed time bitfield at +4, 20 bytes copied to +8"
+GxBgControlParams,,,,,,from the struct review of untyped arguments (2026-11-03): mode word at +0 switches the BG control register layout from six halfword parameters
+GxDisplayConfig,,,,,,from the struct review of untyped arguments (2026-11-03): layer geometry initialiser filling halfword parameters in a display config block
+GxResourceDescriptor,,,,,,from the struct review of untyped arguments (2026-11-03): Output descriptor of eight words filled from a source resource and derived shifts.
+HashTable,,,,,,from the struct review of untyped arguments (2026-11-03): Loops over bucket pointer array at +0 for the count at +4 and sums per-bucket sizes.
+HeapBlock,,,,,,from the struct review of untyped arguments (2026-11-03): heap block header with size and prev and next links
+HttpContext,,,,,,"from the struct review of untyped arguments (2026-11-03): HTTP request object: byte at +0 gates cancel, then locks mutex at +0xA28, sets cancel word at +0xA40 and joins thread at +0x968."
+InputPackedStream,,,,,,from the struct review of untyped arguments (2026-11-03): Resets count and cursor and sets mode 2 (decode)
+InputRecord,,,,,,from the struct review of untyped arguments (2026-11-03): Getter of the u16 at +4; same record is then checked at +0x10 and +0xc by sibling predicates.
+ItemHeldRecord,,,,,,from the struct review of untyped arguments (2026-11-03): Acquire fills kind and count and hold flag from the item kind table row and clears the timer.
+ItemHeldSlot,,,,,,from the struct review of untyped arguments (2026-11-03): slot resets kinds to 0x13 and decrements the class count via the kind table
+ItemOwnerGroup,,,,,,from the struct review of untyped arguments (2026-11-03): walks a pointer array of member records and dispatches by an owner type value
+ItemPenaltyState,,,,,,from the struct review of untyped arguments (2026-11-03): state ==1 increments a tick counter at +4 and checks +0x20 before net slot result lookups
+KartEffectEmitterPair,,,,,,from the struct review of untyped arguments (2026-11-03): Frees and respawns two emitter handles stored at +0 and +4 and sets a ready flag at +0x3c
+KartEffectTimers,,,,,,from the struct review of untyped arguments (2026-11-03): Block of mostly u16 timers all cleared at once
+KartEffectTransform,,,,,,from the struct review of untyped arguments (2026-11-03): output object receiving a position from a parent pointer plus offset and three s16 rotation values
+KartEmitterEffect,,,,,,from the struct review of untyped arguments (2026-11-03): Kart-bound emitter tick with a u32 counter at +0x98 (up to 5) unlike the byte layout of EffectEmitter
+KartEmitterPairs,,,,,,from the struct review of untyped arguments (2026-11-03): Spawns two emitters from the source at +0x50 into handles at +0x10
+KartEmitterRequest,,,,,,from the struct review of untyped arguments (2026-11-03): Request record: +0x20 is a kart slot passed to kart_get_by_slot and +0x24..+0x2c multiply kart axes
+KartEmitterSpawnRecord,,,,,,from the struct review of untyped arguments (2026-11-03): Output record filled with values scaled from kart axes while spawning an effect emitter
+KartPreviewPage,,,,,,from the struct review of untyped arguments (2026-11-03): allocates the sub-buffers of a kart preview page and stores them at these offsets
+KartRenderRecord,,,,,,from the struct review of untyped arguments (2026-11-03): Initialiser allocates a 0x90 byte buffer into +0x1c and fills it from tables
+KartSelectRecord,,,,,,from the struct review of untyped arguments (2026-11-03): Init clears a record of ids (set to -1) and many u16 animation values used by the kart select screen
+KartSpeedScaleRecord,,,,,,from the struct review of untyped arguments (2026-11-03): Five-word record initialised from a course-scale value and the constant 0x5000
+KartSpeedState,,,,,,from the struct review of untyped arguments (2026-11-03): Seven-word speed state initialiser (same one embedded in the kart by the scaled speed init)
+KeyedEntryList,,,,,,from the struct review of untyped arguments (2026-11-03): searches 8-byte entries for one whose u16 at +6 equals key+1
+Lcg64State,,,,,,from the struct review of untyped arguments (2026-11-03): 64-bit multiply-add random generator (state*mul+inc) used to shuffle respawn indices.
+LibcDecimal,,,,,,from the struct review of untyped arguments (2026-11-03): decimal record copied and combined with digits and exponent at +2 and +4
+ListHeader,,,,,,from the struct review of untyped arguments (2026-11-03): List header whose u16 at +0xa is the node link offset used after unlinking a node
+MBGameRegistry,,,,,,from the struct review of untyped arguments (2026-11-03): Five pointer fields then a u8 with the icon data read through +0xc and +0x10 while building the game info
+MICAutoParam,,,,,,from the struct review of untyped arguments (2026-11-03): Standard SDK microphone auto sampling parameter block with checks on buffer alignment size and rate
+MapObjClassHeader,,,,,,from the struct review of untyped arguments (2026-11-03): record whose four fields are copied into the object size broadphase id anim and draw distance
+MbBusLock,,,,,,from the struct review of untyped arguments (2026-11-03): Second word is passed to OS_RestoreInterrupts and first is tested for the unlock call
+MbChildMessage,,,,,,from the struct review of untyped arguments (2026-11-03): Child-to-parent message encoded by type with a byte or halfword value at +2
+MbChildToParentMsg,,,,,,from the struct review of untyped arguments (2026-11-03): Decoded message record with a type byte copied from the packet and a value at +2 for the variants
+MbFragmentReceiver,,,,,,from the struct review of untyped arguments (2026-11-03): Copies one received fragment into the data buffer at +0x18 using fragment index and the fragment payload size
+MbGameEntry,,,,,,from the struct review of untyped arguments (2026-11-03): Node appended to a linked game list through the +0x28 next pointer with data stored at +0x2c and flags at +0x30/+0x32
+MbParentMessage,,,,,,from the struct review of untyped arguments (2026-11-03): Decoded parent-to-child message: type byte then two 16-bit fields for type 4
+MbParentRequestState,,,,,,from the struct review of untyped arguments (2026-11-03): Switches on request kind at +0 (11 kinds) and builds the matching MB packet using the node mask at +8
+MbParentToChildMsg,,,,,,from the struct review of untyped arguments (2026-11-03): Encoder reads a type byte then for the 16-bit variants serialises two u16 params at +2 and +4 into a byte stream
+MbSegmentBlockTable,,,,,,from the struct review of untyped arguments (2026-11-03): Walks three u16 segment starts at +0xc..+0x10 against the total at +0x12 and u32 entries at +0 to map a block index
+MbSegmentRecord,,,,,,from the struct review of untyped arguments (2026-11-03): Clamps offset and length against +0 and +0xC then copies from +4 to +8 or zero-fills +8
+MbTaskRecord,,,,,,from the struct review of untyped arguments (2026-11-03): Task record whose busy bit at +4 is checked then it is filled before queueing
+Md5Context,,,,,,from the struct review of untyped arguments (2026-11-03): Finalize pads using the bit count at +0x10 and encodes the digest then clears 0x58 bytes.
+MemBlockHeader,,,,,,from the struct review of untyped arguments (2026-11-03): block header with padding bits in +2 and size at +4
+MemHeapHeader,,,,,,from the struct review of untyped arguments (2026-11-03): stores signature range and flags and links the heap into the arena list
+MemRange,,,,,,from the struct review of untyped arguments (2026-11-03): address range start and end of the freed region
+MemStream,,,,,,from the struct review of untyped arguments (2026-11-03): output stream with buffer pointer and capacity and write position that is advanced after the copy
+MenuActorSet,,,,,,from the struct review of untyped arguments (2026-11-03): Allocates a 56-byte sub-object into +0x20 and selects an animation using +0x10 and +0x18.
+MenuAnimJob,,,,,,from the struct review of untyped arguments (2026-11-03): per-job tick counter incremented each call with phases at 5 and 10 and a done return
+MenuButtonState,,,,,,from the struct review of untyped arguments (2026-11-03): Getter for the state halfword at +4 called from the availability check on the same record.
+MenuCursorAnim,,,,,,from the struct review of untyped arguments (2026-11-03): Stores limit and the from/to s16 pair then tail-calls the cursor state transition
+MenuCursorBox,,,,,,from the struct review of untyped arguments (2026-11-03): Tests a point against two byte rectangles; same object the cursor hit resolver passes in.
+MenuDialogConfig,,,,,,from the struct review of untyped arguments (2026-11-03): Ten setup words read in order; +0 and +0x14 gate creating the dialog manager and the choice manager respectively.
+MenuPageResources,,,,,,from the struct review of untyped arguments (2026-11-03): init allocates a heap and a subheap then zeroes three triples of list pointers
+MenuRangeCursor,,,,,,from the struct review of untyped arguments (2026-11-03): Initialises a record with value 0 and bounds 40..45 and flag 0; advance function increments field 0 and wraps at field 2.
+MenuRect,,,,,,from the struct review of untyped arguments (2026-11-03): Stores x and y and computed width and height bytes then clears +4 and sets +6 to 0xFF00.
+MenuTask,,,,,,from the struct review of untyped arguments (2026-11-03): Wrapper that runs the screen update then stores the screen result halfword at +4; same pattern in several sibling wrappers.
+MenuTileLayer,,,,,,from the struct review of untyped arguments (2026-11-03): reads a resource pointer at +0x2c to fill a tile attribute table
+MessageResource,,,,,,from the struct review of untyped arguments (2026-11-03): Frees the loaded file pointer at +8 and returns the resource to a ring buffer.
+MicCaptureState,,,,,,from the struct review of untyped arguments (2026-11-03): A 0x400-byte sample buffer followed by an auto-sampling parameter block (type buffer size rate loop callback arg) for mic init
+MinimapMarker,,,,,,from the struct review of untyped arguments (2026-11-03): Output of a kart to map-coordinate conversion in minimap code written at +0x10..+0x1c
+MissionAnimSet,,,,,,from the struct review of untyped arguments (2026-11-03): Allocates an anim object into +0x1c using fields +0x10 and +0x18
+MissionEnemyGroup,,,,,,from the struct review of untyped arguments (2026-11-03): loops over a pointer array at +0 with u16 count at +4 and runs per-actor mission enemy routines
+MissionTargetList,,,,,,from the struct review of untyped arguments (2026-11-03): array of mission enemy object pointers plus u16 count iterated and set up each
+MtxFx22,,,,,,from the struct review of untyped arguments (2026-11-03): 2x2 fx32 matrix converted to 16-bit affine parameters
+MtxFx33,,,,,,from the struct review of untyped arguments (2026-11-03): Nine fixed-point words multiplied against the vector in 20.12 form.
+MtxFx43,,,,,,from the struct review of untyped arguments (2026-11-03): Quaternion to rotation matrix: 9 rotation terms then zero translation
+NarcHeader,,,,,,from the struct review of untyped arguments (2026-11-03): Header scanned for its blocks starting at +0xC.
+NarcMount,,,,,,from the struct review of untyped arguments (2026-11-03): Mount fills three block pointers found by scanning an archive image for the three block types.
+NatPacket,,,,,,from the struct review of untyped arguments (2026-11-03): received NAT negotiation packet; flag bytes at +0x12/+0x13 are tested
+NatSession,,,,,,from the struct review of untyped arguments (2026-11-03): NAT negotiation session: state at +0x10 peer ip/port at +0x2c/+0x30 and timeout at +0x28
+NdsRomHeader,,,,,,from the struct review of untyped arguments (2026-11-03): Copies +0x24 and +0x34 (entry addresses in a ROM header) and builds three segment records from it (header block is 0x160 bytes)
+NetArpPacket,,,,,,from the struct review of untyped arguments (2026-11-03): Checks hardware type protocol type lengths and opcode then compares the target address
+NetAuthInitParams,,,,,,from the struct review of untyped arguments (2026-11-03): Init copies 20 bytes from the start into the auth state and calls the allocator at +0x24.
+NetBuffer,,,,,,from the struct review of untyped arguments (2026-11-03): Output buffer descriptor filled after allocation: base and cursor and end and size.
+NetBufferRegion,,,,,,from the struct review of untyped arguments (2026-11-03): stores a base pointer and zero fill count then returns the aligned size
+NetCallbackNode,,,,,,from the struct review of untyped arguments (2026-11-03): Queued callback node invoked through +0 with data and arg and switched by kind at +0xC
+NetCallbackRecord,,,,,,from the struct review of untyped arguments (2026-11-03): Record whose +4 function pointer is called with +0 and +8
+NetClientHandle,,,,,,from the struct review of untyped arguments (2026-11-03): Handle whose first word is the client context; request list head read at context+0x424
+NetCommandBuffers,,,,,,from the struct review of untyped arguments (2026-11-03): two buffer segments filled by copy and advanced
+NetConnection,,,,,,from the struct review of untyped arguments (2026-11-03): Sets state 0x65 on failure and passes peer id at +0xC to the profile search builder
+NetConnectionState,,,,,,from the struct review of untyped arguments (2026-11-03): 12-byte block cleared then filled and stored as a global
+NetConnectionStatus,,,,,,from the struct review of untyped arguments (2026-11-03): Output record filled with a global value an elapsed time and another global
+NetDhcpPacket,,,,,,from the struct review of untyped arguments (2026-11-03): bootp layout of 0xEC bytes then options built in order
+NetEventRecord,,,,,,from the struct review of untyped arguments (2026-11-03): Matches a record by kind below 10 and compares +4 +8 +9 against arguments.
+NetFieldList,,,,,,from the struct review of untyped arguments (2026-11-03): Appends an 8-byte entry at index count and bumps the count if below capacity.
+NetGrowBuffer,,,,,,from the struct review of untyped arguments (2026-11-03): Growable character buffer: data pointer capacity and length updated on append
+NetHandle,,,,,,from the struct review of untyped arguments (2026-11-03): Handle whose first word points to the main network context used for appending to its request buffer
+NetHandshakePacket,,,,,,from the struct review of untyped arguments (2026-11-03): Handshake packet whose message type at +0x24 is compared with 7 and whose big-endian fields at +0x26/+0x28 are validated
+NetHttpRequest,,,,,,from the struct review of untyped arguments (2026-11-03): Builds a request string from two string pointers and allocates the buffer at +0x928.
+NetIcmpHeader,,,,,,from the struct review of untyped arguments (2026-11-03): ICMP echo reply fields at +4/+6 matched against a pending socket
+NetInterfaceConfig,,,,,,from the struct review of untyped arguments (2026-11-03): words byte-swapped into the global ip stack settings
+NetIpConfig,,,,,,from the struct review of untyped arguments (2026-11-03): 88-byte output block filled with ip netmask gateway and dns values and a dhcp flag
+NetIpHeader,,,,,,from the struct review of untyped arguments (2026-11-03): Source and destination addresses at +0xC and +0x10 byte-swapped and validated as unicast
+NetKeyValuePair,,,,,,from the struct review of untyped arguments (2026-11-03): hash table element whose two pointers are both released by the free callback
+NetMsgHeader,,,,,,from the struct review of untyped arguments (2026-11-03): Validates that two header words equal fixed expected values.
+NetOperation,,,,,,from the struct review of untyped arguments (2026-11-03): Operation record tested for kind 0x64 or 0x69 and its +4 word.
+NetPacketBuffer,,,,,,from the struct review of untyped arguments (2026-11-03): query packet byte buffer with a length counter stored at +0x800
+NetPacketHeader,,,,,,from the struct review of untyped arguments (2026-11-03): header filled with a value a kind and a two byte tag
+NetPeerAddressQuery,,,,,,from the struct review of untyped arguments (2026-11-03): Visitor context: key at +0 and found record stored at +4
+NetPeerMessage,,,,,,from the struct review of untyped arguments (2026-11-03): message record whose id selects a peer and whose text goes to the peer callback
+NetPeerNameQuery,,,,,,from the struct review of untyped arguments (2026-11-03): Visitor context: two strings compared then found record stored at +8 and flag at +0xC
+NetPeerRecord,,,,,,from the struct review of untyped arguments (2026-11-03): Frees the cached profile record held at +0xC and clears the pointer
+NetPlayerRecordPacked,,,,,,from the struct review of untyped arguments (2026-11-03): unpacks bit-fields of a received player record into per-player bytes
+NetProfileCacheEntry,,,,,,from the struct review of untyped arguments (2026-11-03): constructor zeroing fields of a cache entry
+NetProfileClient,,,,,,from the struct review of untyped arguments (2026-11-03): object whose first word is a base-class offset pointer used for virtual-base member access; profile count query
+NetProfileInfo,,,,,,from the struct review of untyped arguments (2026-11-03): 240-byte profile block of seven string pointers copied with string duplication
+NetProfileRecord,,,,,,from the struct review of untyped arguments (2026-11-03): Destination of bounded text copies at several byte offsets
+NetProtocolInfo,,,,,,from the struct review of untyped arguments (2026-11-03): Two length-prefixed string copies at +0/+4 and +0x28/+0x2c plus a constant 1 at +0x24
+NetQueryService,,,,,,from the struct review of untyped arguments (2026-11-03): service object holding the packet callback called with user data
+NetQueuedPacket,,,,,,from the struct review of untyped arguments (2026-11-03): queued packet range with start offset and length
+NetRacerPacket,,,,,,from the struct review of untyped arguments (2026-11-03): Received racer packet: low bits of byte 0 pick the slot and later bytes are copied into the race sync block.
+NetRequest,,,,,,from the struct review of untyped arguments (2026-11-03): request object whose flag byte at +0x14 is masked and set while parsing the response
+NetRequestManager,,,,,,from the struct review of untyped arguments (2026-11-03): pops pending requests and sends them while in-flight is below the max
+NetScanSlotEntry,,,,,,from the struct review of untyped arguments (2026-11-03): entries of 0x24 bytes written while scanning 32 slot bytes
+NetScanStorageConfig,,,,,,from the struct review of untyped arguments (2026-11-03): config block whose buffer and size are aligned and stored into the wireless state
+NetSendBuffer,,,,,,from the struct review of untyped arguments (2026-11-03): Send path checks the flag at +0x28 and the used range from +0x30 and +0x34 then the list at +0x38.
+NetServerBrowser,,,,,,from the struct review of untyped arguments (2026-11-03): appends one byte to a small field id array and bumps a count in the browser object
+NetServerList,,,,,,from the struct review of untyped arguments (2026-11-03): Server browser object: state at +0 compared with 1 and the server is pushed onto the list at +8.
+NetServerRecord,,,,,,from the struct review of untyped arguments (2026-11-03): Server record whose update time at +0x1c is stamped from the millisecond clock before a query is built.
+NetSessionConfig,,,,,,from the struct review of untyped arguments (2026-11-03): two packed bit-field words are unpacked into the session record and 0x14 bytes at +0xc are copied
+NetSlotBuffers,,,,,,from the struct review of untyped arguments (2026-11-03): clears eight 8-byte slots and seven counters and resets state at +0x34
+NetSlotRecord,,,,,,from the struct review of untyped arguments (2026-11-03): Writes a peer's six address bytes and flags into a network slot record; same layout the receive matcher scans.
+NetSocket,,,,,,from the struct review of untyped arguments (2026-11-03): socket teardown closes the handle and destroys the connection hash and table
+NetSocketCommand,,,,,,from the struct review of untyped arguments (2026-11-03): command whose +4 is the socket pointer
+NetSslConnection,,,,,,from the struct review of untyped arguments (2026-11-03): Hello parser stores the found session pointer at +0 and the chosen cipher suite at +6 and copies a 32-byte random to +8
+NetSslSession,,,,,,from the struct review of untyped arguments (2026-11-03): TLS record decrypt: cipher suite id at +6 selects MD5 or SHA1 MAC
+NetStringKey,,,,,,from the struct review of untyped arguments (2026-11-03): table element holding one string pointer released by the free callback
+NetTcpHeader,,,,,,from the struct review of untyped arguments (2026-11-03): TCP header halfwords byte-swapped into the new connection record (ports then sequence number plus one)
+NetTimestampSet,,,,,,from the struct review of untyped arguments (2026-11-03): Four 64-bit tick values subtracted and divided by a clock constant to get a latency.
+NetTlvBlock,,,,,,from the struct review of untyped arguments (2026-11-03): Big-endian length at +0 then TLV records starting at +8 read with net_read_next_tlv
+NetTlvHeader,,,,,,from the struct review of untyped arguments (2026-11-03): writes a byte-swapped length and type then pads the payload to alignment
+NetTlvMessageHeader,,,,,,from the struct review of untyped arguments (2026-11-03): Eight header bytes cleared then payload length minus 8 stored at +0 before the TLV payload at +8
+NetTransferParams,,,,,,from the struct review of untyped arguments (2026-11-03): six words and a byte copied into the transfer session block at init
+NetUdpHeader,,,,,,from the struct review of untyped arguments (2026-11-03): Ports and checksum word of the UDP header matched against sockets
+NetWorkerConfig,,,,,,from the struct review of untyped arguments (2026-11-03): fields feed OS thread creation and message queue init
+NitroBinaryHeader,,,,,,from the struct review of untyped arguments (2026-11-03): walks the data blocks of a font resource and relocates pointers by base address
+NkmArea,,,,,,from the struct review of untyped arguments (2026-11-03): Course area test: axis vectors dotted against offset and compared to half extents; +0x42 selects box or other shape.
+NnsAnimData,,,,,,from the struct review of untyped arguments (2026-11-03): animation data block with frame count and relative data offsets
+NnsAnimObject,,,,,,from the struct review of untyped arguments (2026-11-03): animation object whose data and target are applied as a texture palette pattern
+NnsAnimTrack,,,,,,from the struct review of untyped arguments (2026-11-03): animation track descriptor with flags and a data offset relative to the animation block
+NnsBinaryFileHeader,,,,,,from the struct review of untyped arguments (2026-11-03): Resolves a block offset from the file header and checks the block signature
+NnsMatAnmResult,,,,,,from the struct review of untyped arguments (2026-11-03): Packs sampled colour and alpha values into words at +4 +8 and +0xC
+NnsMaterialData,,,,,,from the struct review of untyped arguments (2026-11-03): material record read while loading a material
+NnsResDict,,,,,,from the struct review of untyped arguments (2026-11-03): Compact dictionary search: tree nodes at +8 and entry table offset at +6
+NnsResPltt,,,,,,from the struct review of untyped arguments (2026-11-03): Uploads palette data from +0x38 sized by +0x30 and sets a loaded bit at +0x32
+NnsShapeData,,,,,,from the struct review of untyped arguments (2026-11-03): shape record whose display list offset and size are sent to the geometry engine
+OSAlarm,,,,,,from the struct review of untyped arguments (2026-11-03): reads the 64-bit fire time and programs the hardware timer; matches an SDK alarm object
+OSMutexQueue,,,,,,from the struct review of untyped arguments (2026-11-03): Pops the head mutex linking through +0x10/+0x14 and fixes the tail pointer
+OSOwnerInfo,,,,,,from the struct review of untyped arguments (2026-11-03): Output filled from the firmware user data block: color and birthday bytes then a 20-byte name plus its length and a 52-byte comment plus its length
+OSThreadQueue,,,,,,from the struct review of untyped arguments (2026-11-03): Wakes every thread on the queue then clears head and tail
+OamBuffer,,,,,,from the struct review of untyped arguments (2026-11-03): draw routine using the entry count at +0x400 and 8-byte entries from the start
+ObjLoadContext,,,,,,from the struct review of untyped arguments (2026-11-03): Model loader stores a small resource kind code at +0x18 depending on whether the resource loaded.
+ObjPtrList,,,,,,from the struct review of untyped arguments (2026-11-03): Iterates an array of object pointers (+0) up to a signed count (+4) and updates a field of each.
+ObjRecordRef,,,,,,from the struct review of untyped arguments (2026-11-03): Output pair: pointer to a 40-byte course record by index and a valid flag set to 1
+OptionalByte,,,,,,"from the struct review of untyped arguments (2026-11-03): Output pair (present flag, 7-bit value) decoded from packed byte"
+OsId,,,,,,from the struct review of untyped arguments (2026-11-03): Three-word id whose first word holds bitfields set by os_id_set_bitfield and word1 is stored at +4
+OsIdBlock,,,,,,from the struct review of untyped arguments (2026-11-03): Copies the block's word at +0x1C into an output ID value and sets its state
+OsIdRecord,,,,,,from the struct review of untyped arguments (2026-11-03): Copies a 12-byte id to +0x10 sets a flag bit at +0x20 and stores a CRC32 of the first 0x3c bytes at +0x3c
+OsIdValue,,,,,,from the struct review of untyped arguments (2026-11-03): Extracts a bit field from the first word of a 12-byte ID value
+PackedCourseRecord,,,,,,from the struct review of untyped arguments (2026-11-03): 28-byte packed record: bitfield word then 20 bytes copied from +8; time fields packed as 10+7+7 bits.
+PackedInputStream,,,,,,from the struct review of untyped arguments (2026-11-03): Reset zeroes index and cursor and mode of a packed input stream.
+PaletteFadeState,,,,,,from the struct review of untyped arguments (2026-11-03): Stores a target colour at +0 and the chosen bit mask at +0xe for the palette fade.
+PathDirectionTracker,,,,,,from the struct review of untyped arguments (2026-11-03): Sets two node pointers then a normalised direction vec3 at +8 from the node positions.
+PathFollower,,,,,,"from the struct review of untyped arguments (2026-11-03): Reads +0 segment table pointer, +0xC segment index, +0x10/+0x14 params, +0x18 reverse flag then negates the direction."
+PathSpline,,,,,,from the struct review of untyped arguments (2026-11-03): Four 12-byte path points at +0 filled in a loop then counters at +0x30/+0x34/+0x38 initialised.
+PointerList,,,,,,from the struct review of untyped arguments (2026-11-03): loops over an array of enemy pointers with a u16 count at +4
+PokeyObject,,,,,,from the struct review of untyped arguments (2026-11-03): Pokey draw: switches on +0x1FC (0..3) and loops over segments from +0x1D0 with the map-object flag word at +2
+PreviewViewState,,,,,,from the struct review of untyped arguments (2026-11-03): resets a preview view to default scale and angle values
+Quaternion,,,,,,from the struct review of untyped arguments (2026-11-03): Output of quaternion-from-two-vectors: four fx32 stored with w being half the sqrt term
+RTCDate,,,,,,from the struct review of untyped arguments (2026-11-03): range checked year month day and weekday then converted to a day count
+RTCTime,,,,,,from the struct review of untyped arguments (2026-11-03): computes (hour*60+minute)*60+second
+RaceRecord,,,,,,from the struct review of untyped arguments (2026-11-03): time at +0..+3 and a flag byte at +0x18 choosing placeholder digits
+RaceTime,,,,,,from the struct review of untyped arguments (2026-11-03): Packed time compared as ms + 1000*byte3 + 60000*byte2.
+RacerProfileRecord,,,,,,from the struct review of untyped arguments (2026-11-03): record whose bit flags at +8 are updated and with a 0x200 byte emblem copied to +0x30
+Rand32Context,,,,,,from the struct review of untyped arguments (2026-11-03): 64-bit linear congruential generator state with multiplier and increment
+RangeCursor,,,,,,from the struct review of untyped arguments (2026-11-03): advances a cursor between start and end and sets a flag
+Rc4State,,,,,,from the struct review of untyped arguments (2026-11-03): Initialises the permutation bytes at the pointer in +8 from a key and zeroes the indices.
+RecordInfoBlock,,,,,,from the struct review of untyped arguments (2026-11-03): Zero-fills a 0x24-byte block then sets bitfield defaults and clears flag bits at +0x22
+RecordRowTable,,,,,,from the struct review of untyped arguments (2026-11-03): +4 is a table of 36-byte rows of 18 u16 copied by this function and built by the compact loader
+RecordTime,,,,,,from the struct review of untyped arguments (2026-11-03): Output of unpacked 10-bit and two 7-bit fields written to +0/+2/+3
+RedChargeFlare,,,,,,from the struct review of untyped arguments (2026-11-03): Same pattern as blue flare with active at +0x40 and s16 counter at +0x48 compared to 10
+ResourceBlockReader,,,,,,from the struct review of untyped arguments (2026-11-03): reader state: entry pointer remaining count and type set up from a block header
+ResultsList,,,,,,from the struct review of untyped arguments (2026-11-03): count at +4 with index buffer at +0xc and record array at +0x10 walked in a draw loop
+RingBuffer,,,,,,from the struct review of untyped arguments (2026-11-03): Push writes the item at +4 plus index*4 and advances the write index modulo the capacity and halts if it meets the read index.
+RingQueue,,,,,,from the struct review of untyped arguments (2026-11-03): fixed capacity ring queue of 16-byte slots; index wraps at capacity
+RingQueueEntry,,,,,,from the struct review of untyped arguments (2026-11-03): 16-byte queue slot dispatched through a handler table by its first word
+RouteCursor,,,,,,from the struct review of untyped arguments (2026-11-03): Holds two route node pointers whose link counts at +0x24/+0x26 are read for chase path stepping.
+RsaPrivateKey,,,,,,from the struct review of untyped arguments (2026-11-03): 12-word key block whose length and pointer pairs are decoded into big integers
+SaveRecord,,,,,,from the struct review of untyped arguments (2026-11-03): checks valid bit of +8 then copies 0x14 bytes from +0xc
+ScaledTimer,,,,,,from the struct review of untyped arguments (2026-11-03): small init that stores constants at +0 +2 +4 and +8
+SceneHistory,,,,,,from the struct review of untyped arguments (2026-11-03): s16 scene ids at +0 +2 +4 match the scene history record rotated by the scene loop
+ScopedHeapCallback,,,,,,from the struct review of untyped arguments (2026-11-03): Creates a sub-heap swaps the global heap handle runs the callbacks at +4 and +8 then destroys the heap and restores the saved handle.
+ScreenBounds,,,,,,from the struct review of untyped arguments (2026-11-03): Touch position compared against +0/+4 horizontally and +2/+6 vertically so it is a bounds box.
+ScreenPoint,,,,,,from the struct review of untyped arguments (2026-11-03): Output buffer receiving the touch x and y halfwords from the touch state.
+ScreenRect,,,,,,from the struct review of untyped arguments (2026-11-03): Copies the box and adds x+width and y+height to build a bounds box for the triggered test.
+ScreenSize,,,,,,from the struct review of untyped arguments (2026-11-03): Width and height halfwords added to the origin.
+Sha1Context,,,,,,from the struct review of untyped arguments (2026-11-03): Reset stores the five standard initial state words and clears counters and buffer length.
+SockAddrIn,,,,,,from the struct review of untyped arguments (2026-11-03): output socket address with byte-swapped port at +2 and address at +4
+SoundArchiveSet,,,,,,from the struct review of untyped arguments (2026-11-03): Stores three archive ids then a handle at +0xc and the loaded player data pointer at +0x10
+SoundBgmController,,,,,,from the struct review of untyped arguments (2026-11-03): Reapplies the stored state at +8 by calling the BGM set-state function with this object
+SoundBgmPlayer,,,,,,from the struct review of untyped arguments (2026-11-03): Restarts course music: byte at +0xB is the sequence player id (0xFF means none)
+SoundCaptureRequest,,,,,,from the struct review of untyped arguments (2026-11-03): Capture buffer callback computes chunk addresses from size and index invalidates caches and calls the user callback
+SoundDopplerTracker,,,,,,from the struct review of untyped arguments (2026-11-03): reset writes -1 -1 0 and 6 into four words
+SoundEmitterOwner,,,,,,from the struct review of untyped arguments (2026-11-03): sets or clears bit 0 of the flag half word of an emitter
+SoundEventQueue,,,,,,from the struct review of untyped arguments (2026-11-03): table of 16-byte entries with a callback and two arguments walked and then reset
+SoundEventTable,,,,,,from the struct review of untyped arguments (2026-11-03): Stores count then allocates entries_ptr as count 16-byte entries each cleared with key -1
+SoundGroupList,,,,,,from the struct review of untyped arguments (2026-11-03): Clears 16 group words then the count at +0x40
+SoundHandle,,,,,,from the struct review of untyped arguments (2026-11-03): Sound object whose id and archive fields select a subrecord
+SoundHeapList,,,,,,from the struct review of untyped arguments (2026-11-03): Allocates a 0x14-byte node from the heap at +0 and appends it to the list head at +4
+SoundIdPair,,,,,,from the struct review of untyped arguments (2026-11-03): Pair of ids read at +0 and +4 and passed to the sound start request
+SoundInterpolator,,,,,,from the struct review of untyped arguments (2026-11-03): four-word state zeroed to restart a value interpolation
+SoundObject,,,,,,from the struct review of untyped arguments (2026-11-03): Object bound to a free player slot: +8 receives the slot pointer and the slot stores the object
+SoundParameterRecord,,,,,,from the struct review of untyped arguments (2026-11-03): Init routine writes three words and byte defaults 0x28 0x50 0x7f
+SoundPitchEase,,,,,,from the struct review of untyped arguments (2026-11-03): three words at +8 +0xc +0x10 eased toward a target each call
+SoundRecordCursor,,,,,,from the struct review of untyped arguments (2026-11-03): Iteration cursor advanced through records and sub-entries
+SoundRecordPool,,,,,,from the struct review of untyped arguments (2026-11-03): Pool header storing count base and element size then walking elements to init each handle
+SoundSlotRecord,,,,,,from the struct review of untyped arguments (2026-11-03): Record fully initialised here with a handle init at +8 and 0xFF/-1 sentinels
+SoundStream,,,,,,from the struct review of untyped arguments (2026-11-03): Clears flag bits at +0x110 and a pointer word at +0x14C when a stream file is torn down
+SoundVoicePool,,,,,,from the struct review of untyped arguments (2026-11-03): Pool of records walked by stride with a per-record age incremented
+SoundVoiceRecord,,,,,,from the struct review of untyped arguments (2026-11-03): Array of 0x1C-byte voice records each reset with a handle at +8 and byte defaults ending in 0x7f
+SoundVolumeFade,,,,,,from the struct review of untyped arguments (2026-11-03): steps a 20.12 fixed point volume toward a target by the step
+SoundWaveGroups,,,,,,from the struct review of untyped arguments (2026-11-03): Stores a heap allocation id at +0xc of the same wave-group record whose first three words hold group ids.
+SplAnimSet,,,,,,from the struct review of untyped arguments (2026-11-03): Table of per-attribute animation blocks (+4 scale +8 colour +0xC opacity +0x10 texture)
+SplBehaviorConverge,,,,,,from the struct review of untyped arguments (2026-11-03): target position and rate used to move the particle toward the target
+SplBehaviorGravity,,,,,,from the struct review of untyped arguments (2026-11-03): three s16 values added directly to the particle acceleration
+SplBehaviorMagnet,,,,,,from the struct review of untyped arguments (2026-11-03): target position plus strength pulls particle toward a point
+SplBehaviorPlane,,,,,,from the struct review of untyped arguments (2026-11-03): plane height damping and a 2-bit mode that selects kill or bounce
+SplBehaviorRandom,,,,,,from the struct review of untyped arguments (2026-11-03): random impulse strengths per axis and a period divided into the particle age
+SplDrawArgs,,,,,,from the struct review of untyped arguments (2026-11-03): particle draw callback context; +0x40 leads to the emitter whose +0x20 is its resource
+SplList,,,,,,from the struct review of untyped arguments (2026-11-03): doubly linked list header with head and tail and count; pops the head node
+SplListNode,,,,,,from the struct review of untyped arguments (2026-11-03): node linked into the list at head
+SplTextureEntry,,,,,,from the struct review of untyped arguments (2026-11-03): 20-byte texture record unpacked into texture register writes
+SprintfBuffer,,,,,,from the struct review of untyped arguments (2026-11-03): Output state with remaining capacity and write pointer advanced as bytes are appended
+SpriteGroup,,,,,,from the struct review of untyped arguments (2026-11-03): Returns the 8 byte attribute entry at index from the array pointer at +8.
+SpriteSlot,,,,,,from the struct review of untyped arguments (2026-11-03): Init fills an attribute record and stores its pointers at +0xc and +0x10.
+StreamBlock,,,,,,from the struct review of untyped arguments (2026-11-03): Stream block with a state and a mask updated on completion
+StreamMessage,,,,,,from the struct review of untyped arguments (2026-11-03): Request message with command and sub-command words and a slot mask
+StreamPlayer,,,,,,from the struct review of untyped arguments (2026-11-03): Stream manager: block lists at +0x46c0 and pending count at +0x46e4
+StringInputStream,,,,,,from the struct review of untyped arguments (2026-11-03): input stream callback advancing a string cursor and setting an end flag
+TPCalibrateParam,,,,,,from the struct review of untyped arguments (2026-11-03): Touch panel calibration output computed from raw and screen points
+TPData,,,,,,from the struct review of untyped arguments (2026-11-03): Output touch sample after calibration with x y clamped 0..255 and touch/validity copied
+TextDrawContext,,,,,,from the struct review of untyped arguments (2026-11-03): +4/+8/+0xc passed to the text bounds measure routine as font and spacing before aligning
+TextureSrtParams,,,,,,from the struct review of untyped arguments (2026-11-03): Texture SRT send: low three bits of the first word pick one of eight matrix builders that read this record
+TimeParts,,,,,,from the struct review of untyped arguments (2026-11-03): minutes seconds and milliseconds words combined into total milliseconds
+TrafficTypeDef,,,,,,from the struct review of untyped arguments (2026-11-03): Per-type tuning table stored at object +0x154 whose first words multiply the object scale
+UiPositionedElement,,,,,,from the struct review of untyped arguments (2026-11-03): Whole units position adds the base object's +0x10 to the relative fixed value at +4.
+VecFx32,,,,,,from the struct review of untyped arguments (2026-11-03): Three fixed-point words multiplied by a matrix.
+WMBssDesc,,,,,,from the struct review of untyped arguments (2026-11-03): Builds the parent beacon description: packs ssid words into the game id and stores sizes at +0x4C/+0x4E (WM BSS description layout)
+WMDataSharingInfo,,,,,,from the struct review of untyped arguments (2026-11-03): Four 0x200-byte data sets followed by a header at +0x800 with ring index and bitmap.
+WMParentParam,,,,,,from the struct review of untyped arguments (2026-11-03): Wireless library parent parameter block validated and copied before sending.
+WMPortCallbackArg,,,,,,from the struct review of untyped arguments (2026-11-03): Port callback argument: nonzero +2 flags an error and +0x1C carries the data-sharing object.
+WMStartParentCallback,,,,,,from the struct review of untyped arguments (2026-11-03): Event callback argument dispatched on the u16 at +0 with the error at +2 and an aid at +0x10
+WaveArchive,,,,,,from the struct review of untyped arguments (2026-11-03): Offset table from +0x3c with size taken from the next offset or the total at +8 used to load wave samples
+WheelEffectController,,,,,,from the struct review of untyped arguments (2026-11-03): Calls the stop callback at +0x74 when +0x38 is set then clears the state fields; same layout as the other wheel effect functions.
+WheelEffectSet,,,,,,from the struct review of untyped arguments (2026-11-03): per-kart wheel smoke effect pointers gated by a flag at +0x3c
+WifiSettingsPage,,,,,,from the struct review of untyped arguments (2026-11-03): Buffer of 256-byte settings pages each ending in a CRC16 at +0xFE; this is the first page of the array.
+WifiUserId,,,,,,from the struct review of untyped arguments (2026-11-03): Output of unpack user id then filled with time-derived values at +8 +0xC +0x10 +0x12.
+WmCallbackArg,,,,,,from the struct review of untyped arguments (2026-11-03): WM completion callback: tests the error code halfword at +2 to choose between event 0xB and connect handling
+WmConnectCallbackArg,,,,,,from the struct review of untyped arguments (2026-11-03): Connect callback: error code at +2 and state at +8 select which user callback to call
+WmScanCallbackArg,,,,,,from the struct review of untyped arguments (2026-11-03): Scan result callback: checks error code and state then validates the buffer pointer at +0x3C before processing the beacon
