@@ -1,7 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+mod browse_ui;
+mod instance;
 mod mods_ui;
 mod portable;
 mod protocol;
+mod site;
 use eframe::egui::{self, Color32, RichText};
 use mkds_builder::{
     build,
@@ -62,6 +65,8 @@ struct Launcher {
     smoke_frame: Option<u8>,
     wizard: usize,
     mods: mods_ui::ModsState,
+    /// `mkdsrust://` links (or "" = come to the front) handed over by a second launcher.
+    inbox: Option<Receiver<String>>,
 }
 fn fingerprint() -> String {
     use sha2::{Digest, Sha256};
@@ -138,7 +143,7 @@ fn glyph(ui: &mut egui::Ui, kind: usize, color: Color32) {
     }
 }
 impl Launcher {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    fn new(cc: &eframe::CreationContext<'_>, instance: Option<instance::Primary>) -> Self {
         cc.egui_ctx.set_theme(egui::Theme::Dark);
         cc.egui_ctx.set_visuals(egui::Visuals::dark());
         let mut style = (*cc.egui_ctx.style()).clone();
@@ -163,9 +168,7 @@ impl Launcher {
         style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(240, 114, 65);
         style.visuals.widgets.inactive.rounding = egui::Rounding::same(9.);
         cc.egui_ctx.set_style(style);
-        let dir = controls::default_path()
-            .and_then(|p| p.parent().map(Path::to_path_buf))
-            .unwrap_or_else(|| PathBuf::from("."));
+        let dir = data_dir();
         let mut errors = Vec::new();
         let prefs = match std::fs::read(dir.join("launcher.json")) {
             Ok(b) => serde_json::from_slice(&b).unwrap_or_else(|e| {
@@ -220,6 +223,10 @@ impl Launcher {
             smoke_frame: std::env::args().any(|a| a == "--smoke-test").then_some(0),
             wizard: 0,
             mods: Default::default(),
+            inbox: instance.map(|i| {
+                let ctx = cc.egui_ctx.clone();
+                i.watch(move || ctx.request_repaint())
+            }),
         };
         if let Some(bundle) = std::env::current_exe()
             .ok()
@@ -242,8 +249,17 @@ impl Launcher {
                 }
             }
         }
-        if let Some(link) = std::env::args().find(|a| a.to_ascii_lowercase().starts_with("mkdsrust:")) {
-            app.install_link(&link);
+        // installed once the ROM check above is done
+        app.mods.pending_link = link_arg();
+        if app.mods.pending_link.is_some() {
+            app.page = 3;
+        }
+        if app.smoke_frame.is_some() {
+            if std::env::var_os("MKDS_SMOKE_BROWSE_SAMPLE").is_some() {
+                app.mods.browse.sample();
+            } else {
+                app.mods.browse.search();
+            }
         }
         app
     }
@@ -1092,6 +1108,20 @@ impl Launcher {
     }
     fn draw(&mut self, ctx: &egui::Context) {
         self.poll();
+        self.poll_browse(Some(ctx));
+        let handed: Vec<String> = self.inbox.as_ref().map(|r| r.try_iter().collect()).unwrap_or_default();
+        for message in handed {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+            if message.to_ascii_lowercase().starts_with("mkdsrust:") {
+                self.install_link(&message);
+            }
+        }
+        if !self.busy {
+            if let Some(link) = self.mods.pending_link.take() {
+                self.install_link(&link);
+            }
+        }
         // a mod .zip dropped on any page installs it
         let dropped = ctx.input(|i| {
             i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).find(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")))
@@ -1194,8 +1224,11 @@ impl eframe::App for Launcher {
                         "setup-toolchain",
                         "setup-build",
                         "setup-done",
+                        "mods-browse",
+                        "mods-library",
+                        "mods-detail",
                     ];
-                    let name = names[(frame as usize / 8).min(10)];
+                    let name = names[(frame as usize / 8).min(13)];
                     let dir = std::env::var_os("MKDS_SMOKE_SHOTS")
                         .map(PathBuf::from)
                         .unwrap_or_else(|| PathBuf::from("release_shots"));
@@ -1218,10 +1251,16 @@ impl eframe::App for Launcher {
             }
         }
         if let Some(frame) = self.smoke_frame {
-            let screen = (frame as usize / 8).min(10);
+            let screen = (frame as usize / 8).min(13);
             self.page = screen.min(6);
-            if screen >= 6 {
+            if (6..=10).contains(&screen) {
                 self.wizard = screen - 6;
+            }
+            self.mods.tab = browse_ui::Tab::Installed;
+            if screen >= 11 {
+                self.page = 3;
+                self.mods.tab = if screen == 12 { browse_ui::Tab::Library } else { browse_ui::Tab::Browse };
+                self.smoke_detail(screen == 13);
             }
         }
         self.draw(ctx);
@@ -1230,14 +1269,36 @@ impl eframe::App for Launcher {
             if *frame % 8 == 3 {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot);
             }
-            if *frame >= 88 {
+            if *frame >= 112 {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         }
     }
 }
+fn data_dir() -> PathBuf {
+    controls::default_path()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+fn link_arg() -> Option<String> {
+    std::env::args().find(|a| a.to_ascii_lowercase().starts_with("mkdsrust:"))
+}
 fn main() -> eframe::Result<()> {
     portable::initialize();
+    // one launcher per data folder: a second one (e.g. Windows opening a mkdsrust:// link) hands over and exits
+    let mut primary = None;
+    if !std::env::args().any(|a| a == "--smoke-test") {
+        let dir = data_dir();
+        match instance::acquire(&dir) {
+            Ok(instance::Role::Primary(p)) => primary = Some(p),
+            Ok(instance::Role::Secondary) => {
+                if instance::send(&dir, &link_arg().unwrap_or_default()).is_ok() {
+                    return Ok(());
+                }
+            }
+            Err(_) => {}
+        }
+    }
     let smoke_size = if std::env::args().any(|a| a == "--smoke-test") {
         std::env::var("MKDS_SMOKE_SIZE").ok().and_then(|s| {
             let (w, h) = s.split_once('x')?;
@@ -1260,7 +1321,7 @@ fn main() -> eframe::Result<()> {
                 .with_min_inner_size([1024., 640.]),
             ..Default::default()
         },
-        Box::new(|cc| Ok(Box::new(Launcher::new(cc)))),
+        Box::new(|cc| Ok(Box::new(Launcher::new(cc, primary)))),
     )
 }
 #[cfg(test)]
@@ -1285,11 +1346,8 @@ mod tests {
         assert!(!p.accuracy);
     }
 
-    #[test]
-    fn all_pages_render_and_capture_saves_shared_controls() {
-        let dir = tempfile::tempdir().unwrap();
-        let ctx = egui::Context::default();
-        let mut app = Launcher {
+    pub(crate) fn test_launcher(ctx: &egui::Context, dir: &Path) -> Launcher {
+        Launcher {
             branding: ctx.load_texture(
                 "test logo",
                 egui::ColorImage::new([1, 1], Color32::WHITE),
@@ -1297,7 +1355,7 @@ mod tests {
             ),
             wizard: 0,
             prefs: Preferences::default(),
-            dir: dir.path().into(),
+            dir: dir.into(),
             settings: Settings::default(),
             controls: Controls::default(),
             page: 0,
@@ -1311,7 +1369,15 @@ mod tests {
             source_stamp: String::new(),
             smoke_frame: None,
             mods: Default::default(),
-        };
+            inbox: None,
+        }
+    }
+
+    #[test]
+    fn all_pages_render_and_capture_saves_shared_controls() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = egui::Context::default();
+        let mut app = test_launcher(&ctx, dir.path());
         for page in 0..7 {
             app.page = page;
             let output = ctx.run(

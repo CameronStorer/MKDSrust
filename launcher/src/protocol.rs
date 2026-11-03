@@ -4,7 +4,7 @@ use std::{path::Path, process::Command};
 
 const KEY: &str = r"HKCU\Software\Classes\mkdsrust";
 
-fn hidden(c: &mut Command) -> &mut Command {
+pub(crate) fn hidden(c: &mut Command) -> &mut Command {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

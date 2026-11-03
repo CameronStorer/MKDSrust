@@ -123,6 +123,20 @@ pub struct Manifest {
     pub depends: Vec<String>,
     #[serde(default)]
     pub conflicts: Vec<String>,
+    /// Where the author says the mod works: `["pc"]` (default) or `["pc", "ds"]` (PLUGIN_FORMAT.md, "Platform
+    /// compatibility"). Only a claim; the site checks `ds` and shows the badge.
+    #[serde(default = "default_platforms")]
+    pub platforms: Vec<String>,
+}
+pub fn default_platforms() -> Vec<String> {
+    vec!["pc".into()]
+}
+/// Platform names are short lowercase words (`pc`, `ds`; unknown future ones are kept, not rejected).
+pub fn valid_platforms(p: &[String]) -> bool {
+    let mut seen = BTreeSet::new();
+    !p.is_empty()
+        && p.len() <= 8
+        && p.iter().all(|x| (1..=16).contains(&x.len()) && x.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()) && seen.insert(x))
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -168,6 +182,7 @@ impl Manifest {
             || m.description.chars().count() > 2000
             || m.files.is_empty()
             || m.files.len() > MAX_FILES
+            || !valid_platforms(&m.platforms)
         {
             return Err("Invalid mod manifest fields".into());
         }
@@ -666,6 +681,30 @@ mod tests {
         m["description"] = "x".repeat(2001).into();
         contents.insert("manifest.json".into(), serde_json::to_vec(&m).unwrap());
         assert!(Package::validate(contents, &retail(b"fixture")).is_err());
+    }
+    #[test]
+    fn core_manifest_platforms_default_to_pc_and_accept_ds() {
+        let p = package(b"x");
+        let mut json: serde_json::Value = serde_json::from_slice(&p["manifest.json"]).unwrap();
+        assert_eq!(Manifest::parse(&serde_json::to_vec(&json).unwrap()).unwrap().platforms, ["pc"]);
+        for ok in [serde_json::json!(["pc"]), serde_json::json!(["pc", "ds"]), serde_json::json!(["ds"])] {
+            json["platforms"] = ok.clone();
+            let m = Manifest::parse(&serde_json::to_vec(&json).unwrap()).unwrap();
+            assert_eq!(serde_json::to_value(&m.platforms).unwrap(), ok);
+            // the field survives a round trip (installed manifests are re-read by launcher and game)
+            assert_eq!(Manifest::parse(&serde_json::to_vec(&m).unwrap()).unwrap().platforms, m.platforms);
+        }
+        for bad in [serde_json::json!([]), serde_json::json!(["PC"]), serde_json::json!(["pc", "pc"]), serde_json::json!("pc"), serde_json::json!(["../x"])] {
+            json["platforms"] = bad;
+            assert!(Manifest::parse(&serde_json::to_vec(&json).unwrap()).is_err());
+        }
+        // a package with the site's field installs (it used to be refused as an unknown field)
+        let mut contents = package(b"MESGbmg1 entirely original content");
+        let mut m: serde_json::Value = serde_json::from_slice(&contents["manifest.json"]).unwrap();
+        m["platforms"] = serde_json::json!(["pc", "ds"]);
+        contents.insert("manifest.json".into(), serde_json::to_vec(&m).unwrap());
+        let pkg = Package::validate(contents, &retail(b"fixture")).unwrap();
+        assert_eq!(pkg.manifest.platforms, ["pc", "ds"]);
     }
     #[test]
     fn core_manifest_rejects_unknown_and_ambiguous_entries() {

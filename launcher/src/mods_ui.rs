@@ -12,6 +12,10 @@ pub struct ModsState {
     pub report: String,
     /// A mod project installed for "Test in game"; removed when the game closes.
     pub dev: Option<String>,
+    pub tab: browse_ui::Tab,
+    pub browse: browse_ui::BrowseState,
+    /// A `mkdsrust://` link waiting for the current task to finish.
+    pub pending_link: Option<String>,
 }
 
 pub struct CreateForm {
@@ -21,10 +25,11 @@ pub struct CreateForm {
     id: String,
     id_edited: bool,
     extract: bool,
+    ds: bool,
 }
 impl Default for CreateForm {
     fn default() -> Self {
-        Self { name: String::new(), author: String::new(), kind: "other", id: String::new(), id_edited: false, extract: true }
+        Self { name: String::new(), author: String::new(), kind: "other", id: String::new(), id_edited: false, extract: true, ds: false }
     }
 }
 
@@ -52,7 +57,7 @@ fn kind_color(kind: &str) -> Color32 {
         _ => Color32::GRAY,
     }
 }
-fn chip(ui: &mut egui::Ui, kind: &str) {
+pub(crate) fn chip(ui: &mut egui::Ui, kind: &str) {
     let c = kind_color(kind);
     egui::Frame::none()
         .fill(c.gamma_multiply(0.18))
@@ -97,7 +102,7 @@ fn open_folder(path: &Path) -> Result<(), String> {
 }
 
 /// Screen a downloaded/dropped zip against the player's ROM and install it (see [`modding::install_zip`]).
-fn screen_and_install(game: &Path, rom: &Path, archive: &Path) -> modpkg::Result<String> {
+pub(crate) fn screen_and_install(game: &Path, rom: &Path, archive: &Path) -> modpkg::Result<String> {
     if !rom::inspect_rom(rom)?.reference_match {
         return Err("Mod screening needs the supported Mario Kart DS (USA, rev 0) ROM".into());
     }
@@ -108,10 +113,10 @@ impl Launcher {
     fn modding_root(&self) -> PathBuf {
         self.dir.join("modding")
     }
-    fn game_ready(&self) -> bool {
+    pub(crate) fn game_ready(&self) -> bool {
         self.prefs.output.join("manifest.json").is_file()
     }
-    fn start(&mut self, message: &str) -> mpsc::Sender<Event> {
+    pub(crate) fn start(&mut self, message: &str) -> mpsc::Sender<Event> {
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         self.busy = true;
@@ -134,6 +139,13 @@ impl Launcher {
     /// A `mkdsrust://install?url=...` link from the site.
     pub(crate) fn install_link(&mut self, link: &str) {
         self.page = 3;
+        self.mods.tab = browse_ui::Tab::Installed;
+        if self.busy {
+            // e.g. a build is running: install when it is done
+            self.mods.pending_link = Some(link.to_string());
+            self.message = "The mod link will be installed when the current task finishes.".into();
+            return;
+        }
         let url = match protocol::install_url(link) {
             Ok(u) => u,
             Err(e) => {
@@ -164,7 +176,10 @@ impl Launcher {
                 if !rom::inspect_rom(&rom)?.reference_match {
                     return Err("Mod projects need the supported Mario Kart DS (USA, rev 0) ROM (choose it in Setup)".into());
                 }
-                let draft = modding::Draft::new(form.id.trim(), form.name.trim(), form.kind, form.author.trim());
+                let mut draft = modding::Draft::new(form.id.trim(), form.name.trim(), form.kind, form.author.trim());
+                if form.ds {
+                    draft.platforms.push("ds".into());
+                }
                 modding::create(&root, &draft, &rom, &std::fs::read(&rom)?, form.extract)
             })()
             .map_err(|e| e.to_string());
@@ -266,14 +281,14 @@ impl Launcher {
         ui.horizontal(|ui| {
             ui.heading("Mods");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let browse = egui::Button::new(RichText::new("Browse mods on mkdsrust.com  ↗").strong().color(Color32::BLACK))
-                    .fill(TEAL)
-                    .min_size(egui::vec2(0., 40.));
-                if ui.add(browse).on_hover_text(SITE_MODS).clicked() {
-                    ui.ctx().open_url(egui::OpenUrl::new_tab(SITE_MODS));
-                }
+                ui.hyperlink_to("mkdsrust.com  ↗", SITE_MODS);
             });
         });
+        let tab = self.mods_tabs(ui);
+        if tab != browse_ui::Tab::Installed {
+            self.browse_page(ui, tab);
+            return;
+        }
         ui.label("All your mods in one load order, whatever their type. Top to bottom: when two mods change the same file, the lower one wins. Drop a mod .zip anywhere in this window to install it.");
         let busy = self.busy;
         ui.add_enabled_ui(!busy, |ui| {
@@ -282,6 +297,9 @@ impl Launcher {
                     if let Some(path) = rfd::FileDialog::new().add_filter("Mod package", &["zip"]).pick_file() {
                         self.install_mod(path);
                     }
+                }
+                if ui.button("Browse mkdsrust.com").clicked() {
+                    self.mods.tab = browse_ui::Tab::Browse;
                 }
                 if ui.button("Create mod…").clicked() {
                     self.mods.create = Some(CreateForm::default());
@@ -330,7 +348,7 @@ impl Launcher {
             order.iter().filter(|id| on.contains(*id)).filter_map(|id| by_id.get(id.as_str()).map(|m| (*m).clone())).collect();
 
         if installed.is_empty() {
-            ui.label(RichText::new("No mods installed yet. Browse mkdsrust.com, drop a .zip here, or make your own with Create mod.").color(Color32::GRAY));
+            ui.label(RichText::new("No mods installed yet. Find some on the Browse tab, drop a .zip here, or make your own with Create mod.").color(Color32::GRAY));
         }
         let (mut changed, mut remove, mut moved) = (false, None::<String>, None::<(usize, usize)>);
         ui.add_enabled_ui(!busy, |ui| {
@@ -362,6 +380,9 @@ impl Launcher {
                                     ui.label(if enabled { name } else { name.color(Color32::GRAY) });
                                     ui.label(RichText::new(format!("v{}", m.version)).small().color(Color32::GRAY));
                                     chip(ui, &m.kind);
+                                    if m.platforms.iter().any(|p| p == "ds") {
+                                        browse_ui::badge(ui, "DS", TEAL);
+                                    }
                                     ui.label(RichText::new(format!("by {}", m.author)).small().color(Color32::GRAY));
                                 });
                                 if enabled {
@@ -543,6 +564,7 @@ impl Launcher {
                     form.id = modding::suggest_id(&form.author, &form.name);
                 }
                 ui.checkbox(&mut form.extract, "Unpack .carc/.narc archives into folders (easiest to edit)");
+                ui.checkbox(&mut form.ds, "Also works on a real DS (adds \"ds\" to platforms; mkdsrust.com checks it)");
                 ui.label(
                     RichText::new(format!(
                         "Creates {} with a copy of your ROM's files, a manifest and a README. It stays on this PC.",

@@ -43,6 +43,9 @@ pub struct Draft {
     pub depends: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conflicts: Vec<String>,
+    /// `["pc"]` or `["pc", "ds"]`; always written so authors see the field.
+    #[serde(default = "modpkg::default_platforms")]
+    pub platforms: Vec<String>,
 }
 fn one() -> u32 {
     1
@@ -64,6 +67,7 @@ impl Draft {
             description: String::new(),
             depends: vec![],
             conflicts: vec![],
+            platforms: modpkg::default_platforms(),
         }
     }
     /// The package manifest for these files (validated like any downloaded package).
@@ -217,7 +221,8 @@ Put an optional `README.md` and up to 8 preview images (`.png` `.jpg` `.webp`) f
 In the launcher (Mods page, *Your mod projects*): **Test in game** runs your changes right away; **Pack** writes a\n\
 ready-to-upload zip with only the differences (patches against the player's own ROM, never your copy of the game\n\
 files), checked with the same rules as mkdsrust.com. From a terminal: `mkds_builder mod pack \"<this folder>\"`.\n\n\
-Edit `manifest.json` to change the name, version (`{version}` now), type, author, license or description.\n\
+Edit `manifest.json` to change the name, version (`{version}` now), type, author, license, description or\n\
+`platforms` (`[\"pc\"]`, or `[\"pc\", \"ds\"]` if it also works on a real DS: mkdsrust.com checks that claim).\n\
 Mod id: `{id}` (type `{kind}`).\n",
         name = d.name,
         id = d.id,
@@ -644,6 +649,16 @@ mod tests {
         let retail = modpkg::RetailIndex::from_rom(&image).unwrap();
         let pkg = modpkg::Package::read(&zip, &retail).unwrap();
         assert_eq!(pkg.manifest.kind, "gameplay");
+        // create writes the platforms field; pack copies it into the package manifest
+        let draft_json: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(draft_json["platforms"], serde_json::json!(["pc"]));
+        assert_eq!(pkg.manifest.platforms, ["pc"]);
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&pkg.contents["manifest.json"]).unwrap()["platforms"], serde_json::json!(["pc"]));
+        let mut ds = draft_json;
+        ds["platforms"] = serde_json::json!(["pc", "ds"]);
+        std::fs::write(dir.join("manifest.json"), serde_json::to_vec_pretty(&ds).unwrap()).unwrap();
+        let (staged, _) = stage(&Workspace::open(&dir).unwrap(), &image, &retail, None).unwrap();
+        assert_eq!(staged.manifest.platforms, ["pc", "ds"]);
         let patch = &pkg.contents["patches/b.carc.bsdiff"];
         let mut out = Vec::new();
         modpkg::qbsdiff::Bspatch::new(patch).unwrap().apply(crate::rom::NitroFs::parse(&image).unwrap().file("b.carc").unwrap(), &mut out).unwrap();
