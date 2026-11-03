@@ -1551,11 +1551,11 @@ fn run() -> Result<ExitCode, String> {
         let dir = args.out.join("direct");
         std::fs::create_dir_all(dir.join("src")).map_err(|e| e.to_string())?;
         put(dir.join("Cargo.toml"), &format!("[package]\nname = \"direct\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n{recomp_dep}\nlayout = {{ path = \"../layout\" }}\n"))?;
-        let mut src = String::from("//! Generated from the user's ROM: raised functions that reach no safe point, called directly with\n//! their registers as Rust arguments and results (Block 5.5, `--timing native`).\n#![allow(non_snake_case, non_upper_case_globals, clippy::all)]\n#[allow(unused_imports)]\nuse layout::*;\n");
+        let mut src = String::from("//! Generated from the user's ROM: raised functions that reach no safe point, called directly with\n//! their registers as Rust arguments and results (Block 5.5, `--timing native`).\n#![allow(non_snake_case, non_upper_case_globals, unused, clippy::all)]\n#[allow(unused_imports)]\nuse layout::*;\n");
         for d in &direct_src {
             src.push_str(d);
         }
-        put(dir.join("src/lib.rs"), &src)?;
+        put(dir.join("src/lib.rs"), &drop_self_assignments(&src))?;
         members.push("direct".to_string());
         eprintln!("mkds_gen: {} direct functions in crate direct", direct_src.len());
     }
@@ -1567,7 +1567,7 @@ fn run() -> Result<ExitCode, String> {
         let dir = args.out.join(&name);
         std::fs::create_dir_all(dir.join("src")).map_err(|e| e.to_string())?;
         put(dir.join("Cargo.toml"), &format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n{recomp_dep}\nlayout = {{ path = \"../layout\" }}\n{direct_dep}"))?;
-        let mut src = String::from("//! Generated from the user's ROM (lifted machine code).\n#![allow(non_snake_case, non_upper_case_globals, clippy::all)]\n#[allow(unused_imports)]\nuse layout::*;\n");
+        let mut src = String::from("//! Generated from the user's ROM (lifted machine code).\n#![allow(non_snake_case, non_upper_case_globals, unused, clippy::all)]\n#[allow(unused_imports)]\nuse layout::*;\n");
         for f in chunk {
             part_of.insert(f.id.clone(), name.clone());
             src.push_str(&f.code);
@@ -1580,6 +1580,7 @@ fn run() -> Result<ExitCode, String> {
             }
             let _ = writeln!(t, "    recomp::mem::Lifted {{ segment: {:?}, entry: {:#X}, blocks: {name}::BLOCKS_{id}, insts: {name}::INSTS_{id}, f: {name}::f_{id} }},", f.segment, f.entry, id = f.id);
         }
+        let src = drop_self_assignments(&src);
         bytes += src.len();
         put(dir.join("src/lib.rs"), &src)?;
         let _ = writeln!(deps, "{name} = {{ path = \"../{name}\" }}");
@@ -1857,5 +1858,29 @@ mod tests {
         assert_eq!(names[&("arm9_main".to_string(), 0x0200_0000)], "sub_2000000: clears a flag");
         assert_eq!(names[&("arm9_main".to_string(), 0x0200_0010)], "FX_Div(a:fx32, b:fx32) -> fx32");
         assert!(!names.contains_key(&("arm9_main".to_string(), 0x0200_0020)));
+    }
+}
+
+/// Drops lines like `r0 = r0;` (left by register moves onto themselves): they do nothing.
+fn drop_self_assignments(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    for line in src.split_inclusive('\n') {
+        let t = line.trim();
+        let is_self = t.strip_suffix(';').and_then(|a| a.split_once(" = ")).is_some_and(|(l, r)| {
+            l == r && !l.is_empty() && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        });
+        if !is_self {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod self_assign_tests {
+    #[test]
+    fn drops_only_plain_self_assignments() {
+        let src = "    r0 = r0;\n    r1 = r0;\n    c.r[0] = c.r[0];\n    sp = sp;\n";
+        assert_eq!(super::drop_self_assignments(src), "    r1 = r0;\n    c.r[0] = c.r[0];\n");
     }
 }
