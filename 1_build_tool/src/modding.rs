@@ -360,9 +360,21 @@ pub fn stage(ws: &Workspace, rom: &[u8], retail: &modpkg::RetailIndex, id: Optio
     let lower: BTreeSet<String> = paths.iter().map(|p| p.to_ascii_lowercase()).collect();
     for path in &paths {
         let original = fs.file(path).unwrap();
-        if let Some(new) = current(&romfs, path, original, &mut report)? {
+        if let Some(mut new) = current(&romfs, path, original, &mut report)? {
             let mut patch = Vec::new();
             modpkg::qbsdiff::Bsdiff::new(original, &new).compare(&mut patch)?;
+            // a whole .carc recompressed by another tool: the same contents spliced into the original stream
+            // decompress identically and usually patch far smaller
+            if dsfiles::ext_of(path) == "carc" {
+                if let Ok(contents) = dsfiles::lz77_decompress(&new, modpkg::MAX_UNPACKED as usize) {
+                    let spliced = dsfiles::lz77_recompress(original, &contents);
+                    let mut alt = Vec::new();
+                    modpkg::qbsdiff::Bsdiff::new(original, &spliced).compare(&mut alt)?;
+                    if alt.len() < patch.len() {
+                        (new, patch) = (spliced, alt);
+                    }
+                }
+            }
             let name = format!("patches/{path}.bsdiff");
             report.patched.push((path.to_string(), new.len() as u64, patch.len() as u64));
             files.insert(path.to_string(), modpkg::Entry::Patch(modpkg::Patch { patch: name.clone() }));
@@ -700,5 +712,30 @@ mod tests {
         let report = pack(&ws, &image, Some(&root.path().join("out.zip"))).unwrap();
         assert_eq!(report.patched.len(), 1);
         assert!(root.path().join("out.zip").is_file());
+    }
+
+    #[test]
+    fn whole_carc_replacements_are_spliced_into_the_original_stream() {
+        let inner = narc(&[("msg.bmg", &text(20000, 3)), ("pal.nclr", b"RLCN0123")]);
+        let original = dsfiles::lz77_compress(&inner);
+        let image = rom(&[("b.carc", original.clone())]);
+        let root = tempfile::tempdir().unwrap();
+        let dir = create(root.path(), &Draft::new("me.carc", "Carc", "other", "me"), Path::new("r"), &image, false).unwrap();
+        // the author edits one byte and saves the archive with another tool: stored as literals only
+        let mut edited = inner.clone();
+        edited[200] ^= 1;
+        let mut stored = vec![0x10, edited.len() as u8, (edited.len() >> 8) as u8, (edited.len() >> 16) as u8];
+        for chunk in edited.chunks(8) {
+            stored.push(0);
+            stored.extend_from_slice(chunk);
+        }
+        std::fs::write(dir.join("romfs/b.carc"), &stored).unwrap();
+        let ws = Workspace::open(&dir).unwrap();
+        let retail = modpkg::RetailIndex::from_rom(&image).unwrap();
+        let (pkg, report) = stage(&ws, &image, &retail, None).unwrap();
+        assert!(report.patched[0].2 < 400, "patch {} bytes", report.patched[0].2);
+        let mut out = Vec::new();
+        modpkg::qbsdiff::Bspatch::new(&pkg.contents["patches/b.carc.bsdiff"]).unwrap().apply(&original, &mut out).unwrap();
+        assert_eq!(dsfiles::lz77_decompress(&out, 1 << 20).unwrap(), edited);
     }
 }
