@@ -2336,13 +2336,11 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
     }
     // named struct fields at the accesses (printed as accessors)
     let typed = infer_fields(&blocks, &order, &preds, f.entry, notes);
-    // what the function's own code shows, without hints from callers or callees (not while dumping:
-    // inference records its facts once)
-    let own_typed = if dumping() {
-        None
-    } else {
-        Some(infer_fields(&blocks, &order, &preds, f.entry, &Notes { arg_hint: &|_| None, param_of: &|_, _| None, ret_of: &|_| None, ..*notes }))
-    };
+    // what the function's own code shows, without hints from callers or callees (its dump lines are
+    // dropped: inference records its facts once)
+    let dumped = DUMP.with(|d| d.borrow().len());
+    let own_typed = Some(infer_fields(&blocks, &order, &preds, f.entry, &Notes { arg_hint: &|_| None, param_of: &|_, _| None, ret_of: &|_| None, ..*notes }));
+    DUMP.with(|d| d.borrow_mut().truncate(dumped));
     let reg_names = typed_names(&typed.regs, notes.module_of);
     let args_doc: Vec<String> = typed.args.iter().map(|(r, st)| match reg_names.get(r) {
         Some(n) => format!("r{r} = `{n}` (a `{st}`)"),

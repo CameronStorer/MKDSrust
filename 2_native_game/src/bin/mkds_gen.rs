@@ -1336,6 +1336,7 @@ fn run() -> Result<ExitCode, String> {
                 let _ = with_notes9(seg, f.entry, |n| raise_emit::emit_t1_annotated(f, id, Some(&img), n));
                 let _ = ir::take_field_uses();
                 let raise_emit::Types { calls, own_args, own_ret, callees, .. } = raise_emit::take_types();
+                let _ = raise_emit::take_dump();
                 if let Some(st) = own_ret {
                     rets.entry(f.entry & !1).or_default().insert(st);
                 }
