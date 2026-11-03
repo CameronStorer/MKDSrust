@@ -708,7 +708,7 @@ impl Launcher {
             mods_ui::chip(ui, site::kind_for_category(&d.category));
             ds_badge(ui, &d.ds_status);
         });
-        let mut facts = vec![format!("by {}", d.author), rating_text(d.rating, d.ratings), format!("⬇ {} downloads", d.downloads)];
+        let mut facts = vec![format!("by {}", d.author), rating_text(d.rating, d.ratings), format!("⬇ {} download{}", d.downloads, if d.downloads == 1 { "" } else { "s" })];
         if let Some(l) = d.license.as_deref().filter(|l| !l.is_empty()) {
             facts.push(format!("License {l}"));
         }
@@ -801,7 +801,7 @@ impl Launcher {
                                 badge(ui, "Installed", GOLD);
                             }
                             let platforms = v.platforms.iter().map(|p| p.to_uppercase()).collect::<Vec<_>>().join(" + ");
-                            let facts: Vec<String> = [date(&v.created).to_string(), size_text(v.size), format!("{} downloads", v.downloads), platforms]
+                            let facts: Vec<String> = [date(&v.created).to_string(), size_text(v.size), format!("{} download{}", v.downloads, if v.downloads == 1 { "" } else { "s" }), platforms]
                                 .into_iter()
                                 .filter(|f| !f.is_empty())
                                 .collect();
