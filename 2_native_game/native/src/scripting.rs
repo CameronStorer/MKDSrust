@@ -13,7 +13,7 @@
 //!   `input.held(input.A)`, `input.set(mask)` (hold exactly these buttons next frame, instead of the player's)
 //! - `store.get(key)`, `store.set(key, value)`: small saved settings (strings, numbers, booleans; 64 KiB)
 //! - `log(...)`
-//! Scripts come from `--script FILE` (repeatable) and from enabled mods' `scripts/*.luau`.
+//! Scripts come from `--script FILE` (repeatable) and from enabled mods' manifests (`"scripts"`, format 2).
 
 use mlua::{Function, Lua, LuaOptions, StdLib, Value, VmState};
 use recomp::rt::Mem;
@@ -348,20 +348,16 @@ impl Scripts {
             files.iter().map(|p| (p.display().to_string(), p.clone(), p.with_extension("store.json"))).collect();
         if let Some(game) = mods {
             for id in mkds_builder::modpkg::enabled(game) {
-                let dir = game.join("mods").join(&id).join("scripts");
-                let mut found: Vec<PathBuf> = std::fs::read_dir(&dir)
-                    .into_iter()
-                    .flatten()
-                    .flatten()
-                    .map(|e| e.path())
-                    .filter(|p| p.extension().is_some_and(|x| x == "luau" || x == "lua"))
-                    .collect();
-                found.sort();
-                let stores = game.join("mods").join(&id).join(".store");
-                for p in found {
-                    let file = p.file_name().unwrap().to_string_lossy().into_owned();
+                // only the scripts the mod's manifest lists (format 2)
+                let dir = game.join("mods").join(&id);
+                let Some(m) = std::fs::read(dir.join("manifest.json")).ok().and_then(|b| mkds_builder::modpkg::Manifest::parse(&b).ok()) else {
+                    continue;
+                };
+                let stores = dir.join(".store");
+                for rel in &m.scripts {
+                    let file = rel.rsplit('/').next().unwrap_or(rel).to_string();
                     let _ = std::fs::create_dir_all(&stores);
-                    paths.push((format!("{id}/{file}"), p, stores.join(format!("{file}.json"))));
+                    paths.push((format!("{id}/{rel}"), dir.join(rel), stores.join(format!("{file}.json"))));
                 }
             }
         }

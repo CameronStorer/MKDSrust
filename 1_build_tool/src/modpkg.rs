@@ -127,6 +127,31 @@ pub struct Manifest {
     /// compatibility"). Only a claim; the site checks `ds` and shows the badge.
     #[serde(default = "default_platforms")]
     pub platforms: Vec<String>,
+    /// Format 2: Luau scripts in the package (`scripts/speedometer.luau`), run in load order (`LUA_SCRIPTING_DESIGN.md`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scripts: Vec<String>,
+    /// Format 2: the script API version the scripts were written for (1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api: Option<u32>,
+}
+
+/// Scripts per package, and the size of one script.
+pub const MAX_SCRIPTS: usize = 32;
+pub const MAX_SCRIPT_BYTES: usize = 256 * 1024;
+
+/// Why a script file can't be shipped, if it can't: Luau source text only (no compiled bytecode, no NUL bytes,
+/// UTF-8, at most [`MAX_SCRIPT_BYTES`]).
+pub fn script_problem(bytes: &[u8]) -> Option<String> {
+    if bytes.len() > MAX_SCRIPT_BYTES {
+        return Some(format!("script is larger than {} KiB", MAX_SCRIPT_BYTES / 1024));
+    }
+    if bytes.contains(&0) {
+        return Some("script contains NUL bytes (compiled Luau bytecode is not allowed, only source)".into());
+    }
+    if std::str::from_utf8(bytes).is_err() {
+        return Some("script is not UTF-8 text".into());
+    }
+    None
 }
 pub fn default_platforms() -> Vec<String> {
     vec!["pc".into()]
@@ -168,7 +193,12 @@ impl Manifest {
             return Err("Manifest too large".into());
         }
         let m: Self = serde_json::from_slice(bytes)?;
-        if m.format != 1
+        // format 2 adds scripts (and allows a scripts-only package); format 1 has none
+        let scripted = !m.scripts.is_empty();
+        if !(m.format == 1 || m.format == 2)
+            || (m.format == 1 && (scripted || m.api.is_some()))
+            || (scripted && m.api != Some(1))
+            || m.scripts.len() > MAX_SCRIPTS
             || m.game != "AMCE"
             || !valid_id(&m.id)
             || !TYPES.contains(&m.kind.as_str())
@@ -180,7 +210,7 @@ impl Manifest {
             || m.depends.len() > 64
             || m.conflicts.len() > 64
             || m.description.chars().count() > 2000
-            || m.files.is_empty()
+            || (m.files.is_empty() && !scripted)
             || m.files.len() > MAX_FILES
             || !valid_platforms(&m.platforms)
         {
@@ -200,6 +230,15 @@ impl Manifest {
             }
             if BLOCKED_EXTENSIONS.contains(&crate::dsfiles::ext_of(target).as_str()) {
                 return Err(format!("manifest.files target has a blocked file type: {target}").into());
+            }
+        }
+        let mut scripts = BTreeSet::new();
+        for path in &m.scripts {
+            if !safe_path(path) || crate::dsfiles::ext_of(path) != "luau" || !scripts.insert(path.to_ascii_lowercase()) {
+                return Err(format!("Invalid or duplicate script path (scripts are .luau files): {path}").into());
+            }
+            if m.files.values().any(|e| e.source().eq_ignore_ascii_case(path)) {
+                return Err(format!("{path} is both a script and a game file source").into());
             }
         }
         for dep in &m.depends {
@@ -466,6 +505,11 @@ impl Package {
         // which package file produces which ROM path
         let mut roles: BTreeMap<&str, (bool, Vec<&str>)> = BTreeMap::new(); // (is_patch, targets)
         let mut problems = Vec::new();
+        for path in &manifest.scripts {
+            if !contents.contains_key(path) {
+                problems.push(format!("manifest.scripts lists {path}, which is not in the ZIP"));
+            }
+        }
         for (target, entry) in &manifest.files {
             let src = entry.source();
             let patch = matches!(entry, Entry::Patch(_));
@@ -516,8 +560,14 @@ impl Package {
                     reject(format!("{a} inside the package (archives other than .narc/.carc are not allowed)"));
                 }
             }
+            let script = manifest.scripts.iter().any(|p| p == name);
             match role {
                 _ if name == "manifest.json" => {}
+                None if script => {
+                    if let Some(p) = script_problem(bytes) {
+                        reject(p);
+                    }
+                }
                 None if dsfiles::is_readme(name) => {
                     if bytes.len() > dsfiles::MAX_README_BYTES {
                         reject("README is larger than 1 MB".into());
@@ -532,7 +582,7 @@ impl Package {
                         reject(format!("more than {} preview images", dsfiles::MAX_PREVIEWS));
                     }
                 }
-                None => reject("not an allowed file: not listed in manifest.files and not package metadata (README.md/README.txt at the top, preview .png/.jpg/.webp)".into()),
+                None => reject("not an allowed file: not listed in manifest.files or manifest.scripts and not package metadata (README.md/README.txt at the top, preview .png/.jpg/.webp)".into()),
                 Some((true, targets)) => {
                     if dsfiles::ext_of(name) != "bsdiff" {
                         reject("patch files must use the .bsdiff extension".into());
@@ -706,6 +756,32 @@ mod tests {
         let pkg = Package::validate(contents, &retail(b"fixture")).unwrap();
         assert_eq!(pkg.manifest.platforms, ["pc", "ds"]);
     }
+    #[test]
+    fn core_format_2_ships_luau_scripts() {
+        let base = |extra: serde_json::Value| {
+            let mut m = serde_json::json!({"format":2,"type":"gameplay","id":"test.lua","name":"Lua","version":"1.0.0","author":"Test","game":"AMCE","files":{}});
+            for (k, v) in extra.as_object().unwrap() {
+                m[k] = v.clone();
+            }
+            serde_json::to_vec(&m).unwrap()
+        };
+        // a scripts-only package
+        let m = Manifest::parse(&base(serde_json::json!({"scripts":["scripts/a.luau"],"api":1}))).unwrap();
+        assert_eq!(m.scripts, ["scripts/a.luau"]);
+        // scripts need format 2 and api 1, .luau paths, no duplicates
+        assert!(Manifest::parse(&base(serde_json::json!({"scripts":["scripts/a.luau"]}))).is_err());
+        assert!(Manifest::parse(&base(serde_json::json!({"format":1,"scripts":["scripts/a.luau"],"api":1}))).is_err());
+        assert!(Manifest::parse(&base(serde_json::json!({"scripts":["scripts/a.lua"],"api":1}))).is_err());
+        assert!(Manifest::parse(&base(serde_json::json!({"scripts":["a.luau","A.luau"],"api":1}))).is_err());
+        assert!(Manifest::parse(&base(serde_json::json!({"scripts":["../a.luau"],"api":1}))).is_err());
+        // no scripts and no files is still empty
+        assert!(Manifest::parse(&base(serde_json::json!({}))).is_err());
+        // script contents: source text only
+        assert!(script_problem(b"log('hi')").is_none());
+        assert!(script_problem(b"\x00\x01bytecode").is_some());
+        assert!(script_problem(&vec![b'-'; MAX_SCRIPT_BYTES + 1]).is_some());
+    }
+
     #[test]
     fn core_manifest_rejects_unknown_and_ambiguous_entries() {
         let p = package(b"custom creation");
