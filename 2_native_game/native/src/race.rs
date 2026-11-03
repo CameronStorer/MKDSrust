@@ -4,7 +4,6 @@
 //! - `course=<id or name>`: a course id, or the course's internal name as the game's course table lists it
 //!   (`--list-courses` prints them from your own game);
 //! - `character=N`, `kart=N`: the player's character and kart ids;
-//! - `class=N`: the engine class value the race setup stores (0, 1, 2, ...);
 //! - `racers=N`: number of racers (1-8).
 //!
 //! How it works (USA revision 0 only, the one supported dump): once the game has reached a scene of its own,
@@ -30,7 +29,6 @@ pub struct RaceSpec {
     pub course: Option<String>,
     pub character: Option<u32>,
     pub kart: Option<u32>,
-    pub class: Option<u32>,
     pub racers: Option<u32>,
 }
 
@@ -44,9 +42,8 @@ impl RaceSpec {
                 "course" => r.course = Some(v.trim().to_string()),
                 "character" => r.character = Some(n()?),
                 "kart" => r.kart = Some(n()?),
-                "class" => r.class = Some(n()?),
                 "racers" => r.racers = Some(n()?.clamp(1, 8)),
-                other => return Err(format!("--race: unknown key {other} (course, character, kart, class, racers)")),
+                other => return Err(format!("--race: unknown key {other} (course, character, kart, racers)")),
             }
         }
         Ok(r)
@@ -113,9 +110,6 @@ impl Race {
         if let Some(c) = self.course {
             m.w32(base, c);
         }
-        if let Some(v) = self.spec.class {
-            m.w32(base + 0x14, v);
-        }
         if let Some(v) = self.spec.character {
             m.w32(base + 0x68, v);
         }
@@ -176,9 +170,10 @@ mod tests {
 
     #[test]
     fn parses_race_specs() {
-        let r = RaceSpec::parse("course=mario_course, character=3,kart=9,class=2,racers=12").unwrap();
+        let r = RaceSpec::parse("course=mario_course, character=3,kart=9,racers=12").unwrap();
         assert_eq!(r.course.as_deref(), Some("mario_course"));
-        assert_eq!((r.character, r.kart, r.class, r.racers), (Some(3), Some(9), Some(2), Some(8)));
+        assert_eq!((r.character, r.kart, r.racers), (Some(3), Some(9), Some(8)));
+        assert!(RaceSpec::parse("class=2").is_err());
         assert!(RaceSpec::parse("course").is_err());
         assert!(RaceSpec::parse("speed=3").is_err());
         assert!(RaceSpec::parse("kart=x").is_err());
