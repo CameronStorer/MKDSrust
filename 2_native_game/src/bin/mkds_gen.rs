@@ -750,13 +750,27 @@ fn global_name(a: u32) -> Option<String> {
 }
 
 /// Rounds of whole-program type propagation (each passes argument types one call level further).
-const TYPE_ROUNDS: usize = 3;
+const TYPE_ROUNDS: usize = 5;
 
 /// Argument types from the callers: (function entry without the Thumb bit, register) -> struct.
 static ARG_HINTS: std::sync::RwLock<Option<HashMap<(u32, u8), String>>> = std::sync::RwLock::new(None);
 
 fn arg_hint(entry: u32, r: u8) -> Option<String> {
     ARG_HINTS.read().unwrap().as_ref()?.get(&(entry & !1, r)).cloned()
+}
+
+/// Return types: function entry without the Thumb bit -> the struct its r0 result points to.
+static RET_HINTS: std::sync::RwLock<Option<HashMap<u32, String>>> = std::sync::RwLock::new(None);
+
+fn ret_hint(entry: u32) -> Option<String> {
+    RET_HINTS.read().unwrap().as_ref()?.get(&(entry & !1)).cloned()
+}
+
+/// The agreed argument types (see the type rounds), for the callers: what they pass.
+static PARAM_HINTS: std::sync::RwLock<Option<HashMap<(u32, u8), String>>> = std::sync::RwLock::new(None);
+
+fn param_hint(entry: u32, r: u8) -> Option<String> {
+    PARAM_HINTS.read().unwrap().as_ref()?.get(&(entry & !1, r)).cloned()
 }
 
 /// Runs `k` with the comment and type sources for the raised version of the ARM9 function at `entry`.
@@ -768,6 +782,8 @@ fn with_notes9<T>(segment: &str, entry: u32, k: impl FnOnce(&raise_emit::Notes) 
         field_in: &field_in,
         module_of: &|st| LAYOUT.get()?.modules.get(st).cloned(),
         arg_hint: &|r| arg_hint(entry, r),
+        param_of: &param_hint,
+        ret_of: &ret_hint,
         global_points: &|a| LAYOUT.get()?.points_global.get(&a).cloned(),
         field_points: &|st, off| LAYOUT.get()?.points_field.get(&(st.to_string(), off)).cloned(),
         structs_with: &|off| LAYOUT.get().and_then(|l| l.by_offset.get(&off).cloned()).unwrap_or_default(),
@@ -1308,23 +1324,61 @@ fn run() -> Result<ExitCode, String> {
     }
     if raise() && std::env::var_os("MKDS_NO_T1").is_none() && LAYOUT.get().is_some() {
         for round in 0..TYPE_ROUNDS {
-            let mut seen: BTreeMap<(u32, u8), BTreeSet<String>> = BTreeMap::new();
+            let mut rets: BTreeMap<u32, BTreeSet<String>> = BTreeMap::new();
+            // what each function's own code says its arguments point to
+            let mut own: BTreeMap<(u32, u8), BTreeSet<String>> = BTreeMap::new();
+            // what the callers pass: (target, register) -> struct -> distinct callers passing it
+            let mut passed: BTreeMap<(u32, u8), BTreeMap<String, BTreeSet<u32>>> = BTreeMap::new();
+            // distinct callers of each function (direct calls)
+            let mut fan_in: HashMap<u32, usize> = HashMap::new();
             for (seg, f, id, src) in &jobs {
                 let img = image(src);
                 let _ = with_notes9(seg, f.entry, |n| raise_emit::emit_t1_annotated(f, id, Some(&img), n));
                 let _ = ir::take_field_uses();
-                let (args, calls) = raise_emit::take_types();
-                for (r, st) in args {
-                    seen.entry((f.entry & !1, r)).or_default().insert(st);
+                let raise_emit::Types { calls, own_args, own_ret, callees, .. } = raise_emit::take_types();
+                if let Some(st) = own_ret {
+                    rets.entry(f.entry & !1).or_default().insert(st);
+                }
+                for (r, st) in own_args {
+                    own.entry((f.entry & !1, r)).or_default().insert(st);
+                }
+                for t in callees {
+                    *fan_in.entry(t).or_default() += 1;
                 }
                 for (t, r, st) in calls {
-                    seen.entry((t & !1, r)).or_default().insert(st);
+                    passed.entry((t & !1, r)).or_default().entry(st).or_default().insert(f.entry & !1);
                 }
             }
-            // a hint only where every caller (and the function itself) agrees
-            let hints: HashMap<(u32, u8), String> = seen.into_iter().filter(|(_, v)| v.len() == 1).map(|(k, v)| (k, v.into_iter().next().unwrap())).collect();
-            eprintln!("mkds_gen: type round {round}: {} typed arguments", hints.len());
+            // an argument's type: what the function's own code says (unless a caller passes something
+            // else), or else what at least half of its callers pass, with no caller passing another
+            // type. One caller passing a struct to a shared helper (a copy, a lock) types nothing.
+            let mut keys: BTreeSet<(u32, u8)> = own.keys().copied().collect();
+            keys.extend(passed.keys().copied());
+            let mut hints: HashMap<(u32, u8), String> = HashMap::new();
+            for k in keys {
+                let by_callers = passed.get(&k);
+                let callers_agree = by_callers.is_none_or(|m| m.len() <= 1);
+                let chosen = match own.get(&k) {
+                    Some(o) if o.len() == 1 => {
+                        let st = o.iter().next().unwrap();
+                        (callers_agree && by_callers.is_none_or(|m| m.contains_key(st))).then(|| st.clone())
+                    }
+                    Some(_) => None,
+                    None => by_callers.filter(|m| m.len() == 1).and_then(|m| {
+                        let (st, who) = m.iter().next().unwrap();
+                        (who.len() * 2 >= fan_in.get(&k.0).copied().unwrap_or(0)).then(|| st.clone())
+                    }),
+                };
+                if let Some(st) = chosen {
+                    hints.insert(k, st);
+                }
+            }
+            let ret_hints: HashMap<u32, String> = rets.into_iter().filter(|(_, v)| v.len() == 1).map(|(k, v)| (k, v.into_iter().next().unwrap())).collect();
+            eprintln!("mkds_gen: type round {round}: {} typed arguments, {} typed results", hints.len(), ret_hints.len());
+            // the same agreed types go to the callers (what they pass) and to the function itself
+            *PARAM_HINTS.write().unwrap() = Some(hints.clone());
             *ARG_HINTS.write().unwrap() = Some(hints);
+            *RET_HINTS.write().unwrap() = Some(ret_hints);
         }
     }
     // Block 5.5 (`--timing native`): closed functions and their direct signatures

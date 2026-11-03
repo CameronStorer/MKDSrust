@@ -1316,6 +1316,11 @@ pub struct Notes<'a> {
     pub module_of: &'a dyn Fn(&str) -> Option<String>,
     /// The struct an argument register (r0..r3) points to, as the callers pass it (votes).
     pub arg_hint: &'a dyn Fn(u8) -> Option<String>,
+    /// The struct a call target's argument register points to, as that function and its other
+    /// callers use it (votes for the value this function passes).
+    pub param_of: &'a dyn Fn(u32, u8) -> Option<String>,
+    /// The struct a call target returns a pointer to in r0 (votes for the value after the call).
+    pub ret_of: &'a dyn Fn(u32) -> Option<String>,
     /// The struct the pointer stored at a global address points to (`*0x021755FC` is a race manager).
     pub global_points: &'a dyn Fn(u32) -> Option<String>,
     /// The struct the pointer in a struct's field points to.
@@ -1331,7 +1336,7 @@ pub struct Notes<'a> {
 
 impl Notes<'static> {
     /// No comments, no field names.
-    pub const NONE: Notes<'static> = Notes { call: &|_| None, field: &|_| None, fields_of: &|_| Vec::new(), field_in: &|_, _| None, module_of: &|_| None, arg_hint: &|_| None, global_points: &|_| None, field_points: &|_, _| None, structs_with: &|_| Vec::new(), density: &|_| 1.0, global: &|_| None, global_is: &|_| None };
+    pub const NONE: Notes<'static> = Notes { call: &|_| None, field: &|_| None, fields_of: &|_| Vec::new(), field_in: &|_, _| None, module_of: &|_| None, arg_hint: &|_| None, param_of: &|_, _| None, ret_of: &|_| None, global_points: &|_| None, field_points: &|_, _| None, structs_with: &|_| Vec::new(), density: &|_| 1.0, global: &|_| None, global_is: &|_| None };
 }
 
 /// [`emit_t1`]; `names(target)` gives a call target's name for a comment.
@@ -1488,11 +1493,26 @@ struct Typed {
     args: BTreeMap<u8, String>,
     /// Struct-typed arguments at calls: (target, register, struct).
     calls: Vec<(u32, u8, String)>,
+    /// The struct r0 points to wherever the function returns, if one.
+    ret: Option<String>,
+    /// Every function called with a constant target.
+    callees: BTreeSet<u32>,
 }
 
-/// The types the last [`emit_t1_full`] found: its struct-typed arguments (register -> struct) and
-/// the struct-typed arguments it passes (target, register, struct), for whole-program propagation.
-pub type Types = (BTreeMap<u8, String>, Vec<(u32, u8, String)>);
+/// The types the last [`emit_t1_full`] found, for whole-program propagation.
+#[derive(Default)]
+pub struct Types {
+    /// Struct-typed arguments (register -> struct), with every hint.
+    pub args: BTreeMap<u8, String>,
+    /// Struct-typed arguments it passes: (target, register, struct).
+    pub calls: Vec<(u32, u8, String)>,
+    /// Arguments typed by the function's own code alone (no hints from callers or callees).
+    pub own_args: BTreeMap<u8, String>,
+    /// The struct its r0 result points to, by its own code alone.
+    pub own_ret: Option<String>,
+    /// Every function it calls with a constant target.
+    pub callees: BTreeSet<u32>,
+}
 
 thread_local! {
     static LAST_TYPES: std::cell::RefCell<Types> = std::cell::RefCell::new(Default::default());
@@ -1590,6 +1610,9 @@ fn infer_fields(blocks: &BTreeMap<u32, Block>, order: &[u32], preds: &BTreeMap<u
     let mut derived: Vec<(usize, usize, u32)> = Vec::new();
     // argument registers at calls with a known target: (target, register, a reaching definition)
     let mut call_args: Vec<(u32, u8, usize)> = Vec::new();
+    // r0 after calls with a known target: (target, definition); r0 where the function returns
+    let mut call_rets: Vec<(u32, usize)> = Vec::new();
+    let mut ret_defs: Vec<usize> = Vec::new();
     // word loads into registers: (definition, global address or (base definition, offset))
     let mut loads: Vec<(usize, Result<u32, (usize, u32)>)> = Vec::new();
     // every register read: (register, a reaching definition); its reaching definitions are united
@@ -1630,7 +1653,18 @@ fn infer_fields(blocks: &BTreeMap<u32, Block>, order: &[u32], preds: &BTreeMap<u
                 let mut acc = Vec::new();
                 accesses_s(s, &mut acc);
                 reads((b, ins.addr, si), acc, &st, &mut parent);
+                let returns = match s {
+                    S::Goto(E::Const(_)) => false,
+                    S::Goto(_) => true,
+                    _ => block_return(s).is_some(),
+                };
+                if returns {
+                    ret_defs.extend(st[0].iter().copied());
+                }
                 if let S::Call { target: E::Const(t), .. } = s {
+                    if let Some(&d) = ids.get(&(b, ii, si, 0)) {
+                        call_rets.push((*t, d));
+                    }
                     for r in 0..4u8 {
                         if let Some(&d) = st[r as usize].iter().next() {
                             if st[r as usize].len() == 1 {
@@ -1768,6 +1802,20 @@ fn infer_fields(blocks: &BTreeMap<u32, Block>, order: &[u32], preds: &BTreeMap<u
     for r in 0..4u8 {
         if let Some(st) = (notes.arg_hint)(r) {
             let g = find(&mut parent, r as usize);
+            *votes.entry(g).or_default().entry(st).or_default() += 2;
+        }
+    }
+    // what the called function takes (its own accesses and its other callers) counts double
+    for &(t, r, d) in &call_args {
+        if let Some(st) = (notes.param_of)(t, r) {
+            let g = find(&mut parent, d);
+            *votes.entry(g).or_default().entry(st).or_default() += 2;
+        }
+    }
+    // what the called function returns counts double
+    for &(t, d) in &call_rets {
+        if let Some(st) = (notes.ret_of)(t) {
+            let g = find(&mut parent, d);
             *votes.entry(g).or_default().entry(st).or_default() += 2;
         }
     }
@@ -1914,7 +1962,15 @@ fn infer_fields(blocks: &BTreeMap<u32, Block>, order: &[u32], preds: &BTreeMap<u
     if !dump.is_empty() {
         DUMP.with(|x| x.borrow_mut().extend(dump));
     }
-    Typed { fields: map, regs, args, calls }
+    // every returned value is the same struct, or null (`return 0` paths don't count)
+    let ret_groups: BTreeSet<usize> = ret_defs.iter().map(|&d| find(&mut parent, d)).filter(|g| gconst.get(g) != Some(&0)).collect();
+    let ret_types: BTreeSet<Option<String>> = ret_groups.iter().map(|g| winner.get(g).cloned()).collect();
+    let ret = match ret_types.into_iter().collect::<Vec<_>>().as_slice() {
+        [Some(st)] => Some(st.clone()),
+        _ => None,
+    };
+    let callees = call_rets.iter().map(|&(t, _)| t & !1).collect();
+    Typed { fields: map, regs, args, calls, ret, callees }
 }
 
 /// Local names for the struct-typed registers: the struct's module name (`kart`), numbered when
@@ -2280,6 +2336,13 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
     }
     // named struct fields at the accesses (printed as accessors)
     let typed = infer_fields(&blocks, &order, &preds, f.entry, notes);
+    // what the function's own code shows, without hints from callers or callees (not while dumping:
+    // inference records its facts once)
+    let own_typed = if dumping() {
+        None
+    } else {
+        Some(infer_fields(&blocks, &order, &preds, f.entry, &Notes { arg_hint: &|_| None, param_of: &|_, _| None, ret_of: &|_| None, ..*notes }))
+    };
     let reg_names = typed_names(&typed.regs, notes.module_of);
     let args_doc: Vec<String> = typed.args.iter().map(|(r, st)| match reg_names.get(r) {
         Some(n) => format!("r{r} = `{n}` (a `{st}`)"),
@@ -2287,7 +2350,11 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
     }).collect();
     let ctx = Ctx { blocks: &blocks, rpo, idom, merge, header, children, names, notes, switches: &switches, fields: typed.fields, budget_flags, native_timing: cost.is_none() && crate::lift::timing_native(), nospill, selfn: own.is_some(), tail_fallback };
     ir::set_reg_names(reg_names);
-    LAST_TYPES.with(|t| *t.borrow_mut() = (typed.args.clone(), typed.calls.clone()));
+    let (own_args, own_ret) = match own_typed {
+        Some(o) => (o.args, o.ret),
+        None => (typed.args.clone(), typed.ret.clone()),
+    };
+    LAST_TYPES.with(|t| *t.borrow_mut() = Types { args: typed.args.clone(), calls: typed.calls.clone(), own_args, own_ret, callees: typed.callees.clone() });
     ir::take_field_uses();
     let mut body = String::new();
     do_tree(&ctx, f.entry, 2, &mut body);
