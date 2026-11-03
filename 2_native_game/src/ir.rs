@@ -629,6 +629,9 @@ thread_local! {
     static FIELDS: std::cell::RefCell<std::collections::HashMap<(u8, u32), (FieldRef, u32)>> = std::cell::RefCell::new(Default::default());
     /// Per-function local names replacing `r4` etc. (registers holding one struct pointer).
     static REG_NAMES: std::cell::RefCell<std::collections::HashMap<u8, String>> = std::cell::RefCell::new(Default::default());
+    /// Registers known, at the statement being printed, to hold another register plus a constant
+    /// (`r0 = kart + 0x200` earlier in the block, `kart` unchanged since): register -> (source, constant).
+    static BASES: std::cell::RefCell<std::collections::HashMap<u8, (u8, u32)>> = std::cell::RefCell::new(Default::default());
     /// The accessors printed since the last [`take_field_uses`].
     static FIELD_USES: std::cell::RefCell<Vec<(FieldRef, Access)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -718,6 +721,11 @@ pub fn set_fields(fields: std::collections::HashMap<(u8, u32), (FieldRef, u32)>)
     FIELDS.with(|f| *f.borrow_mut() = fields);
 }
 
+/// Sets the known `register = source + constant` facts for the statement about to be printed.
+pub fn set_bases(bases: std::collections::HashMap<u8, (u8, u32)>) {
+    BASES.with(|b| *b.borrow_mut() = bases);
+}
+
 /// Sets the local names of renamed registers for the function being printed (empty: `r0`..).
 pub fn set_reg_names(names: std::collections::HashMap<u8, String>) {
     REG_NAMES.with(|r| *r.borrow_mut() = names);
@@ -741,6 +749,15 @@ fn field_access(out: &mut String, addr: &E, a: Access) -> bool {
     };
     let Some((f, bias)) = FIELDS.with(|m| m.borrow().get(&(r, off)).cloned()) else { return false };
     let _ = write!(out, "{}::{}(m, ", f.module, f.accessor(a));
+    // an interior pointer made from a register that still holds the struct's address prints as that
+    // register (`kart` rather than `r0.wrapping_sub(0x200)` after `r0 = kart + 0x200`)
+    if bias != 0 {
+        if let Some((j, _)) = BASES.with(|b| b.borrow().get(&r).copied()).filter(|&(_, k)| k == bias) {
+            reg(out, j);
+            FIELD_USES.with(|u| u.borrow_mut().push((f, a)));
+            return true;
+        }
+    }
     expr(out, base);
     if bias != 0 {
         // the struct's address: `p + bias - bias + off` is the same wrapping address

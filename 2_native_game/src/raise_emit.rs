@@ -2525,14 +2525,40 @@ fn block_code(c: &Ctx, x: u32, depth: usize, out: &mut String) {
         }
     }
     }
+    // `register = source + constant` facts within this block (registers r0-r12 only): a register's
+    // entry lives until it or its source is written; anything less plain than a register write clears all
+    let mut derived: HashMap<u8, (u8, u32)> = HashMap::new();
     for ins in &b.insts {
         let mut text = String::new();
         let inner = if ins.cond == 14 && ins.guard.is_none() { depth } else { depth + 1 };
         let set = |k: usize| ir::set_fields(c.fields.get(&(x, ins.addr, k)).cloned().unwrap_or_default());
+        let at_start = derived.clone();
+        let plain = ins.cond == 14 && ins.guard.is_none();
         for (si, s) in ins.stmts.iter().enumerate() {
             set(si);
+            ir::set_bases(derived.clone());
             stmt_code(c, x, s, inner, &mut text);
+            match s {
+                // flag-setting helpers (`R::subs`) and plain block transfers name what they write; a mode
+                // change (`msr`, user-bank transfers) can swap banked registers, so it clears everything
+                S::Do(e) if has_helper(e, &|h| matches!(h, H::Msr | H::BlockUser)) => derived.clear(),
+                S::SetReg(..) | S::Store { .. } | S::Let(..) | S::Let2(..) | S::SetFlag(..) | S::SetNz(_) | S::Do(_) => {
+                    for (r, _) in defs_s(s) {
+                        derived.remove(&r);
+                        derived.retain(|_, (src, _)| *src != r);
+                    }
+                    if let S::SetReg(i, E::Bin(ir::Bin::Add, a, k)) = s {
+                        if let (E::Reg(j), E::Const(k)) = (&**a, &**k) {
+                            if plain && *i < 13 && *j < 13 && i != j {
+                                derived.insert(*i, (*j, *k));
+                            }
+                        }
+                    }
+                }
+                _ => derived.clear(),
+            }
         }
+        ir::set_bases(at_start);
         if text.is_empty() {
             continue;
         }
