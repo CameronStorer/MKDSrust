@@ -57,6 +57,11 @@ mod sdk;
 pub mod fs;
 
 /// Every native function (on trial until it passes the shadow checker), in no particular order.
+/// Functions mod scripts can hook as events (`Machine::hook_after`): AMCE revision 0 entries. Native-timing
+/// builds never call them directly, so every call passes the dispatcher and its hooks.
+/// - 0x020F8A04 `item_roulette_select`: the item an item box gives.
+pub const EVENT_ENTRIES: &[u32] = &[0x020F_8A04];
+
 pub static NATIVE: &[Native] = &[
     Native { segment: "arm9_main", entry: 0x0200_fe74, name: "MATH_CountLeadingZeros", f: sdk::count_leading_zeros_block },
     Native { segment: "arm9_main", entry: 0x0213_3048, name: "msl_multiply_u64", f: sdk::multiply64_block },

@@ -803,6 +803,7 @@ static TYPE_DUMP: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new
 fn direct_excluded() -> HashSet<u32> {
     let mut x: HashSet<u32> = recomp::native::NATIVE.iter().chain(recomp::native::fs::NATIVES).map(|n| n.entry & !1).collect();
     x.extend(recomp::os_hle::SAFE_ENTRIES.iter().map(|e| e.0 & !1));
+    x.extend(recomp::native::EVENT_ENTRIES.iter().map(|e| e & !1));
     x.extend([recomp::os_hle::OS_GET_TICK, 0x0200_DE50, 0x0200_E6EC, 0x0200_E738]);
     x
 }

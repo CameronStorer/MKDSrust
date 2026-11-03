@@ -353,6 +353,17 @@ impl Mem for GuestBus {
 impl Bus for GuestBus {
     fn call(&mut self, c: &mut Cpu, target: u32, ret: u32) -> u32 {
         let sp = c.r[13];
+        // a host after-hook (mod script events): run the function, then the hook on a normal return
+        if let Some(mut h) = self.g().s().machine.take_after(target) {
+            let args = [c.r[0], c.r[1], c.r[2], c.r[3]];
+            let pc = self.g().run(target, Some((ret, sp)));
+            let s = self.g().s();
+            if pc == ret {
+                h(&args, &mut s.cpu, &mut s.machine.hw);
+            }
+            s.machine.put_after(target, h);
+            return pc;
+        }
 
         let pc = self.g().run(target, Some((ret, sp)));
         // test-only `MKDS_TICK_PIN`: a pinned OS_GetTick call returns here (not through a dispatch)

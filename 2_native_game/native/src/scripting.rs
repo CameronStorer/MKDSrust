@@ -4,6 +4,9 @@
 //! memory limit. A script that errors or runs over budget is switched off with a log line; the game keeps going.
 //! API v1:
 //! - `game.on("frame", fn(frame))`, `game.frame()`, `game.scene()`
+//! - `game.on("item_roll", fn(e))`: an item box's roulette result; `e.place` (1-8), `e.item` (item id; set it to
+//!   give another item). `items.GREEN_SHELL` (0), `items.RED_SHELL` (1), `items.BANANA` (2); other ids are the game's
+//!   own numbers until verified.
 //! - `race.racers()` -> list of `{ index, x, y, z, is_player }` (positions in world units)
 //! - `race.player()` -> `{ x, y, z, lap, place, ticks }` or nil outside a race
 //! - `input.A`.. `input.Y` (button bits), `input.buttons()` (held this frame; X/Y can't be read yet),
@@ -45,6 +48,7 @@ struct Script {
     /// The data the API functions return this frame (set before the handlers run).
     snap: Rc<RefCell<(u64, Snapshot)>>,
     handlers: Rc<RefCell<Vec<Function>>>,
+    item_roll: Rc<RefCell<Vec<Function>>>,
     /// Buttons `input.set` asked for this frame.
     input: Rc<Cell<Option<u16>>>,
     /// Saved settings, and whether they changed this frame.
@@ -99,14 +103,16 @@ impl Script {
         )
         .map_err(err)?;
         let game = lua.create_table().map_err(err)?;
-        let h = handlers.clone();
+        let item_roll: Rc<RefCell<Vec<Function>>> = Rc::new(RefCell::new(Vec::new()));
+        let (h, ir) = (handlers.clone(), item_roll.clone());
         game.set(
             "on",
             lua.create_function(move |_, (event, f): (String, Function)| {
-                if event != "frame" {
-                    return Err(mlua::Error::runtime(format!("unknown event {event} (v1 has: frame)")));
+                match event.as_str() {
+                    "frame" => h.borrow_mut().push(f),
+                    "item_roll" => ir.borrow_mut().push(f),
+                    _ => return Err(mlua::Error::runtime(format!("unknown event {event} (v1 has: frame, item_roll)"))),
                 }
-                h.borrow_mut().push(f);
                 Ok(())
             })
             .map_err(err)?,
@@ -179,6 +185,12 @@ impl Script {
             )
             .map_err(err)?;
         g.set("input", input).map_err(err)?;
+        // item ids, named only once verified in game (the roulette override test showed these three)
+        let items = lua.create_table().map_err(err)?;
+        for (k, v) in [("GREEN_SHELL", 0u32), ("RED_SHELL", 1), ("BANANA", 2)] {
+            items.set(k, v).map_err(err)?;
+        }
+        g.set("items", items).map_err(err)?;
         // store
         let saved: serde_json::Map<String, serde_json::Value> = store_path
             .as_ref()
@@ -232,12 +244,39 @@ impl Script {
             .map_err(err)?;
         g.set("store", store).map_err(err)?;
         lua.sandbox(true).map_err(err)?;
-        let s = Script { name, lua, deadline, snap, handlers, input: input_set, store: store_cell, store_path, off: false };
+        let s = Script { name, lua, deadline, snap, handlers, item_roll, input: input_set, store: store_cell, store_path, off: false };
         s.deadline.set(Some(Instant::now() + FRAME_BUDGET * 50));
         let r = s.lua.load(source).set_name(s.name.clone()).exec();
         s.deadline.set(None);
         r.map_err(|e| format!("{}: {e}", s.name))?;
         Ok(s)
+    }
+
+    /// Runs the `item_roll` handlers on an event table; returns the item they leave in it.
+    fn item_roll(&mut self, place: u32, item: u32) -> Option<u32> {
+        if self.off || self.item_roll.borrow().is_empty() {
+            return None;
+        }
+        let handlers: Vec<Function> = self.item_roll.borrow().clone();
+        self.deadline.set(Some(Instant::now() + FRAME_BUDGET));
+        let r = (|| -> mlua::Result<u32> {
+            let e = self.lua.create_table()?;
+            e.set("place", place)?;
+            e.set("item", item)?;
+            for f in &handlers {
+                f.call::<()>(e.clone())?;
+            }
+            e.get::<u32>("item")
+        })();
+        self.deadline.set(None);
+        match r {
+            Ok(v) => Some(v),
+            Err(e) => {
+                eprintln!("[lua {}] switched off: {e}", self.name);
+                self.off = true;
+                None
+            }
+        }
     }
 
     /// Runs the frame handlers; returns the buttons `input.set` asked for.
@@ -345,6 +384,23 @@ impl Scripts {
         Some(Scripts { scripts })
     }
 
+    /// An item box roulette result (`place` 1-8, `item` id): each script's `item_roll` handlers in load order
+    /// may change it; returns the final item.
+    pub fn item_roll(&mut self, place: u32, item: u32) -> u32 {
+        let mut item = item;
+        for s in &mut self.scripts {
+            if let Some(v) = s.item_roll(place, item) {
+                item = v;
+            }
+        }
+        item
+    }
+
+    /// Whether any script handles `item_roll`.
+    pub fn wants_item_roll(&self) -> bool {
+        self.scripts.iter().any(|s| !s.item_roll.borrow().is_empty())
+    }
+
     /// Runs every script's `frame` handlers once; returns the buttons to hold next frame, if a script set
     /// them (the last script in load order wins).
     pub fn frame(&mut self, frame: u64, m: &mut impl Mem) -> Option<u16> {
@@ -398,6 +454,22 @@ mod tests {
         assert_eq!(s.frame(1, snap()), Some(2 | 1024));
         let mut quiet = Script::load("t".into(), "game.on('frame', function() end)").unwrap();
         assert_eq!(quiet.frame(1, snap()), None);
+    }
+
+    #[test]
+    fn item_roll_handlers_change_the_item_in_order() {
+        let mut s = Script::load(
+            "t".into(),
+            "game.on('item_roll', function(e) if e.place == 1 then e.item = 7 + items.GREEN_SHELL end end) game.on('item_roll', function(e) e.item = e.item + 100 end)",
+        )
+        .unwrap();
+        assert_eq!(s.item_roll(1, 3), Some(107));
+        assert_eq!(s.item_roll(2, 3), Some(103));
+        let mut none = Script::load("t".into(), "game.on('frame', function() end)").unwrap();
+        assert_eq!(none.item_roll(1, 3), None);
+        let mut bad = Script::load("t".into(), "game.on('item_roll', function(e) e.item = 'x' end)").unwrap();
+        assert_eq!(bad.item_roll(1, 3), None);
+        assert!(bad.off);
     }
 
     #[test]

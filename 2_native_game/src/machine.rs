@@ -10,6 +10,10 @@ use std::collections::HashMap;
 use std::io::{BufWriter, Write};
 
 /// How a function is replaced. After a hook runs the call returns to the caller.
+/// Runs after the function at its entry returns normally: gets the argument registers r0-r3 as they were at
+/// the call, and may read or change the result registers (mod script events, call tracing).
+pub type AfterHook = Box<dyn FnMut(&[u32; 4], &mut Cpu, &mut ds_mem::Bus)>;
+
 #[derive(Clone, Copy)]
 pub enum Hook {
     /// Do nothing (cache maintenance, debug output); r0 is left alone.
@@ -35,6 +39,8 @@ pub struct Machine<'a> {
     pub hw: ds_mem::Bus,
     disp: &'a Dispatcher,
     hooks: HashMap<u32, Hook>,
+    /// Functions that run normally, then call a host hook on return (see [`AfterHook`]).
+    after: HashMap<u32, AfterHook>,
     cp15: HashMap<(u8, u8, u8, u8), u32>,
     /// Services the game asked for that nothing implements yet: what, how many times.
     pub unhandled: HashMap<String, u32>,
@@ -122,6 +128,7 @@ impl<'a> Machine<'a> {
             hw,
             disp,
             hooks: HashMap::new(),
+            after: HashMap::new(),
             cp15: HashMap::new(),
             unhandled: HashMap::new(),
             hook_hits: HashMap::new(),
@@ -165,6 +172,21 @@ impl<'a> Machine<'a> {
             }
         }
         m
+    }
+
+    /// Run `h` each time the function at `entry` (bit 0 ignored) returns normally. Only calls that go
+    /// through the dispatcher see it: functions listed in `native::EVENT_ENTRIES` are never called directly.
+    pub fn hook_after(&mut self, entry: u32, h: AfterHook) {
+        self.after.insert(entry & !1, h);
+    }
+
+    /// Takes the after-hook at `entry` while the call runs (calls inside it don't see it); see [`Self::put_after`].
+    pub(crate) fn take_after(&mut self, entry: u32) -> Option<AfterHook> {
+        if self.after.is_empty() { None } else { self.after.remove(&(entry & !1)) }
+    }
+
+    pub(crate) fn put_after(&mut self, entry: u32, h: AfterHook) {
+        self.after.insert(entry & !1, h);
     }
 
     /// Replace the function at `entry` (bit 0 ignored).
@@ -261,6 +283,15 @@ impl Bus for Machine<'_> {
             return ret;
         }
         let d = self.disp;
+        if let Some(mut h) = self.after.remove(&(target & !1)) {
+            let args = [c.r[0], c.r[1], c.r[2], c.r[3]];
+            let x = d.call(c, self, target, ret);
+            if x == ret {
+                h(&args, c, &mut self.hw);
+            }
+            self.after.insert(target & !1, h);
+            return x;
+        }
         d.call(c, self, target, ret)
     }
 

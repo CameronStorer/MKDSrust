@@ -515,12 +515,27 @@ fn emulate(
     let mut last_snapshot = u64::MAX;
     let mut watch = watch::Watch::from_env();
     let mut poke = watch::Poke::from_env();
+    // diagnostics: `MKDS_TRACE_CALL=0xADDR[,..]` logs each call's arguments (r0-r3) and results (r0, r1)
+    if let Ok(list) = std::env::var("MKDS_TRACE_CALL") {
+        for a in list.split(',').filter_map(|v| u32::from_str_radix(v.trim().trim_start_matches("0x"), 16).ok()) {
+            session.machine.hook_after(a, Box::new(move |args, c, hw| {
+                eprintln!("[call {a:#x}] f{} args {:#x?} -> r0 {:#x} r1 {:#x}", hw.cycles / recomp::boot::session::FRAME_CYCLES, args, c.r[0], c.r[1]);
+            }));
+        }
+    }
     let mut race = options.race.clone().map(race::Race::new);
     // mod scripts follow the same rule as mod files; `--script` files always run
     let mod_dir = mods::allowed(options.headless)
         .then(|| std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from)))
         .flatten();
-    let mut scripts = scripting::Scripts::load(&options.scripts, mod_dir.as_deref());
+    let scripts = scripting::Scripts::load(&options.scripts, mod_dir.as_deref()).map(|s| Rc::new(RefCell::new(s)));
+    if let Some(sc) = scripts.as_ref().filter(|s| s.borrow().wants_item_roll()) {
+        // `item_roll`: after the roulette (`EVENT_ENTRIES`) returns, scripts may change the item in r0
+        let sc = Rc::clone(sc);
+        session.machine.hook_after(0x020F_8A04, Box::new(move |args, c, _| {
+            c.r[0] = sc.borrow_mut().item_roll(args[2], c.r[0]);
+        }));
+    }
     if let Some(dir) = &options.snapshots {
         std::fs::create_dir_all(dir).map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
     }
@@ -590,8 +605,8 @@ fn emulate(
                     if let Some(r) = race.as_mut() {
                         r.frame(session.frame_number(), &mut session.machine)?;
                     }
-                    if let Some(s) = scripts.as_mut() {
-                        script_input.set(s.frame(session.frame_number(), &mut session.machine));
+                    if let Some(s) = scripts.as_ref() {
+                        script_input.set(s.borrow_mut().frame(session.frame_number(), &mut session.machine));
                     }
                 }
                 if let Some(p) = poke.as_mut() {
