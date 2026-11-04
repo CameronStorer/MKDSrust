@@ -19,8 +19,8 @@ const SCENE_HISTORY: u32 = 0x0216_53B8;
 const SCENE_RACE: u16 = 2;
 /// Pointer to the race setup.
 const RACE_SETUP: u32 = 0x0217_59A0;
-/// The course table: 8 bytes per course, the course's name pointer at +4.
-const COURSE_TABLE: u32 = 0x0215_422C;
+/// The course table: 8 bytes per course (name pointer, kind); entry 0 is an empty placeholder, ids 1-54 are courses.
+const COURSE_TABLE: u32 = 0x0215_4228;
 /// Frames after the scene switch during which the chosen values are written.
 const HOLD_FRAMES: u64 = 90;
 
@@ -67,11 +67,11 @@ fn c_string(m: &mut impl Mem, mut a: u32) -> String {
     s
 }
 
-/// The courses in the game's own course table: (id, internal name).
+/// The courses in the game's own course table: (id, internal name). Id 0 is a placeholder and is skipped.
 pub fn courses(m: &mut impl Mem) -> Vec<(u32, String)> {
     let mut out = Vec::new();
-    for i in 0..64u32 {
-        let p = m.r32(COURSE_TABLE + i * 8 + 4);
+    for i in 1..64u32 {
+        let p = m.r32(COURSE_TABLE + i * 8);
         if !valid(p) {
             break;
         }
