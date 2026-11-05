@@ -1,14 +1,17 @@
 //! Transactional overlay on the verified in-memory card. Acceptance never calls this module.
 use mkds_builder::{
-    modpkg::{self, Entry, Manifest},
+    modpkg::{self, Manifest},
     rom,
 };
-use modpkg::bspatch;
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::Path,
 };
 type Result<T> = modpkg::Result<T>;
+#[cfg(test)]
+#[path = "../../../1_build_tool/tests/common/mod.rs"]
+mod format3_fixtures;
 
 pub fn allowed(headless: bool) -> bool {
     allowed_for(
@@ -73,75 +76,14 @@ pub fn apply(card: &mut Vec<u8>, game: &Path, log: &mut dyn FnMut(String)) -> Re
             if !root.starts_with(&mods) {
                 return Err("Mod escapes mods directory".into());
             }
-            let mut changes = BTreeMap::new();
-            let mut total = 0u64;
-            for (target, e) in &m.files {
-                let file = root.join(e.source()).canonicalize()?;
-                if !file.starts_with(&root) {
-                    return Err("Payload escapes mod directory".into());
-                }
-                if std::fs::metadata(&file)?.len() > modpkg::MAX_ZIP {
-                    return Err("Payload too large".into());
-                }
-                let payload = std::fs::read(file)?;
-                let bytes = match e {
-                    Entry::Add(_) => {
-                        if originals.contains_key(target) {
-                            return Err("add replaces retail path".into());
-                        }
-                        payload
-                    }
-                    Entry::Patch(_) => {
-                        if !originals.contains_key(target) {
-                            return Err("patch target absent from ROM".into());
-                        }
-                        let source = current.get(target).ok_or("Patch target missing")?;
-                        // Input key includes current bytes, so changing load order invalidates the cache.
-                        let key = modpkg::hash(
-                            format!("v1:{}:{}", modpkg::hash(source), modpkg::hash(&payload))
-                                .as_bytes(),
-                        );
-                        let cache = game.join("mods/.cache");
-                        std::fs::create_dir_all(&cache)?;
-                        let cached = std::fs::read_to_string(cache.join(format!("{key}.index")))
-                            .ok()
-                            .and_then(|digest| {
-                                if digest.len() != 64
-                                    || !digest.bytes().all(|b| b.is_ascii_hexdigit())
-                                {
-                                    return None;
-                                }
-                                let file = cache.join(&digest);
-                                if std::fs::metadata(&file).ok()?.len() > modpkg::MAX_UNPACKED {
-                                    return None;
-                                }
-                                std::fs::read(file)
-                                    .ok()
-                                    .filter(|b| modpkg::hash(b) == digest)
-                            });
-                        if let Some(bytes) = cached {
-                            bytes
-                        } else {
-                            let patcher = bspatch::Bspatch::new(&payload)?;
-                            if patcher.hint_target_size() > modpkg::MAX_UNPACKED {
-                                return Err("Patch result too large".into());
-                            }
-                            let mut bytes = Vec::new();
-                            patcher.apply(source, &mut bytes)?;
-                            let digest = modpkg::hash(&bytes);
-                            std::fs::write(cache.join(&digest), &bytes)?;
-                            std::fs::write(cache.join(format!("{key}.index")), digest)?;
-                            bytes
-                        }
-                    }
-                };
-                total += bytes.len() as u64;
-                if total > modpkg::MAX_UNPACKED {
-                    return Err("Mod result exceeds limit".into());
-                }
-                changes.insert(target.clone(), bytes);
-            }
-            Ok(changes)
+            let payloads = modpkg::overlay::read_payloads(&root, m)?;
+            modpkg::overlay::stage(
+                m,
+                &payloads,
+                &originals,
+                &current,
+                Some(&game.join("mods/.cache")),
+            )
         })();
         match result {
             Ok(changes) => {
@@ -278,6 +220,86 @@ fn rebuild(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn archive_mods_stack_atomically_and_cache_replays_current_inputs() {
+        use super::format3_fixtures::*;
+        let inner = mkds_builder::dsfiles::lz77_compress(&narc(&[
+            ("folder/a.bmg", b"old a".to_vec()),
+            ("b.bmg", b"old b".to_vec()),
+        ]));
+        let root = mkds_builder::dsfiles::lz77_compress(&narc(&[("inner.carc", inner)]));
+        let original = rom(&[
+            ("archive.carc", root),
+            ("0loose.bmg", b"old loose".to_vec()),
+        ]);
+        let game = tempfile::tempdir().unwrap();
+        let packages = [
+            package(
+                "test.first",
+                "archive.carc",
+                &[("inner.carc/folder/a.bmg", b"old a", b"first a")],
+            ),
+            package(
+                "test.second",
+                "archive.carc",
+                &[("inner.carc/b.bmg", b"old b", b"second b")],
+            ),
+            package(
+                "test.conflict",
+                "archive.carc",
+                &[("inner.carc/folder/a.bmg", b"old a", b"conflict")],
+            ),
+        ];
+        let mut order = Vec::new();
+        for mut p in packages {
+            let m = manifest(&p);
+            order.push(m.id.clone());
+            if m.id == "test.conflict" {
+                // A valid earlier entry must be discarded when the archive member fails.
+                p.insert(
+                    "patches/loose.bsdiff".into(),
+                    patch(b"old loose", b"wrong loose"),
+                );
+                edit_manifest(&mut p, |m| {
+                    m["files"]["0loose.bmg"] = serde_json::json!({"patch":"patches/loose.bsdiff"});
+                });
+            }
+            let dir = game.path().join("mods").join(&m.id);
+            for (name, bytes) in p {
+                let path = dir.join(name);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, bytes).unwrap();
+            }
+        }
+        modpkg::save_enabled(game.path(), &order).unwrap();
+        for _ in 0..2 {
+            let mut card = original.clone();
+            let mut logs = Vec::new();
+            apply(&mut card, game.path(), &mut |l| logs.push(l)).unwrap();
+            let fs = rom::NitroFs::parse(&card).unwrap();
+            let inner = member(fs.file("archive.carc").unwrap(), "inner.carc");
+            assert_eq!(member(&inner, "folder/a.bmg"), b"first a");
+            assert_eq!(member(&inner, "b.bmg"), b"second b");
+            assert_eq!(fs.file("0loose.bmg").unwrap(), b"old loose");
+            assert!(
+                logs.iter().any(|l| l.contains("skipped test.conflict")
+                    && l.contains("inner.carc/folder/a.bmg"))
+            );
+        }
+        order.swap(0, 1);
+        modpkg::save_enabled(game.path(), &order).unwrap();
+        let mut card = original.clone();
+        apply(&mut card, game.path(), &mut |_| {}).unwrap();
+        let inner = member(
+            rom::NitroFs::parse(&card)
+                .unwrap()
+                .file("archive.carc")
+                .unwrap(),
+            "inner.carc",
+        );
+        assert_eq!(member(&inner, "folder/a.bmg"), b"first a");
+        assert_eq!(member(&inner, "b.bmg"), b"second b");
+    }
     fn fixture() -> Vec<u8> {
         let mut card = vec![0; 0x10000];
         let fnt = [8, 0, 0, 0, 0, 0, 1, 0, 1, b'a', 0];
@@ -302,7 +324,9 @@ mod tests {
             let root = game.path().join("mods").join(id);
             std::fs::create_dir_all(&root).unwrap();
             let mut patch = Vec::new();
-            modpkg::qbsdiff::Bsdiff::new(from, to).compare(&mut patch).unwrap();
+            modpkg::qbsdiff::Bsdiff::new(from, to)
+                .compare(&mut patch)
+                .unwrap();
             std::fs::write(root.join("patch.bsdiff"), patch).unwrap();
             let mut files = serde_json::json!({"a":{"patch":"patch.bsdiff"}});
             if bad {

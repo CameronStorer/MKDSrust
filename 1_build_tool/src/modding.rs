@@ -71,7 +71,10 @@ impl Draft {
         }
     }
     /// The package manifest for these files (validated like any downloaded package).
-    pub fn manifest(&self, files: BTreeMap<String, modpkg::Entry>) -> Result<(modpkg::Manifest, Vec<u8>)> {
+    pub fn manifest(
+        &self,
+        files: BTreeMap<String, modpkg::Entry>,
+    ) -> Result<(modpkg::Manifest, Vec<u8>)> {
         let mut v = serde_json::to_value(self)?;
         v["files"] = serde_json::to_value(&files)?;
         let bytes = serde_json::to_vec_pretty(&v)?;
@@ -99,7 +102,11 @@ pub fn suggest_id(author: &str, name: &str) -> String {
         (false, true) => format!("{a}.mod"),
         _ => "my.mod".into(),
     };
-    id.chars().take(64).collect::<String>().trim_end_matches(['-', '.']).to_string()
+    id.chars()
+        .take(64)
+        .collect::<String>()
+        .trim_end_matches(['-', '.'])
+        .to_string()
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -116,7 +123,10 @@ impl Workspace {
     pub fn open(dir: &Path) -> Result<Self> {
         let draft: Draft = serde_json::from_slice(&std::fs::read(dir.join("manifest.json"))?)
             .map_err(|e| format!("{}: manifest.json: {e}", dir.display()))?;
-        Ok(Self { dir: dir.into(), draft })
+        Ok(Self {
+            dir: dir.into(),
+            draft,
+        })
     }
     /// The ROM this workspace was made from, if it was recorded.
     pub fn rom(&self) -> Option<PathBuf> {
@@ -134,7 +144,12 @@ pub fn list(root: &Path) -> Vec<Workspace> {
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .filter_map(|e| Workspace::open(&e.path()).ok())
         .collect();
-    out.sort_by(|a, b| a.draft.name.to_lowercase().cmp(&b.draft.name.to_lowercase()));
+    out.sort_by(|a, b| {
+        a.draft
+            .name
+            .to_lowercase()
+            .cmp(&b.draft.name.to_lowercase())
+    });
     out
 }
 
@@ -157,7 +172,9 @@ fn entry_name(e: &dsfiles::NarcEntry, i: usize) -> String {
 /// Archive bytes as a NARC (`.carc` decompressed), or None when `path` is not a readable archive.
 fn narc_of(path: &str, bytes: &[u8]) -> Option<Vec<u8>> {
     match dsfiles::ext_of(path).as_str() {
-        "carc" => dsfiles::lz77_decompress(bytes, modpkg::MAX_UNPACKED as usize).ok().filter(|b| b.starts_with(b"NARC")),
+        "carc" => dsfiles::lz77_decompress(bytes, modpkg::MAX_UNPACKED as usize)
+            .ok()
+            .filter(|b| b.starts_with(b"NARC")),
         "narc" => Some(bytes.to_vec()),
         _ => None,
     }
@@ -165,9 +182,20 @@ fn narc_of(path: &str, bytes: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// Make a workspace `<root>/<draft.id>/` from the player's ROM.
-pub fn create(root: &Path, draft: &Draft, rom_path: &Path, rom: &[u8], extract_archives: bool) -> Result<PathBuf> {
+pub fn create(
+    root: &Path,
+    draft: &Draft,
+    rom_path: &Path,
+    rom: &[u8],
+    extract_archives: bool,
+) -> Result<PathBuf> {
     // the same rules as a real package (one placeholder file, since files are only known when packing)
-    let placeholder = BTreeMap::from([("x.bmg".to_string(), modpkg::Entry::Add(modpkg::Add { add: "x.bmg".into() }))]);
+    let placeholder = BTreeMap::from([(
+        "x.bmg".to_string(),
+        modpkg::Entry::Add(modpkg::Add {
+            add: "x.bmg".into(),
+        }),
+    )]);
     draft.manifest(placeholder)?;
     let dir = root.join(&draft.id);
     if dir.exists() {
@@ -194,9 +222,20 @@ pub fn create(root: &Path, draft: &Draft, rom_path: &Path, rom: &[u8], extract_a
         write(&romfs.join(path), bytes)?;
     }
     std::fs::create_dir_all(staging.path().join(EXTRAS))?;
-    write(&staging.path().join("manifest.json"), &serde_json::to_vec_pretty(draft)?)?;
-    write(&staging.path().join("README.md"), readme(draft, archives).as_bytes())?;
-    write(&staging.path().join(STATE), &serde_json::to_vec_pretty(&State { rom: Some(rom_path.into()) })?)?;
+    write(
+        &staging.path().join("manifest.json"),
+        &serde_json::to_vec_pretty(draft)?,
+    )?;
+    write(
+        &staging.path().join("README.md"),
+        readme(draft, archives).as_bytes(),
+    )?;
+    write(
+        &staging.path().join(STATE),
+        &serde_json::to_vec_pretty(&State {
+            rom: Some(rom_path.into()),
+        })?,
+    )?;
     std::fs::rename(staging.keep(), &dir)?;
     Ok(dir)
 }
@@ -300,10 +339,16 @@ fn walk(dir: &Path) -> Vec<(String, PathBuf)> {
 }
 
 /// The workspace's current bytes for ROM file `path`, or None when unchanged / missing.
-fn current(romfs: &Path, path: &str, original: &[u8], report: &mut Report) -> Result<Option<Vec<u8>>> {
+fn current(
+    romfs: &Path,
+    path: &str,
+    original: &[u8],
+    report: &mut Report,
+) -> Result<Option<Vec<u8>>> {
     let folder = romfs.join(format!("{path}{UNPACKED}"));
     if folder.is_dir() {
-        let narc = narc_of(path, original).ok_or_else(|| format!("{path}{UNPACKED}: the original is not an archive"))?;
+        let narc = narc_of(path, original)
+            .ok_or_else(|| format!("{path}{UNPACKED}: the original is not an archive"))?;
         let entries = dsfiles::parse_narc(&narc)?;
         let mut files = Vec::with_capacity(entries.len());
         let mut changed = false;
@@ -317,7 +362,9 @@ fn current(romfs: &Path, path: &str, original: &[u8], report: &mut Report) -> Re
                     files.push(b);
                 }
                 Err(_) => {
-                    report.skipped.push(format!("{path}{UNPACKED}/{name} is missing; the original is kept"));
+                    report.skipped.push(format!(
+                        "{path}{UNPACKED}/{name} is missing; the original is kept"
+                    ));
                     files.push(e.data.to_vec());
                 }
             }
@@ -328,14 +375,20 @@ fn current(romfs: &Path, path: &str, original: &[u8], report: &mut Report) -> Re
             }
         }
         if romfs.join(path).is_file() {
-            report.skipped.push(format!("{path}: both the archive and its {UNPACKED} folder exist; the folder is used"));
+            report.skipped.push(format!(
+                "{path}: both the archive and its {UNPACKED} folder exist; the folder is used"
+            ));
         }
         if !changed {
             return Ok(None);
         }
         // splice into the original archive and reuse the original compression around the edit: small patches
         let rebuilt = dsfiles::update_narc(&narc, &files)?;
-        return Ok(Some(if dsfiles::ext_of(path) == "carc" { dsfiles::lz77_recompress(original, &rebuilt) } else { rebuilt }));
+        return Ok(Some(if dsfiles::ext_of(path) == "carc" {
+            dsfiles::lz77_recompress(original, &rebuilt)
+        } else {
+            rebuilt
+        }));
     }
     match std::fs::read(romfs.join(path)) {
         Ok(b) if b != original => Ok(Some(b)),
@@ -346,7 +399,12 @@ fn current(romfs: &Path, path: &str, original: &[u8], report: &mut Report) -> Re
 
 /// Package contents (manifest + payloads) for a workspace, as `pack` would zip them. `id` overrides the mod id
 /// (used by "Test in game"). Screened against `retail` before returning.
-pub fn stage(ws: &Workspace, rom: &[u8], retail: &modpkg::RetailIndex, id: Option<&str>) -> Result<(modpkg::Package, Report)> {
+pub fn stage(
+    ws: &Workspace,
+    rom: &[u8],
+    retail: &modpkg::RetailIndex,
+    id: Option<&str>,
+) -> Result<(modpkg::Package, Report)> {
     let fs = crate::rom::NitroFs::parse(rom)?;
     let romfs = ws.dir.join("romfs");
     if !romfs.is_dir() {
@@ -366,7 +424,8 @@ pub fn stage(ws: &Workspace, rom: &[u8], retail: &modpkg::RetailIndex, id: Optio
             // a whole .carc recompressed by another tool: the same contents spliced into the original stream
             // decompress identically and usually patch far smaller
             if dsfiles::ext_of(path) == "carc" {
-                if let Ok(contents) = dsfiles::lz77_decompress(&new, modpkg::MAX_UNPACKED as usize) {
+                if let Ok(contents) = dsfiles::lz77_decompress(&new, modpkg::MAX_UNPACKED as usize)
+                {
                     let spliced = dsfiles::lz77_recompress(original, &contents);
                     let mut alt = Vec::new();
                     modpkg::qbsdiff::Bsdiff::new(original, &spliced).compare(&mut alt)?;
@@ -376,8 +435,15 @@ pub fn stage(ws: &Workspace, rom: &[u8], retail: &modpkg::RetailIndex, id: Optio
                 }
             }
             let name = format!("patches/{path}.bsdiff");
-            report.patched.push((path.to_string(), new.len() as u64, patch.len() as u64));
-            files.insert(path.to_string(), modpkg::Entry::Patch(modpkg::Patch { patch: name.clone() }));
+            report
+                .patched
+                .push((path.to_string(), new.len() as u64, patch.len() as u64));
+            files.insert(
+                path.to_string(),
+                modpkg::Entry::Patch(modpkg::Patch {
+                    patch: name.clone(),
+                }),
+            );
             contents.insert(name, patch);
         }
     }
@@ -395,7 +461,9 @@ pub fn stage(ws: &Workspace, rom: &[u8], retail: &modpkg::RetailIndex, id: Optio
         let mut budget = modpkg::MAX_UNPACKED as usize;
         let problems = dsfiles::check_game_file(&bytes, &rel, &mut budget, 0);
         if !problems.is_empty() || !modpkg::safe_path(&rel) {
-            report.skipped.push(format!("{rel}: not packed ({})", problems.join("; ")));
+            report
+                .skipped
+                .push(format!("{rel}: not packed ({})", problems.join("; ")));
             continue;
         }
         let name = format!("files/{rel}");
@@ -408,11 +476,17 @@ pub fn stage(ws: &Workspace, rom: &[u8], retail: &modpkg::RetailIndex, id: Optio
     }
     for (rel, full) in walk(&ws.dir.join(EXTRAS)) {
         if dsfiles::is_readme(&rel) || dsfiles::is_preview_path(&rel) {
-            let name = if dsfiles::is_readme(&rel) { rel.clone() } else { format!("previews/{}", rel.rsplit('/').next().unwrap()) };
+            let name = if dsfiles::is_readme(&rel) {
+                rel.clone()
+            } else {
+                format!("previews/{}", rel.rsplit('/').next().unwrap())
+            };
             contents.insert(name.clone(), std::fs::read(full)?);
             report.extras.push(name);
         } else {
-            report.skipped.push(format!("{EXTRAS}/{rel}: only README.md/README.txt and preview images go in {EXTRAS}/"));
+            report.skipped.push(format!(
+                "{EXTRAS}/{rel}: only README.md/README.txt and preview images go in {EXTRAS}/"
+            ));
         }
     }
     let mut draft = ws.draft.clone();
@@ -421,7 +495,8 @@ pub fn stage(ws: &Workspace, rom: &[u8], retail: &modpkg::RetailIndex, id: Optio
     }
     let (_, manifest) = draft.manifest(files)?;
     contents.insert("manifest.json".into(), manifest);
-    let pkg = modpkg::Package::validate(contents, retail).map_err(|e| format!("Screening failed:\n{e}"))?;
+    let pkg = modpkg::Package::validate(contents, retail)
+        .map_err(|e| format!("Screening failed:\n{e}"))?;
     report.warnings.extend(pkg.warnings.iter().cloned());
     Ok((pkg, report))
 }
@@ -432,13 +507,18 @@ pub fn pack(ws: &Workspace, rom: &[u8], out: Option<&Path>) -> Result<Report> {
     let retail = modpkg::RetailIndex::from_rom(rom)?;
     let (pkg, mut report) = stage(ws, rom, &retail, None)?;
     let out = out.map(PathBuf::from).unwrap_or_else(|| {
-        ws.dir.parent().unwrap_or(&ws.dir).join("packages").join(format!("{}-{}.zip", ws.draft.id, ws.draft.version))
+        ws.dir
+            .parent()
+            .unwrap_or(&ws.dir)
+            .join("packages")
+            .join(format!("{}-{}.zip", ws.draft.id, ws.draft.version))
     });
     std::fs::create_dir_all(out.parent().unwrap())?;
     let mut staged = tempfile::NamedTempFile::new_in(out.parent().unwrap())?;
     {
         let mut zip = zip::ZipWriter::new(staged.as_file_mut());
-        let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
         for (name, data) in &pkg.contents {
             zip.start_file(name.as_str(), opts)?;
             zip.write_all(data)?;
@@ -449,7 +529,8 @@ pub fn pack(ws: &Workspace, rom: &[u8], out: Option<&Path>) -> Result<Report> {
         return Err("The package is larger than 100 MB".into());
     }
     // the zip itself, read back exactly as the launcher and site read uploads
-    modpkg::Package::read(staged.path(), &retail).map_err(|e| format!("The written zip failed screening:\n{e}"))?;
+    modpkg::Package::read(staged.path(), &retail)
+        .map_err(|e| format!("The written zip failed screening:\n{e}"))?;
     staged.persist(&out)?;
     report.zip = Some(out);
     Ok(report)
@@ -462,7 +543,12 @@ pub fn dev_id(id: &str) -> String {
 }
 
 /// Install a workspace into `game` as `<id>.dev`, enabled and last in the load order (highest priority).
-pub fn test_install(ws: &Workspace, rom: &[u8], retail: &modpkg::RetailIndex, game: &Path) -> Result<(String, Report)> {
+pub fn test_install(
+    ws: &Workspace,
+    rom: &[u8],
+    retail: &modpkg::RetailIndex,
+    game: &Path,
+) -> Result<(String, Report)> {
     let id = dev_id(&ws.draft.id);
     let (pkg, report) = stage(ws, rom, retail, Some(&id))?;
     remove_installed(game, &id)?;
@@ -486,6 +572,16 @@ pub fn install_zip(game: &Path, rom: &[u8], archive: &Path) -> Result<String> {
     }
     let retail = modpkg::RetailIndex::from_rom(rom)?;
     let pkg = modpkg::Package::read(archive, &retail)?;
+    // Validate v3 against the same current bytes the game will see at this load-order slot.
+    // Keep legacy install behavior and ordering, including disabled in-place updates.
+    if pkg
+        .manifest
+        .files
+        .values()
+        .any(|e| matches!(e, modpkg::Entry::Archive(_)))
+    {
+        validate_archive_install(game, rom, &pkg)?;
+    }
     let id = pkg.manifest.id.clone();
     let dest = game.join("mods").join(&id);
     let fresh = !dest.exists();
@@ -514,14 +610,71 @@ pub fn install_zip(game: &Path, rom: &[u8], archive: &Path) -> Result<String> {
     }
     modpkg::save_load_order(game, &order, &on)?;
     let mut msg = if fresh {
-        format!("Installed {} {} and enabled it (last in the load order).", pkg.manifest.name, pkg.manifest.version)
+        format!(
+            "Installed {} {} and enabled it (last in the load order).",
+            pkg.manifest.name, pkg.manifest.version
+        )
     } else {
-        format!("Updated {} to {} in place.", pkg.manifest.name, pkg.manifest.version)
+        format!(
+            "Updated {} to {} in place.",
+            pkg.manifest.name, pkg.manifest.version
+        )
     };
     if !pkg.warnings.is_empty() {
         msg += &format!(" Notes: {}", pkg.warnings.join("; "));
     }
     Ok(msg)
+}
+
+fn validate_archive_install(game: &Path, rom: &[u8], pkg: &modpkg::Package) -> Result<()> {
+    let fs = crate::rom::NitroFs::parse(rom)?;
+    let originals: modpkg::overlay::Files = fs
+        .paths()
+        .map(|p| (p.into(), fs.file(p).unwrap().to_vec()))
+        .collect();
+    let mut current = originals.clone();
+    let enabled = modpkg::enabled(game);
+    let all = modpkg::installed(game);
+    let requested: Vec<_> = all
+        .iter()
+        .filter(|m| enabled.contains(&m.id))
+        .cloned()
+        .collect();
+    let mut applied = Vec::new();
+    // Disabled updates retain their position too; only enabled predecessors supply bytes.
+    for id in modpkg::load_order(game) {
+        if id == pkg.manifest.id {
+            break;
+        }
+        if !enabled.contains(&id) {
+            continue;
+        }
+        let Some(m) = requested.iter().find(|m| m.id == id) else {
+            continue;
+        };
+        if !modpkg::issues(m, &requested).is_empty()
+            || modpkg::issues(m, &applied)
+                .iter()
+                .any(|s| s.contains("missing dependency"))
+        {
+            continue;
+        }
+        let result = (|| -> Result<_> {
+            let mods = game.join("mods").canonicalize()?;
+            let root = mods.join(&id).canonicalize()?;
+            if !root.starts_with(&mods) {
+                return Err("Mod escapes mods directory".into());
+            }
+            let payloads = modpkg::overlay::read_payloads(&root, m)?;
+            modpkg::overlay::stage(m, &payloads, &originals, &current, None)
+        })();
+        if let Ok(changes) = result {
+            current.extend(changes);
+            applied.push(m.clone());
+        }
+    }
+    modpkg::overlay::stage(&pkg.manifest, &pkg.contents, &originals, &current, None)?;
+    Ok(())
 }
 
 /// Remove an installed mod folder and its load-order entries (no-op when absent).
@@ -531,12 +684,20 @@ pub fn remove_installed(game: &Path, id: &str) -> Result<()> {
     }
     let path = game.join("mods").join(id);
     match std::fs::symlink_metadata(&path) {
-        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => std::fs::remove_dir_all(&path)?,
+        Ok(meta) if meta.is_dir() && !meta.file_type().is_symlink() => {
+            std::fs::remove_dir_all(&path)?
+        }
         Ok(_) => return Err("Unsafe mod folder; remove it manually".into()),
         Err(_) => {}
     }
-    let order: Vec<String> = modpkg::load_order(game).into_iter().filter(|x| x != id).collect();
-    let enabled: BTreeSet<String> = modpkg::enabled(game).into_iter().filter(|x| x != id).collect();
+    let order: Vec<String> = modpkg::load_order(game)
+        .into_iter()
+        .filter(|x| x != id)
+        .collect();
+    let enabled: BTreeSet<String> = modpkg::enabled(game)
+        .into_iter()
+        .filter(|x| x != id)
+        .collect();
     modpkg::save_load_order(game, &order, &enabled)
 }
 
@@ -575,7 +736,12 @@ mod tests {
             rom[fat_off + i * 8..fat_off + i * 8 + 4].copy_from_slice(&a.to_le_bytes());
             rom[fat_off + i * 8 + 4..fat_off + i * 8 + 8].copy_from_slice(&b.to_le_bytes());
         }
-        for (off, v) in [(0x40, fnt_off), (0x44, fnt.len()), (0x48, fat_off), (0x4c, files.len() * 8)] {
+        for (off, v) in [
+            (0x40, fnt_off),
+            (0x44, fnt.len()),
+            (0x48, fat_off),
+            (0x4c, files.len() * 8),
+        ] {
             rom[off..off + 4].copy_from_slice(&(v as u32).to_le_bytes());
         }
         rom
@@ -604,7 +770,11 @@ mod tests {
         out.extend_from_slice(&btnf);
         out.extend_from_slice(b"GMIF");
         out.extend_from_slice(&8u32.to_le_bytes());
-        dsfiles::rebuild_narc(&out, &files.iter().map(|(_, d)| d.to_vec()).collect::<Vec<_>>()).unwrap()
+        dsfiles::rebuild_narc(
+            &out,
+            &files.iter().map(|(_, d)| d.to_vec()).collect::<Vec<_>>(),
+        )
+        .unwrap()
     }
     fn text(n: usize, seed: u8) -> Vec<u8> {
         let mut v = b"MESGbmg1".to_vec();
@@ -624,15 +794,33 @@ mod tests {
     #[test]
     fn create_edit_pack_install_round_trip() {
         let inner = narc(&[("msg.bmg", &text(3000, 3)), ("pal.nclr", b"RLCN0123")]);
-        let image = rom(&[("a.bmg", text(9000, 7)), ("b.carc", dsfiles::lz77_compress(&inner)), ("c.nclr", b"RLCN4567".to_vec())]);
+        let image = rom(&[
+            ("a.bmg", text(9000, 7)),
+            ("b.carc", dsfiles::lz77_compress(&inner)),
+            ("c.nclr", b"RLCN4567".to_vec()),
+        ]);
         let root = tempfile::tempdir().unwrap();
         let draft = Draft::new("me.test", "Test", "gameplay", "me");
         let dir = create(root.path(), &draft, Path::new("rom.nds"), &image, true).unwrap();
         assert!(create(root.path(), &draft, Path::new("rom.nds"), &image, true).is_err());
         let ws = Workspace::open(&dir).unwrap();
         assert_eq!(ws.rom().unwrap(), Path::new("rom.nds"));
-        assert!(dir.join("romfs/b.carc.unpacked/msg.bmg").is_file() && !dir.join("romfs/b.carc").exists());
-        assert!(stage(&ws, &image, &modpkg::RetailIndex::from_rom(&image).unwrap(), None).err().unwrap().to_string().contains("Nothing to pack"));
+        assert!(
+            dir.join("romfs/b.carc.unpacked/msg.bmg").is_file()
+                && !dir.join("romfs/b.carc").exists()
+        );
+        assert!(
+            stage(
+                &ws,
+                &image,
+                &modpkg::RetailIndex::from_rom(&image).unwrap(),
+                None
+            )
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("Nothing to pack")
+        );
 
         // edit one text file, one file inside the compressed archive, add a new file and extras
         let mut a = text(9000, 7);
@@ -662,18 +850,35 @@ mod tests {
         let pkg = modpkg::Package::read(&zip, &retail).unwrap();
         assert_eq!(pkg.manifest.kind, "gameplay");
         // create writes the platforms field; pack copies it into the package manifest
-        let draft_json: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("manifest.json")).unwrap()).unwrap();
+        let draft_json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.join("manifest.json")).unwrap()).unwrap();
         assert_eq!(draft_json["platforms"], serde_json::json!(["pc"]));
         assert_eq!(pkg.manifest.platforms, ["pc"]);
-        assert_eq!(serde_json::from_slice::<serde_json::Value>(&pkg.contents["manifest.json"]).unwrap()["platforms"], serde_json::json!(["pc"]));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&pkg.contents["manifest.json"]).unwrap()["platforms"],
+            serde_json::json!(["pc"])
+        );
         let mut ds = draft_json;
         ds["platforms"] = serde_json::json!(["pc", "ds"]);
-        std::fs::write(dir.join("manifest.json"), serde_json::to_vec_pretty(&ds).unwrap()).unwrap();
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec_pretty(&ds).unwrap(),
+        )
+        .unwrap();
         let (staged, _) = stage(&Workspace::open(&dir).unwrap(), &image, &retail, None).unwrap();
         assert_eq!(staged.manifest.platforms, ["pc", "ds"]);
         let patch = &pkg.contents["patches/b.carc.bsdiff"];
         let mut out = Vec::new();
-        modpkg::qbsdiff::Bspatch::new(patch).unwrap().apply(crate::rom::NitroFs::parse(&image).unwrap().file("b.carc").unwrap(), &mut out).unwrap();
+        modpkg::qbsdiff::Bspatch::new(patch)
+            .unwrap()
+            .apply(
+                crate::rom::NitroFs::parse(&image)
+                    .unwrap()
+                    .file("b.carc")
+                    .unwrap(),
+                &mut out,
+            )
+            .unwrap();
         let narc = dsfiles::lz77_decompress(&out, 1 << 20).unwrap();
         let entries = dsfiles::parse_narc(&narc).unwrap();
         assert_eq!(entries[0].data, &m[..]);
@@ -686,24 +891,46 @@ mod tests {
         assert_eq!(modpkg::enabled(game.path()), ["me.test.dev"]);
         test_install(&ws, &image, &retail, game.path()).unwrap();
         remove_installed(game.path(), &id).unwrap();
-        assert!(modpkg::enabled(game.path()).is_empty() && !game.path().join("mods/me.test.dev").exists());
+        assert!(
+            modpkg::enabled(game.path()).is_empty()
+                && !game.path().join("mods/me.test.dev").exists()
+        );
 
         // installing the packed zip: needs a built game, enables it last, updates in place keeping its slot
         assert!(install_zip(game.path(), &image, &zip).is_err());
         std::fs::write(game.path().join("manifest.json"), b"{}").unwrap();
-        assert!(install_zip(game.path(), &image, &zip).unwrap().starts_with("Installed Test 1.0.0"));
+        assert!(
+            install_zip(game.path(), &image, &zip)
+                .unwrap()
+                .starts_with("Installed Test 1.0.0")
+        );
         test_install(&ws, &image, &retail, game.path()).unwrap();
         assert_eq!(modpkg::load_order(game.path()), ["me.test", "me.test.dev"]);
-        assert!(install_zip(game.path(), &image, &zip).unwrap().starts_with("Updated Test"));
+        assert!(
+            install_zip(game.path(), &image, &zip)
+                .unwrap()
+                .starts_with("Updated Test")
+        );
         assert_eq!(modpkg::load_order(game.path()), ["me.test", "me.test.dev"]);
-        assert!(game.path().join("mods/me.test/patches/a.bmg.bsdiff").is_file());
+        assert!(
+            game.path()
+                .join("mods/me.test/patches/a.bmg.bsdiff")
+                .is_file()
+        );
     }
 
     #[test]
     fn unextracted_workspaces_patch_archives_directly() {
         let image = rom(&[("a.bmg", text(500, 7))]);
         let root = tempfile::tempdir().unwrap();
-        let dir = create(root.path(), &Draft::new("me.raw", "Raw", "other", "me"), Path::new("r"), &image, false).unwrap();
+        let dir = create(
+            root.path(),
+            &Draft::new("me.raw", "Raw", "other", "me"),
+            Path::new("r"),
+            &image,
+            false,
+        )
+        .unwrap();
         assert!(dir.join("README.md").is_file());
         let mut a = text(500, 7);
         a[9] = 0;
@@ -720,11 +947,23 @@ mod tests {
         let original = dsfiles::lz77_compress(&inner);
         let image = rom(&[("b.carc", original.clone())]);
         let root = tempfile::tempdir().unwrap();
-        let dir = create(root.path(), &Draft::new("me.carc", "Carc", "other", "me"), Path::new("r"), &image, false).unwrap();
+        let dir = create(
+            root.path(),
+            &Draft::new("me.carc", "Carc", "other", "me"),
+            Path::new("r"),
+            &image,
+            false,
+        )
+        .unwrap();
         // the author edits one byte and saves the archive with another tool: stored as literals only
         let mut edited = inner.clone();
         edited[200] ^= 1;
-        let mut stored = vec![0x10, edited.len() as u8, (edited.len() >> 8) as u8, (edited.len() >> 16) as u8];
+        let mut stored = vec![
+            0x10,
+            edited.len() as u8,
+            (edited.len() >> 8) as u8,
+            (edited.len() >> 16) as u8,
+        ];
         for chunk in edited.chunks(8) {
             stored.push(0);
             stored.extend_from_slice(chunk);
@@ -733,9 +972,16 @@ mod tests {
         let ws = Workspace::open(&dir).unwrap();
         let retail = modpkg::RetailIndex::from_rom(&image).unwrap();
         let (pkg, report) = stage(&ws, &image, &retail, None).unwrap();
-        assert!(report.patched[0].2 < 400, "patch {} bytes", report.patched[0].2);
+        assert!(
+            report.patched[0].2 < 400,
+            "patch {} bytes",
+            report.patched[0].2
+        );
         let mut out = Vec::new();
-        modpkg::qbsdiff::Bspatch::new(&pkg.contents["patches/b.carc.bsdiff"]).unwrap().apply(&original, &mut out).unwrap();
+        modpkg::qbsdiff::Bspatch::new(&pkg.contents["patches/b.carc.bsdiff"])
+            .unwrap()
+            .apply(&original, &mut out)
+            .unwrap();
         assert_eq!(dsfiles::lz77_decompress(&out, 1 << 20).unwrap(), edited);
     }
 }

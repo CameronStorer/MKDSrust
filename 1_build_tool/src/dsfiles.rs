@@ -10,7 +10,11 @@ pub struct DsFormat {
 }
 
 const fn f(ext: &'static str, magic: &'static [u8], group: &'static str) -> DsFormat {
-    DsFormat { ext, magic: Some(magic), group }
+    DsFormat {
+        ext,
+        magic: Some(magic),
+        group,
+    }
 }
 
 pub const DS_FORMATS: &[DsFormat] = &[
@@ -34,7 +38,11 @@ pub const DS_FORMATS: &[DsFormat] = &[
     f("swar", b"SWAR", "Sound"),
     f("strm", b"STRM", "Sound"),
     f("bmg", b"MESGbmg1", "Text"),
-    DsFormat { ext: "kcl", magic: None, group: "Course" },
+    DsFormat {
+        ext: "kcl",
+        magic: None,
+        group: "Course",
+    },
     f("nkm", b"NKMD", "Course"),
 ];
 
@@ -58,7 +66,9 @@ pub fn format_by_ext(ext: &str) -> Option<&'static DsFormat> {
 }
 /// The DS format whose magic `b` starts with (never `.carc`, whose magic is only visible after decompressing).
 pub fn format_by_magic(b: &[u8]) -> Option<&'static DsFormat> {
-    DS_FORMATS.iter().find(|f| f.ext != "carc" && f.magic.is_some_and(|m| b.starts_with(m)))
+    DS_FORMATS
+        .iter()
+        .find(|f| f.ext != "carc" && f.magic.is_some_and(|m| b.starts_with(m)))
 }
 fn le32(b: &[u8], o: usize) -> Option<usize> {
     Some(u32::from_le_bytes(b.get(o..o.checked_add(4)?)?.try_into().ok()?) as usize)
@@ -92,7 +102,10 @@ pub fn lz77_decompress(b: &[u8], max_out: usize) -> Result<Vec<u8>, String> {
                 break;
             }
             if flags & (1 << bit) != 0 {
-                let (x, y) = (*b.get(p).ok_or("LZ77 data ends early")?, *b.get(p + 1).ok_or("LZ77 data ends early")?);
+                let (x, y) = (
+                    *b.get(p).ok_or("LZ77 data ends early")?,
+                    *b.get(p + 1).ok_or("LZ77 data ends early")?,
+                );
                 p += 2;
                 let len = (x >> 4) as usize + 3;
                 let disp = (((x & 0x0f) as usize) << 8 | y as usize) + 1;
@@ -127,7 +140,9 @@ pub fn lz77_compress(data: &[u8]) -> Vec<u8> {
     const NONE: usize = usize::MAX;
     let mut head = vec![NONE; 1 << 16];
     let mut prev = vec![NONE; n];
-    let key = |i: usize| ((data[i] as usize) << 8 ^ (data[i + 1] as usize) << 4 ^ data[i + 2] as usize) & 0xffff;
+    let key = |i: usize| {
+        ((data[i] as usize) << 8 ^ (data[i + 1] as usize) << 4 ^ data[i + 2] as usize) & 0xffff
+    };
     let insert = |i: usize, head: &mut Vec<usize>, prev: &mut Vec<usize>| {
         if i + 2 < n {
             let k = key(i);
@@ -244,7 +259,9 @@ fn narc_layout(b: &[u8]) -> Result<NarcLayout, String> {
     if btaf + 12 + count * 8 > b.len() {
         return Err("NARC file table runs past the end".into());
     }
-    let btnf = btaf.checked_add(le32(b, btaf + 4).ok_or("bad BTAF")?).ok_or("bad BTAF")?;
+    let btnf = btaf
+        .checked_add(le32(b, btaf + 4).ok_or("bad BTAF")?)
+        .ok_or("bad BTAF")?;
     if b.get(btnf..btnf + 4) != Some(b"BTNF") {
         return Err("NARC name table (BTNF) missing".into());
     }
@@ -253,7 +270,13 @@ fn narc_layout(b: &[u8]) -> Result<NarcLayout, String> {
     if b.get(gmif..gmif + 4) != Some(b"GMIF") {
         return Err("NARC data block (GMIF) missing".into());
     }
-    Ok(NarcLayout { btaf, count, btnf, btnf_size, gmif })
+    Ok(NarcLayout {
+        btaf,
+        count,
+        btnf,
+        btnf_size,
+        gmif,
+    })
 }
 
 /// Parse a NARC (BTAF allocation table, BTNF names, GMIF data).
@@ -261,7 +284,7 @@ pub fn parse_narc(b: &[u8]) -> Result<Vec<NarcEntry<'_>>, String> {
     let l = narc_layout(b)?;
     let data = l.gmif + 8;
     let data_end = b.len().min(l.gmif + le32(b, l.gmif + 4).ok_or("bad GMIF")?);
-    let names = narc_names(b, l.btnf + 8, (l.btnf + l.btnf_size).saturating_sub(8).max(l.btnf + 8), l.count);
+    let names = narc_names(b, l.btnf + 8, l.btnf + l.btnf_size, l.count);
     let mut out = Vec::with_capacity(l.count);
     for i in 0..l.count {
         let start = le32(b, l.btaf + 12 + i * 8).unwrap();
@@ -269,19 +292,142 @@ pub fn parse_narc(b: &[u8]) -> Result<Vec<NarcEntry<'_>>, String> {
         if end < start || data + end > data_end {
             return Err(format!("NARC entry {i} points outside the data block"));
         }
-        out.push(NarcEntry { name: names[i].clone(), data: &b[data + start..data + end] });
+        out.push(NarcEntry {
+            name: names[i].clone(),
+            data: &b[data + start..data + end],
+        });
     }
     Ok(out)
+}
+
+/// Format 3 needs unambiguous, valid member names rather than the legacy reader's
+/// best-effort names for damaged archives.
+pub fn parse_narc_strict(b: &[u8]) -> Result<Vec<NarcEntry<'_>>, String> {
+    let l = narc_layout(b)?;
+    let declared = le32(b, 8).ok_or("truncated NARC header")?;
+    if !(16..=b.len()).contains(&declared)
+        || le16(b, 12).is_none_or(|n| n < 16)
+        || l.btnf_size < 8
+        || l.btaf + 12 + l.count * 8 > l.btnf
+        || l.gmif + 8 > declared
+        || le32(b, l.gmif + 4).is_none_or(|n| n < 8 || n > declared - l.gmif)
+    {
+        return Err("invalid NARC block ranges".into());
+    }
+    let fnt = b.get(l.btnf + 8..l.gmif).ok_or("invalid NARC name table")?;
+    let data = l.gmif + 8;
+    let data_end = l.gmif + le32(b, l.gmif + 4).ok_or("invalid GMIF size")?;
+    let mut entries = Vec::with_capacity(l.count);
+    for i in 0..l.count {
+        let start = le32(b, l.btaf + 12 + i * 8).ok_or("invalid NARC member range")?;
+        let end = le32(b, l.btaf + 16 + i * 8).ok_or("invalid NARC member range")?;
+        if end < start || end > data_end - data {
+            return Err(format!("NARC entry {i} points outside the data block"));
+        }
+        entries.push(NarcEntry {
+            name: None,
+            data: &b[data + start..data + end],
+        });
+    }
+    // SDK archives can have an unnamed root record; they have no addressable names.
+    if fnt.len() == 8 && le32(fnt, 0) == Some(4) {
+        for entry in &mut entries {
+            entry.name = None;
+        }
+        return Ok(entries);
+    }
+    let dirs = le16(fnt, 6).ok_or("truncated NARC name table")?;
+    if !(1..=4096).contains(&dirs) || dirs * 8 > fnt.len() {
+        return Err("invalid NARC directory count".into());
+    }
+    fn walk(
+        fnt: &[u8],
+        dir: usize,
+        dirs: usize,
+        prefix: &str,
+        entries: &mut [NarcEntry<'_>],
+        seen: &mut std::collections::BTreeSet<usize>,
+        depth: usize,
+    ) -> Result<(), String> {
+        if dir >= dirs || depth > 32 || !seen.insert(dir) {
+            return Err("invalid or cyclic NARC directory".into());
+        }
+        let mut p = le32(fnt, dir * 8).ok_or("truncated NARC directory")?;
+        if p < dirs * 8 {
+            return Err("NARC directory points into its table".into());
+        }
+        let mut id = le16(fnt, dir * 8 + 4).ok_or("truncated NARC file id")?;
+        loop {
+            let tag = *fnt.get(p).ok_or("truncated NARC directory")?;
+            p += 1;
+            if tag == 0 {
+                return Ok(());
+            }
+            let len = (tag & 127) as usize;
+            let name = std::str::from_utf8(fnt.get(p..p + len).ok_or("truncated NARC name")?)
+                .map_err(|_| "invalid UTF-8 NARC name")?;
+            if len == 0 || name.contains(['/', '\\', ':']) || !crate::modpkg::safe_path(name) {
+                return Err(format!("{prefix}{name}: unsafe NARC name"));
+            }
+            p += len;
+            if tag & 128 != 0 {
+                let child = le16(fnt, p).ok_or("truncated NARC child id")?;
+                p += 2;
+                if child < 0xf000 {
+                    return Err("invalid NARC child id".into());
+                }
+                walk(
+                    fnt,
+                    child - 0xf000,
+                    dirs,
+                    &format!("{prefix}{name}/"),
+                    entries,
+                    seen,
+                    depth + 1,
+                )?;
+            } else {
+                let entry = entries.get_mut(id).ok_or("NARC name refers outside FAT")?;
+                if entry.name.is_some() {
+                    return Err("duplicate NARC file id".into());
+                }
+                entry.name = Some(format!("{prefix}{name}"));
+                id += 1;
+            }
+        }
+    }
+    for entry in &mut entries {
+        entry.name = None;
+    }
+    walk(
+        fnt,
+        0,
+        dirs,
+        "",
+        &mut entries,
+        &mut std::collections::BTreeSet::new(),
+        0,
+    )?;
+    Ok(entries)
 }
 
 /// Names by file id from a BTNF block; `None` for unnamed archives. Same walk as the site (`end` matches its bound).
 fn narc_names(b: &[u8], base: usize, end: usize, count: usize) -> Vec<Option<String>> {
     let mut names = vec![None; count];
-    let Some(dirs) = le16(b, base + 6) else { return names };
+    let Some(dirs) = le16(b, base + 6) else {
+        return names;
+    };
     if !(1..=4096).contains(&dirs) || base + dirs * 8 > end {
         return names;
     }
-    fn walk(b: &[u8], base: usize, end: usize, dir: usize, prefix: &str, depth: usize, names: &mut Vec<Option<String>>) -> Option<()> {
+    fn walk(
+        b: &[u8],
+        base: usize,
+        end: usize,
+        dir: usize,
+        prefix: &str,
+        depth: usize,
+        names: &mut Vec<Option<String>>,
+    ) -> Option<()> {
         if depth > 16 {
             return Some(());
         }
@@ -299,7 +445,15 @@ fn narc_names(b: &[u8], base: usize, end: usize, count: usize) -> Vec<Option<Str
             if len & 0x80 != 0 {
                 let sub = le16(b, p)? & 0x0fff;
                 p += 2;
-                walk(b, base, end, sub, &format!("{prefix}{name}/"), depth + 1, names)?;
+                walk(
+                    b,
+                    base,
+                    end,
+                    sub,
+                    &format!("{prefix}{name}/"),
+                    depth + 1,
+                    names,
+                )?;
             } else {
                 if id < names.len() {
                     names[id] = Some(format!("{prefix}{name}"));
@@ -320,10 +474,19 @@ fn narc_names(b: &[u8], base: usize, end: usize, count: usize) -> Vec<Option<Str
 pub fn rebuild_narc(original: &[u8], files: &[Vec<u8>]) -> Result<Vec<u8>, String> {
     rebuild_narc_with(original, files, 4, 0xff)
 }
-fn rebuild_narc_with(original: &[u8], files: &[Vec<u8>], align: usize, pad: u8) -> Result<Vec<u8>, String> {
+fn rebuild_narc_with(
+    original: &[u8],
+    files: &[Vec<u8>],
+    align: usize,
+    pad: u8,
+) -> Result<Vec<u8>, String> {
     let l = narc_layout(original)?;
     if files.len() != l.count {
-        return Err(format!("archive has {} files, got {}", l.count, files.len()));
+        return Err(format!(
+            "archive has {} files, got {}",
+            l.count,
+            files.len()
+        ));
     }
     let mut gmif_data = Vec::new();
     let mut table = Vec::with_capacity(l.count * 8);
@@ -393,7 +556,10 @@ fn lz77_stream(b: &[u8]) -> Option<Lz77Stream> {
             if flags & (1 << bit) != 0 {
                 let (x, y) = (*b.get(p)?, *b.get(p + 1)?);
                 p += 2;
-                let t = Tok { len: (x >> 4) as usize + 3, disp: (((x & 0x0f) as usize) << 8 | y as usize) + 1 };
+                let t = Tok {
+                    len: (x >> 4) as usize + 3,
+                    disp: (((x & 0x0f) as usize) << 8 | y as usize) + 1,
+                };
                 if t.disp > out {
                     return None;
                 }
@@ -407,7 +573,12 @@ fn lz77_stream(b: &[u8]) -> Option<Lz77Stream> {
         }
     }
     // a final match may run past the declared size (the decoder stops there); such streams are not spliced
-    (out == size).then_some(Lz77Stream { toks, groups, header, end: p })
+    (out == size).then_some(Lz77Stream {
+        toks,
+        groups,
+        header,
+        end: p,
+    })
 }
 
 fn lz77_header(n: usize, header: usize) -> Vec<u8> {
@@ -443,7 +614,10 @@ fn emit_groups(data: &[u8], toks: &[Tok], mut pos: usize, out: &mut Vec<u8>) {
 
 /// Does match `t` at position `p` reproduce `data`?
 fn valid(data: &[u8], p: usize, t: Tok) -> bool {
-    p + t.len <= data.len() && t.disp != 0 && t.disp <= p && (0..t.len).all(|i| data[p + i] == data[p + i - t.disp])
+    p + t.len <= data.len()
+        && t.disp != 0
+        && t.disp <= p
+        && (0..t.len).all(|i| data[p + i] == data[p + i - t.disp])
 }
 
 /// Longest match at `p` (distance 2..=4096, length 3..=`cap`), or a literal.
@@ -496,7 +670,12 @@ fn lz77_splice(original: &[u8], new: &[u8]) -> Option<Vec<u8>> {
     }
     // unchanged prefix `a` and suffix `s`; tokens in between are reused only when the size did not change
     let a = old.iter().zip(new).take_while(|(x, y)| x == y).count();
-    let s = old[a..].iter().rev().zip(new[a..].iter().rev()).take_while(|(x, y)| x == y).count();
+    let s = old[a..]
+        .iter()
+        .rev()
+        .zip(new[a..].iter().rev())
+        .take_while(|(x, y)| x == y)
+        .count();
     let delta = new.len() as isize - old.len() as isize;
     if new.len() - a - s > SPLICE_LIMIT {
         return None;
@@ -513,7 +692,11 @@ fn lz77_splice(original: &[u8], new: &[u8]) -> Option<Vec<u8>> {
             } else {
                 return None;
             };
-            let ok = if t.disp == 0 { new.get(p) == Some(&old[q]) } else { valid(new, p, t) };
+            let ok = if t.disp == 0 {
+                new.get(p) == Some(&old[q])
+            } else {
+                valid(new, p, t)
+            };
             ok.then_some(p)
         })
         .collect();
@@ -537,7 +720,8 @@ fn lz77_splice(original: &[u8], new: &[u8]) -> Option<Vec<u8>> {
         .collect();
     let group_bytes = |g: usize| st.groups[g]..st.groups.get(g + 1).copied().unwrap_or(st.end);
     let group_end = |g: usize| clean[g].unwrap() + span(g).map(|k| st.toks[k].1.len).sum::<usize>();
-    let next_clean = |from: usize, p: usize| (from..ngroups).find(|&h| clean[h].is_some_and(|x| x >= p));
+    let next_clean =
+        |from: usize, p: usize| (from..ngroups).find(|&h| clean[h].is_some_and(|x| x >= p));
 
     let mut out = lz77_header(new.len(), st.header);
     let (mut p, mut g) = (0, 0);
@@ -552,10 +736,16 @@ fn lz77_splice(original: &[u8], new: &[u8]) -> Option<Vec<u8>> {
         let mut stop = next_clean(g, p);
         loop {
             let y = stop.map_or(new.len(), |h| clean[h].unwrap());
-            let reusable = (8 * g..stop.map_or(st.toks.len(), |h| 8 * h)).filter_map(|k| Some((keep[k]?, st.toks[k].1)));
+            let reusable = (8 * g..stop.map_or(st.toks.len(), |h| 8 * h))
+                .filter_map(|k| Some((keep[k]?, st.toks[k].1)));
             let mut run = encode_run(new, p, y, reusable);
             if stop.is_none() || pad(&mut run) {
-                emit_groups(new, &run.iter().map(|r| r.1).collect::<Vec<_>>(), p, &mut out);
+                emit_groups(
+                    new,
+                    &run.iter().map(|r| r.1).collect::<Vec<_>>(),
+                    p,
+                    &mut out,
+                );
                 p = y;
                 g = stop.unwrap_or(ngroups);
                 break;
@@ -566,7 +756,12 @@ fn lz77_splice(original: &[u8], new: &[u8]) -> Option<Vec<u8>> {
     if p < new.len() {
         // the original stream ran out before the new data did: encode the rest
         let run = encode_run(new, p, new.len(), std::iter::empty());
-        emit_groups(new, &run.iter().map(|r| r.1).collect::<Vec<_>>(), p, &mut out);
+        emit_groups(
+            new,
+            &run.iter().map(|r| r.1).collect::<Vec<_>>(),
+            p,
+            &mut out,
+        );
     }
     out.extend_from_slice(&original[st.end..]); // the original's trailing padding
     Some(out)
@@ -574,7 +769,12 @@ fn lz77_splice(original: &[u8], new: &[u8]) -> Option<Vec<u8>> {
 
 /// Tokens covering exactly `data[p..y)`: the given still-valid original tokens (sorted by position) where they fit,
 /// greedy matches elsewhere.
-fn encode_run(data: &[u8], mut p: usize, y: usize, kept: impl Iterator<Item = (usize, Tok)>) -> Vec<(usize, Tok)> {
+fn encode_run(
+    data: &[u8],
+    mut p: usize,
+    y: usize,
+    kept: impl Iterator<Item = (usize, Tok)>,
+) -> Vec<(usize, Tok)> {
     let kept: Vec<(usize, Tok)> = kept.filter(|&(q, t)| q >= p && q + t.len <= y).collect();
     let mut run = Vec::new();
     let mut m = 0;
@@ -600,9 +800,22 @@ fn pad(run: &mut Vec<(usize, Tok)>) -> bool {
     let mut i = 0;
     while need > 0 && i < run.len() {
         let (p, t) = run[i];
-        let k = if t.disp == 0 { 0 } else if need >= t.len - 1 { t.len - 1 } else { need.min(t.len - 3) };
+        let k = if t.disp == 0 {
+            0
+        } else if need >= t.len - 1 {
+            t.len - 1
+        } else {
+            need.min(t.len - 3)
+        };
         if k > 0 {
-            let head = if k == t.len - 1 { lit } else { Tok { len: t.len - k, disp: t.disp } };
+            let head = if k == t.len - 1 {
+                lit
+            } else {
+                Tok {
+                    len: t.len - k,
+                    disp: t.disp,
+                }
+            };
             let tail = (p + t.len - k..p + t.len).map(|q| (q, lit));
             run.splice(i..=i, std::iter::once((p, head)).chain(tail));
             need -= k;
@@ -615,11 +828,31 @@ fn pad(run: &mut Vec<(usize, Tok)>) -> bool {
 /// The same archive with each file replaced by `files[i]`, changing as few bytes as possible: when every file keeps
 /// its size the data is spliced in place; otherwise the archive is rebuilt with the original's alignment padding.
 pub fn update_narc(original: &[u8], files: &[Vec<u8>]) -> Result<Vec<u8>, String> {
+    update_narc_bounded(original, files, usize::MAX)
+}
+
+/// Check the rebuilt size before allocating an archive's output.
+pub fn update_narc_bounded(
+    original: &[u8],
+    files: &[Vec<u8>],
+    max: usize,
+) -> Result<Vec<u8>, String> {
     let entries = parse_narc(original)?;
     if files.len() != entries.len() {
-        return Err(format!("archive has {} files, got {}", entries.len(), files.len()));
+        return Err(format!(
+            "archive has {} files, got {}",
+            entries.len(),
+            files.len()
+        ));
     }
-    if entries.iter().zip(files).all(|(e, f)| e.data.len() == f.len()) {
+    if entries
+        .iter()
+        .zip(files)
+        .all(|(e, f)| e.data.len() == f.len())
+    {
+        if original.len() > max {
+            return Err("rebuilt archive exceeds output limit".into());
+        }
         let mut out = original.to_vec();
         for (e, f) in entries.iter().zip(files) {
             let at = e.data.as_ptr() as usize - original.as_ptr() as usize;
@@ -638,7 +871,26 @@ pub fn update_narc(original: &[u8], files: &[Vec<u8>]) -> Result<Vec<u8>, String
             (next > end).then(|| original[end])
         })
         .unwrap_or(0xff);
-    let aligned4 = entries.iter().all(|e| (e.data.as_ptr() as usize - original.as_ptr() as usize - data) % 4 == 0);
+    let aligned4 = entries
+        .iter()
+        .all(|e| (e.data.as_ptr() as usize - original.as_ptr() as usize - data) % 4 == 0);
+    let align = if aligned4 { 4 } else { 1 };
+    let mut size = 0usize;
+    for file in files {
+        size = size
+            .checked_add(align - 1)
+            .map(|n| n / align * align)
+            .and_then(|n| n.checked_add(file.len()))
+            .ok_or("archive size overflow")?;
+    }
+    size = size
+        .checked_add(3)
+        .map(|n| n / 4 * 4)
+        .and_then(|n| n.checked_add(l.gmif + 8))
+        .ok_or("archive size overflow")?;
+    if size > max {
+        return Err("rebuilt archive exceeds output limit".into());
+    }
     rebuild_narc_with(original, files, if aligned4 { 4 } else { 1 }, pad)
 }
 
@@ -650,8 +902,14 @@ pub fn check_game_file(b: &[u8], name: &str, budget: &mut usize, depth: usize) -
     let by_magic = format_by_magic(b);
     let mut problems = Vec::new();
     let Some(fmt) = format_by_ext(&ext) else {
-        let shown = if ext.is_empty() { "no extension".to_string() } else { format!(".{ext}") };
-        let looks = by_magic.map(|m| format!(" (content looks like .{})", m.ext)).unwrap_or_default();
+        let shown = if ext.is_empty() {
+            "no extension".to_string()
+        } else {
+            format!(".{ext}")
+        };
+        let looks = by_magic
+            .map(|m| format!(" (content looks like .{})", m.ext))
+            .unwrap_or_default();
         return vec![format!("{shown} is not an allowed file type{looks}")];
     };
     let mut narc: Option<std::borrow::Cow<[u8]>> = None;
@@ -662,21 +920,37 @@ pub fn check_game_file(b: &[u8], name: &str, budget: &mut usize, depth: usize) -
                 if out.starts_with(b"NARC") {
                     narc = Some(out.into());
                 } else {
-                    let what = format_by_magic(&out).map(|m| format!(" (.{})", m.ext)).unwrap_or_default();
-                    problems.push(format!(".carc decompresses to something that is not a NARC{what}"));
+                    let what = format_by_magic(&out)
+                        .map(|m| format!(" (.{})", m.ext))
+                        .unwrap_or_default();
+                    problems.push(format!(
+                        ".carc decompresses to something that is not a NARC{what}"
+                    ));
                 }
             }
             Err(e) => problems.push(format!(".carc is not LZ77-compressed NARC data ({e})")),
         }
     } else if fmt.ext == "kcl" {
         if let Some(m) = by_magic {
-            problems.push(format!(".kcl file actually starts with {} (a .{})", String::from_utf8_lossy(m.magic.unwrap()), m.ext));
+            problems.push(format!(
+                ".kcl file actually starts with {} (a .{})",
+                String::from_utf8_lossy(m.magic.unwrap()),
+                m.ext
+            ));
         } else if let Some(k) = kcl_header_problem(b) {
             problems.push(k);
         }
     } else if !b.starts_with(fmt.magic.unwrap()) {
         let magic = String::from_utf8_lossy(fmt.magic.unwrap());
-        let other = by_magic.map(|m| format!(", but this is a .{} ({})", m.ext, String::from_utf8_lossy(m.magic.unwrap()))).unwrap_or_default();
+        let other = by_magic
+            .map(|m| {
+                format!(
+                    ", but this is a .{} ({})",
+                    m.ext,
+                    String::from_utf8_lossy(m.magic.unwrap())
+                )
+            })
+            .unwrap_or_default();
         problems.push(format!(".{} must start with \"{magic}\"{other}", fmt.ext));
     } else if fmt.ext == "narc" {
         narc = Some(b.into());
@@ -688,10 +962,13 @@ pub fn check_game_file(b: &[u8], name: &str, budget: &mut usize, depth: usize) -
             match parse_narc(&bytes) {
                 Ok(entries) => {
                     for (i, e) in entries.iter().enumerate() {
-                        let inner = e.name.clone().unwrap_or_else(|| match format_by_magic(e.data) {
-                            Some(m) => format!("file{i}.{}", m.ext),
-                            None => format!("file{i}"),
-                        });
+                        let inner =
+                            e.name
+                                .clone()
+                                .unwrap_or_else(|| match format_by_magic(e.data) {
+                                    Some(m) => format!("file{i}.{}", m.ext),
+                                    None => format!("file{i}"),
+                                });
                         let shown = e.name.clone().unwrap_or_else(|| format!("#{i}"));
                         for p in check_game_file(e.data, &inner, budget, depth + 1) {
                             problems.push(format!("inside: {shown}: {p}"));
@@ -722,14 +999,21 @@ pub fn preview_problem(b: &[u8], path: &str) -> Option<String> {
         _ => return None,
     };
     if !ok {
-        let kind = if ext == "jpg" || ext == "jpeg" { "JPEG".into() } else { ext.to_uppercase() };
+        let kind = if ext == "jpg" || ext == "jpeg" {
+            "JPEG".into()
+        } else {
+            ext.to_uppercase()
+        };
         return Some(format!(".{ext} preview does not contain {kind} data"));
     }
     (b.len() > MAX_PREVIEW_BYTES).then(|| "preview image is larger than 5 MB".into())
 }
 /// An archive or compressed container other than NARC/CARC (by magic or extension), as the site's `detectArchive`.
 pub fn detect_archive(b: &[u8], name: &str) -> Option<String> {
-    let be32 = |o: usize| b.get(o..o + 4).map(|x| u32::from_be_bytes(x.try_into().unwrap()));
+    let be32 = |o: usize| {
+        b.get(o..o + 4)
+            .map(|x| u32::from_be_bytes(x.try_into().unwrap()))
+    };
     let at = |o: usize, s: &[u8]| b.get(o..o + s.len()) == Some(s);
     let found = if at(0, b"PK\x03\x04") || at(0, b"PK\x05\x06") || at(0, b"PK\x07\x08") {
         "ZIP archive"
@@ -757,7 +1041,9 @@ pub fn detect_archive(b: &[u8], name: &str) -> Option<String> {
         "ARJ archive"
     } else {
         let ext = ext_of(name);
-        let archive_ext = "zip 7z rar gz tgz bz2 xz lz lz4 lzma zst tar cab lzh arj".split(' ').any(|x| x == ext);
+        let archive_ext = "zip 7z rar gz tgz bz2 xz lz lz4 lzma zst tar cab lzh arj"
+            .split(' ')
+            .any(|x| x == ext);
         return (name.contains('.') && archive_ext).then(|| format!(".{ext} archive"));
     };
     Some(found.into())
@@ -798,7 +1084,12 @@ mod tests {
 
     #[test]
     fn lz77_round_trips_and_rejects_bad_data() {
-        for data in [b"".to_vec(), b"abcabcabcabcabcabcabcabc".to_vec(), (0..70000u32).map(|i| (i * 7 / 13) as u8).collect(), vec![0x42; 9000]] {
+        for data in [
+            b"".to_vec(),
+            b"abcabcabcabcabcabcabcabc".to_vec(),
+            (0..70000u32).map(|i| (i * 7 / 13) as u8).collect(),
+            vec![0x42; 9000],
+        ] {
             let c = lz77_compress(&data);
             assert_eq!(lz77_decompress(&c, 1 << 20).unwrap(), data);
         }
@@ -811,7 +1102,9 @@ mod tests {
     fn sample(entries: u32) -> Vec<u8> {
         let mut data = Vec::new();
         for i in 0..entries {
-            data.extend_from_slice(format!("entry {} value {}; ", i % 300, i * 7 % 1000).as_bytes());
+            data.extend_from_slice(
+                format!("entry {} value {}; ", i % 300, i * 7 % 1000).as_bytes(),
+            );
         }
         data
     }
@@ -841,18 +1134,27 @@ mod tests {
         assert_eq!(lz77_decompress(&out, usize::MAX).unwrap(), data);
         out
     }
+    #[cfg(feature = "diff")]
     fn patch_len(a: &[u8], b: &[u8]) -> usize {
         let mut patch = Vec::new();
-        crate::modpkg::qbsdiff::Bsdiff::new(a, b).compare(&mut patch).unwrap();
+        crate::modpkg::qbsdiff::Bsdiff::new(a, b)
+            .compare(&mut patch)
+            .unwrap();
         patch.len()
     }
 
     #[test]
+    #[cfg(feature = "diff")]
     fn recompression_keeps_the_original_stream_outside_the_edit() {
         let data = sample(20000);
         for original in [lz77_compress(&data), foreign_lz77(&data)] {
             assert_eq!(lz77_recompress(&original, &data), original);
-            for (at, insert) in [(5000usize, 0usize), (100000, 0), (60000, 5), (data.len() - 3, 0)] {
+            for (at, insert) in [
+                (5000usize, 0usize),
+                (100000, 0),
+                (60000, 5),
+                (data.len() - 3, 0),
+            ] {
                 let mut edited = data.clone();
                 edited[at] ^= 0x20;
                 for _ in 0..insert {
@@ -861,36 +1163,65 @@ mod tests {
                 let new = lz77_recompress(&original, &edited);
                 assert_eq!(lz77_decompress(&new, 1 << 24).unwrap(), edited);
                 let patch = patch_len(&original, &new);
-                assert!(patch < 1000, "edit at {at} (+{insert}): patch {patch} bytes for {}", original.len());
+                assert!(
+                    patch < 1000,
+                    "edit at {at} (+{insert}): patch {patch} bytes for {}",
+                    original.len()
+                );
             }
         }
         let original = lz77_compress(&data);
         let other: Vec<u8> = (0..5000u32).map(|i| (i * i % 251) as u8).collect();
-        assert_eq!(lz77_decompress(&lz77_recompress(&original, &other), 1 << 20).unwrap(), other);
-        assert_eq!(lz77_decompress(&lz77_recompress(b"not lz", &other), 1 << 20).unwrap(), other);
-        assert_eq!(lz77_decompress(&lz77_recompress(&original, b""), 16).unwrap(), b"");
+        assert_eq!(
+            lz77_decompress(&lz77_recompress(&original, &other), 1 << 20).unwrap(),
+            other
+        );
+        assert_eq!(
+            lz77_decompress(&lz77_recompress(b"not lz", &other), 1 << 20).unwrap(),
+            other
+        );
+        assert_eq!(
+            lz77_decompress(&lz77_recompress(&original, b""), 16).unwrap(),
+            b""
+        );
     }
 
     #[test]
+    #[cfg(feature = "diff")]
     fn recompression_splices_incompressible_edits_at_start_middle_and_end() {
         // a 1 KiB block of noise (like a recoloured palette) re-encodes to literals only, which cannot be split to
         // realign the flag groups: the run has to absorb following groups instead of shifting the rest of the stream
         let data = sample(4000);
         let original = foreign_lz77(&data);
-        for (at, n) in [(0usize, 1024usize), (0, 1), (data.len() / 2, 1024), (data.len() / 2 + 3, 37), (data.len() - 1024, 1024), (data.len() - 1, 1)] {
+        for (at, n) in [
+            (0usize, 1024usize),
+            (0, 1),
+            (data.len() / 2, 1024),
+            (data.len() / 2 + 3, 37),
+            (data.len() - 1024, 1024),
+            (data.len() - 1, 1),
+        ] {
             let mut edited = data.clone();
             edited[at..at + n].copy_from_slice(&noise(n, at as u32 + 1));
             let new = lz77_recompress(&original, &edited);
-            assert_eq!(lz77_decompress(&new, 1 << 24).unwrap(), edited, "edit at {at}+{n}");
+            assert_eq!(
+                lz77_decompress(&new, 1 << 24).unwrap(),
+                edited,
+                "edit at {at}+{n}"
+            );
             let ours = patch_len(&original, &new);
             let full = patch_len(&original, &lz77_compress(&edited));
             // the noise itself is incompressible: about 2 bytes of patch per new byte, plus bsdiff overhead
             assert!(ours < 2 * n + 600, "edit at {at}+{n}: patch {ours} bytes");
-            assert!(ours * 4 < full, "edit at {at}+{n}: patch {ours} bytes vs {full} for full recompression");
+            assert!(
+                ours * 4 < full,
+                "edit at {at}+{n}: patch {ours} bytes vs {full} for full recompression"
+            );
         }
     }
 
     #[test]
+    #[cfg(feature = "diff")]
     fn recompression_handles_size_changes_and_scattered_edits() {
         let data = sample(4000);
         let original = foreign_lz77(&data);
@@ -907,7 +1238,12 @@ mod tests {
             let new = lz77_recompress(&original, edited);
             assert_eq!(lz77_decompress(&new, 1 << 24).unwrap(), *edited);
             let ours = patch_len(&original, &new);
-            assert!(ours < 1500 && ours * 5 < full(edited), "size {} -> {}: patch {ours} bytes", data.len(), edited.len());
+            assert!(
+                ours < 1500 && ours * 5 < full(edited),
+                "size {} -> {}: patch {ours} bytes",
+                data.len(),
+                edited.len()
+            );
         }
         // many small same-size edits scattered through the file (tokens between them are reused)
         let mut edited = data.clone();
@@ -922,7 +1258,14 @@ mod tests {
     #[test]
     fn recompression_round_trips_random_edits() {
         let data = sample(1500);
-        for (i, original) in [lz77_compress(&data), foreign_lz77(&data), foreign_lz77(&noise(3000, 1))].into_iter().enumerate() {
+        for (i, original) in [
+            lz77_compress(&data),
+            foreign_lz77(&data),
+            foreign_lz77(&noise(3000, 1)),
+        ]
+        .into_iter()
+        .enumerate()
+        {
             let base = lz77_decompress(&original, usize::MAX).unwrap();
             for seed in 0..40u32 {
                 let r = noise(4, seed * 31 + i as u32);
@@ -931,7 +1274,11 @@ mod tests {
                 let ins = noise(r[3] as usize % 64, seed);
                 let edited = [&base[..at], &ins[..], &base[at + cut..]].concat();
                 let new = lz77_recompress(&original, &edited);
-                assert_eq!(lz77_decompress(&new, 1 << 24).unwrap(), edited, "stream {i} seed {seed}");
+                assert_eq!(
+                    lz77_decompress(&new, 1 << 24).unwrap(),
+                    edited,
+                    "stream {i} seed {seed}"
+                );
             }
         }
     }
@@ -942,7 +1289,8 @@ mod tests {
         let same = update_narc(&a, &[b"MESGbmg1 HELLO".to_vec(), b"RLCNxx".to_vec()]).unwrap();
         assert_eq!(same.len(), a.len());
         assert_eq!(same.iter().zip(&a).filter(|(x, y)| x != y).count(), 5);
-        let grown = update_narc(&a, &[b"MESGbmg1 hello world".to_vec(), b"RLCNxx".to_vec()]).unwrap();
+        let grown =
+            update_narc(&a, &[b"MESGbmg1 hello world".to_vec(), b"RLCNxx".to_vec()]).unwrap();
         assert_eq!(parse_narc(&grown).unwrap()[0].data, b"MESGbmg1 hello world");
         assert_eq!(parse_narc(&grown).unwrap()[1].data, b"RLCNxx");
     }
@@ -958,7 +1306,10 @@ mod tests {
         let entries = parse_narc(&b).unwrap();
         assert_eq!(entries[0].data, b"MESGbmg1 changed!");
         assert_eq!(entries[1].name.as_deref(), Some("two.nclr"));
-        assert_eq!(rebuild_narc(&a, &[b"MESGbmg1 hello".to_vec(), b"RLCNxx".to_vec()]).unwrap(), a);
+        assert_eq!(
+            rebuild_narc(&a, &[b"MESGbmg1 hello".to_vec(), b"RLCNxx".to_vec()]).unwrap(),
+            a
+        );
     }
 
     #[test]
@@ -966,8 +1317,13 @@ mod tests {
         let mut budget = 1 << 24;
         assert!(check_game_file(b"MESGbmg1....", "x/t.bmg", &mut budget, 0).is_empty());
         assert!(check_game_file(b"RLCN", "a.NCLR", &mut budget, 0).is_empty());
-        assert!(check_game_file(b"MESGbmg1", "a.txt", &mut budget, 0)[0].contains("not an allowed file type (content looks like .bmg)"));
-        assert!(check_game_file(b"RLCN", "a.bmg", &mut budget, 0)[0].contains("but this is a .nclr"));
+        assert!(
+            check_game_file(b"MESGbmg1", "a.txt", &mut budget, 0)[0]
+                .contains("not an allowed file type (content looks like .bmg)")
+        );
+        assert!(
+            check_game_file(b"RLCN", "a.bmg", &mut budget, 0)[0].contains("but this is a .nclr")
+        );
         assert!(!check_game_file(b"\0\0\0\0", "noext", &mut budget, 0).is_empty());
         let inner = narc(&[("ok.bmg", b"MESGbmg1"), ("bad.exe", b"MZ")]);
         let p = check_game_file(&inner, "a.narc", &mut budget, 0);
@@ -988,8 +1344,16 @@ mod tests {
 
     #[test]
     fn metadata_rules() {
-        assert!(is_readme("README.md") && is_readme("readme.TXT") && !is_readme("docs/README.md") && !is_readme("notes.md"));
-        assert_eq!(preview_problem(b"\x89PNG\r\n\x1a\nxxxx", "shots/a.png"), None);
+        assert!(
+            is_readme("README.md")
+                && is_readme("readme.TXT")
+                && !is_readme("docs/README.md")
+                && !is_readme("notes.md")
+        );
+        assert_eq!(
+            preview_problem(b"\x89PNG\r\n\x1a\nxxxx", "shots/a.png"),
+            None
+        );
         assert!(preview_problem(b"GIF89a", "a.png").is_some());
         assert!(preview_problem(&[0xff, 0xd8, 0xff, 0], "a.jpeg").is_none());
         assert!(detect_archive(b"PK\x03\x04", "README.md").is_some());

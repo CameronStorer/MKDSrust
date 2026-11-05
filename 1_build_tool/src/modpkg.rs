@@ -2,7 +2,9 @@
 //! All screening happens before extraction; no archive paths are trusted.
 #[cfg(feature = "diff")]
 pub use qbsdiff;
+pub mod archive_delta;
 pub mod bspatch;
+pub mod overlay;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -17,11 +19,20 @@ pub const MAX_UNPACKED: u64 = 400 * 1024 * 1024;
 pub const MAX_FILES: usize = 5000;
 /// PLUGIN_FORMAT.md rule 1: never ROMs, saves, executables or scripts.
 pub const BLOCKED_EXTENSIONS: [&str; 23] = [
-    "nds", "srl", "dsi", "sav", "dsv", "gba", "3ds", "cia", "nsp", "xci", "exe", "dll", "bat", "cmd", "com", "scr",
-    "msi", "ps1", "vbs", "sh", "jar", "app", "apk",
+    "nds", "srl", "dsi", "sav", "dsv", "gba", "3ds", "cia", "nsp", "xci", "exe", "dll", "bat",
+    "cmd", "com", "scr", "msi", "ps1", "vbs", "sh", "jar", "app", "apk",
 ];
 /// Package `type` values (PLUGIN_FORMAT.md) in display order.
-pub const TYPES: [&str; 8] = ["character", "kart", "track", "battle", "music", "texture", "gameplay", "other"];
+pub const TYPES: [&str; 8] = [
+    "character",
+    "kart",
+    "track",
+    "battle",
+    "music",
+    "texture",
+    "gameplay",
+    "other",
+];
 
 pub fn hash(bytes: &[u8]) -> String {
     crate::rom::hex(&Sha256::digest(bytes))
@@ -118,6 +129,7 @@ pub struct Manifest {
     pub license: Option<String>,
     #[serde(default)]
     pub description: String,
+    #[serde(deserialize_with = "unique_map")]
     pub files: BTreeMap<String, Entry>,
     #[serde(default)]
     pub depends: Vec<String>,
@@ -143,10 +155,15 @@ pub const MAX_SCRIPT_BYTES: usize = 256 * 1024;
 /// UTF-8, at most [`MAX_SCRIPT_BYTES`]).
 pub fn script_problem(bytes: &[u8]) -> Option<String> {
     if bytes.len() > MAX_SCRIPT_BYTES {
-        return Some(format!("script is larger than {} KiB", MAX_SCRIPT_BYTES / 1024));
+        return Some(format!(
+            "script is larger than {} KiB",
+            MAX_SCRIPT_BYTES / 1024
+        ));
     }
     if bytes.contains(&0) {
-        return Some("script contains NUL bytes (compiled Luau bytecode is not allowed, only source)".into());
+        return Some(
+            "script contains NUL bytes (compiled Luau bytecode is not allowed, only source)".into(),
+        );
     }
     if std::str::from_utf8(bytes).is_err() {
         return Some("script is not UTF-8 text".into());
@@ -161,13 +178,59 @@ pub fn valid_platforms(p: &[String]) -> bool {
     let mut seen = BTreeSet::new();
     !p.is_empty()
         && p.len() <= 8
-        && p.iter().all(|x| (1..=16).contains(&x.len()) && x.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()) && seen.insert(x))
+        && p.iter().all(|x| {
+            (1..=16).contains(&x.len())
+                && x.bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+                && seen.insert(x)
+        })
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Entry {
     Patch(Patch),
     Add(Add),
+    Archive(Archive),
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Archive {
+    #[serde(deserialize_with = "unique_map")]
+    pub archive: BTreeMap<String, MemberPatch>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MemberPatch {
+    pub patch: String,
+    pub source_sha256: String,
+    pub target_sha256: String,
+}
+
+fn unique_map<'de, D, T>(deserializer: D) -> std::result::Result<BTreeMap<String, T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    struct Map<T>(std::marker::PhantomData<T>);
+    impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for Map<T> {
+        type Value = BTreeMap<String, T>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a map without duplicate paths")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> std::result::Result<Self::Value, A::Error> {
+            let mut result = BTreeMap::new();
+            while let Some((key, value)) = map.next_entry::<String, T>()? {
+                if result.insert(key.clone(), value).is_some() {
+                    return Err(serde::de::Error::custom(format!("Duplicate path: {key}")));
+                }
+            }
+            Ok(result)
+        }
+    }
+    deserializer.deserialize_map(Map(std::marker::PhantomData))
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -180,10 +243,22 @@ pub struct Add {
     pub add: String,
 }
 impl Entry {
-    pub fn source(&self) -> &str {
+    /// Member-aware label for diagnostics about a package payload.
+    pub fn payload_target<'a>(&'a self, target: &'a str, source: &str) -> &'a str {
         match self {
-            Self::Patch(p) => &p.patch,
-            Self::Add(a) => &a.add,
+            Self::Archive(a) => a
+                .archive
+                .iter()
+                .find(|(_, m)| m.patch == source)
+                .map_or(target, |(p, _)| p),
+            _ => target,
+        }
+    }
+    pub fn sources(&self) -> Box<dyn Iterator<Item = &str> + '_> {
+        match self {
+            Self::Patch(p) => Box::new(std::iter::once(p.patch.as_str())),
+            Self::Add(a) => Box::new(std::iter::once(a.add.as_str())),
+            Self::Archive(a) => Box::new(a.archive.values().map(|m| m.patch.as_str())),
         }
     }
 }
@@ -195,7 +270,7 @@ impl Manifest {
         let m: Self = serde_json::from_slice(bytes)?;
         // format 2 adds scripts (and allows a scripts-only package); format 1 has none
         let scripted = !m.scripts.is_empty();
-        if !(m.format == 1 || m.format == 2)
+        if !(1..=3).contains(&m.format)
             || (m.format == 1 && (scripted || m.api.is_some()))
             || (scripted && m.api != Some(1))
             || m.scripts.len() > MAX_SCRIPTS
@@ -217,27 +292,58 @@ impl Manifest {
             return Err("Invalid mod manifest fields".into());
         }
         semver::Version::parse(&m.version)?;
+        let fields: serde_json::Value = serde_json::from_slice(bytes)?;
+        if m.format == 1 && (fields.get("scripts").is_some() || fields.get("api").is_some()) {
+            return Err("Format 1 cannot contain scripts or api".into());
+        }
         let mut targets = BTreeSet::new();
+        let mut sources = BTreeMap::new();
         for (target, entry) in &m.files {
-            if !safe_path(target)
-                || !safe_path(entry.source())
-                || !targets.insert(target.to_ascii_lowercase())
-            {
+            if !safe_path(target) || !targets.insert(target.to_ascii_lowercase()) {
                 return Err(format!("Unsafe or duplicate mod path: {target}").into());
             }
-            if entry.source() == "manifest.json" {
-                return Err(format!("manifest.files[\"{target}\"] cannot point at manifest.json").into());
+            for source in entry.sources() {
+                let label = entry.payload_target(target, source);
+                if !safe_path(source) || source.eq_ignore_ascii_case("manifest.json") {
+                    return Err(format!("{label}: unsafe payload path: {source}").into());
+                }
+                if sources
+                    .insert(source.to_ascii_lowercase(), source)
+                    .is_some_and(|old| old != source)
+                {
+                    return Err(format!("{label}: case-colliding payload path: {source}").into());
+                }
+            }
+            if let Entry::Archive(a) = entry {
+                if m.format != 3 {
+                    return Err(format!("{target}: archive entries require format 3").into());
+                }
+                if !matches!(crate::dsfiles::ext_of(target).as_str(), "narc" | "carc") {
+                    return Err(format!("{target}: archive target must be NARC/CARC").into());
+                }
+                archive_delta::validate(&a.archive)?;
             }
             if BLOCKED_EXTENSIONS.contains(&crate::dsfiles::ext_of(target).as_str()) {
-                return Err(format!("manifest.files target has a blocked file type: {target}").into());
+                return Err(
+                    format!("manifest.files target has a blocked file type: {target}").into(),
+                );
             }
         }
         let mut scripts = BTreeSet::new();
         for path in &m.scripts {
-            if !safe_path(path) || crate::dsfiles::ext_of(path) != "luau" || !scripts.insert(path.to_ascii_lowercase()) {
-                return Err(format!("Invalid or duplicate script path (scripts are .luau files): {path}").into());
+            if !safe_path(path)
+                || crate::dsfiles::ext_of(path) != "luau"
+                || !scripts.insert(path.to_ascii_lowercase())
+            {
+                return Err(format!(
+                    "Invalid or duplicate script path (scripts are .luau files): {path}"
+                )
+                .into());
             }
-            if m.files.values().any(|e| e.source().eq_ignore_ascii_case(path)) {
+            if m.files
+                .values()
+                .any(|e| e.sources().any(|s| s.eq_ignore_ascii_case(path)))
+            {
                 return Err(format!("{path} is both a script and a game file source").into());
             }
         }
@@ -367,7 +473,11 @@ fn crc16(bytes: &[u8]) -> u16 {
     for &b in bytes {
         crc ^= b as u16;
         for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xa001 } else { crc >> 1 };
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xa001
+            } else {
+                crc >> 1
+            };
         }
     }
     crc
@@ -380,20 +490,31 @@ fn ds_rom_header(bytes: &[u8]) -> Option<usize> {
         return None;
     }
     let u16at = |o: usize| u16::from_le_bytes([bytes[o], bytes[o + 1]]);
-    if u16at(0x15c) == 0xcf56 || bytes[0xc0..0xc8] == [0x24, 0xff, 0xae, 0x51, 0x69, 0x9a, 0xa2, 0x21] {
+    if u16at(0x15c) == 0xcf56
+        || bytes[0xc0..0xc8] == [0x24, 0xff, 0xae, 0x51, 0x69, 0x9a, 0xa2, 0x21]
+    {
         return Some(0);
     }
     let word = |off: usize| u32::from_le_bytes(bytes[off..off + 4].try_into().unwrap()) as usize;
     let section = |off, len| {
-        word(off) >= 0x200 && word(len) > 0 && word(off).checked_add(word(len)).is_some_and(|end| end <= bytes.len())
+        word(off) >= 0x200
+            && word(len) > 0
+            && word(off)
+                .checked_add(word(len))
+                .is_some_and(|end| end <= bytes.len())
     };
-    if bytes[12..16].iter().all(|b| b.is_ascii_alphanumeric()) && section(0x20, 0x2c) && section(0x30, 0x3c) {
+    if bytes[12..16].iter().all(|b| b.is_ascii_alphanumeric())
+        && section(0x20, 0x2c)
+        && section(0x30, 0x3c)
+    {
         return Some(0);
     }
     (0x200..)
         .step_by(0x200)
         .take_while(|off| off + 0x160 <= bytes.len())
-        .find(|&off| u16at(off + 0x15c) == 0xcf56 && crc16(&bytes[off..off + 0x15e]) == u16at(off + 0x15e))
+        .find(|&off| {
+            u16at(off + 0x15c) == 0xcf56 && crc16(&bytes[off..off + 0x15e]) == u16at(off + 0x15e)
+        })
 }
 fn ds_header(bytes: &[u8]) -> bool {
     ds_rom_header(bytes).is_some()
@@ -507,21 +628,29 @@ impl Package {
         let mut problems = Vec::new();
         for path in &manifest.scripts {
             if !contents.contains_key(path) {
-                problems.push(format!("manifest.scripts lists {path}, which is not in the ZIP"));
+                problems.push(format!(
+                    "manifest.scripts lists {path}, which is not in the ZIP"
+                ));
             }
         }
         for (target, entry) in &manifest.files {
-            let src = entry.source();
-            let patch = matches!(entry, Entry::Patch(_));
-            if !contents.contains_key(src) {
-                problems.push(format!("manifest.files[\"{target}\"] points at {src}, which is not in the ZIP"));
-                continue;
-            }
-            match roles.get_mut(src) {
-                Some(r) if r.0 != patch => problems.push(format!("{src} is used both as a patch and as an added file")),
-                Some(r) => r.1.push(target),
-                None => {
-                    roles.insert(src, (patch, vec![target]));
+            for src in entry.sources() {
+                let patch = !matches!(entry, Entry::Add(_));
+                if !contents.contains_key(src) {
+                    let label = entry.payload_target(target, src);
+                    problems.push(format!(
+                        "manifest.files[\"{target}\"]/{label} points at {src}, which is not in the ZIP"
+                    ));
+                    continue;
+                }
+                match roles.get_mut(src) {
+                    Some(r) if r.0 != patch => problems.push(format!(
+                        "{src} is used both as a patch and as an added file"
+                    )),
+                    Some(r) => r.1.push(target),
+                    None => {
+                        roles.insert(src, (patch, vec![target]));
+                    }
                 }
             }
             if retail
@@ -535,7 +664,9 @@ impl Package {
                             || target.starts_with(&(p.to_string() + "/")))
                 })
             {
-                problems.push(format!("{target}: a file and a folder would have the same path"));
+                problems.push(format!(
+                    "{target}: a file and a folder would have the same path"
+                ));
             }
         }
         let mut warnings = Vec::new();
@@ -548,16 +679,27 @@ impl Package {
                 continue;
             }
             if let Some(at) = ds_rom_header(bytes) {
-                reject(if at > 0 { format!("contains a Nintendo DS ROM header at offset {at:#x}") } else { "contains a Nintendo DS ROM header".into() });
+                reject(if at > 0 {
+                    format!("contains a Nintendo DS ROM header at offset {at:#x}")
+                } else {
+                    "contains a Nintendo DS ROM header".into()
+                });
             }
             let sha = hash(bytes);
-            if let Some(f) = retail.files.iter().chain(&retail.system_files).find(|f| f.sha256 == sha) {
+            if let Some(f) = retail
+                .files
+                .iter()
+                .chain(&retail.system_files)
+                .find(|f| f.sha256 == sha)
+            {
                 reject(format!("identical to a retail game file ({})", f.path));
             }
             let role = roles.get(name.as_str());
             if role.is_none_or(|r| !r.0) {
                 if let Some(a) = dsfiles::detect_archive(bytes, name) {
-                    reject(format!("{a} inside the package (archives other than .narc/.carc are not allowed)"));
+                    reject(format!(
+                        "{a} inside the package (archives other than .narc/.carc are not allowed)"
+                    ));
                 }
             }
             let script = manifest.scripts.iter().any(|p| p == name);
@@ -593,6 +735,19 @@ impl Package {
                         Ok(_) => {}
                     }
                     for target in targets {
+                        if let Entry::Archive(a) = &manifest.files[*target] {
+                            for (path, _) in a.archive.iter().filter(|(_, m)| m.patch == *name) {
+                                match bspatch::Bspatch::new(bytes) {
+                                    Err(_) => reject(format!("{target}/{path}: invalid BSDIFF40 member patch")),
+                                    Ok(p) if p.hint_target_size() > archive_delta::MAX_MEMBER as u64 => reject(format!("{target}/{path}: member patch output exceeds 64 MiB")),
+                                    Ok(_) => {}
+                                }
+                                if !retail.files.iter().any(|f| f.path == *target) {
+                                    reject(format!("{target}/{path}: archive target is not a file in the game ROM"));
+                                }
+                            }
+                            continue;
+                        }
                         match retail.files.iter().find(|f| f.path.eq_ignore_ascii_case(target)) {
                             None => reject(format!("patch target {target} is not a file in the game ROM")),
                             Some(f) if f.size >= 65536 && bytes.len() as u64 * 100 >= f.size * 60 => warnings.push(format!(
@@ -736,15 +891,35 @@ mod tests {
     fn core_manifest_platforms_default_to_pc_and_accept_ds() {
         let p = package(b"x");
         let mut json: serde_json::Value = serde_json::from_slice(&p["manifest.json"]).unwrap();
-        assert_eq!(Manifest::parse(&serde_json::to_vec(&json).unwrap()).unwrap().platforms, ["pc"]);
-        for ok in [serde_json::json!(["pc"]), serde_json::json!(["pc", "ds"]), serde_json::json!(["ds"])] {
+        assert_eq!(
+            Manifest::parse(&serde_json::to_vec(&json).unwrap())
+                .unwrap()
+                .platforms,
+            ["pc"]
+        );
+        for ok in [
+            serde_json::json!(["pc"]),
+            serde_json::json!(["pc", "ds"]),
+            serde_json::json!(["ds"]),
+        ] {
             json["platforms"] = ok.clone();
             let m = Manifest::parse(&serde_json::to_vec(&json).unwrap()).unwrap();
             assert_eq!(serde_json::to_value(&m.platforms).unwrap(), ok);
             // the field survives a round trip (installed manifests are re-read by launcher and game)
-            assert_eq!(Manifest::parse(&serde_json::to_vec(&m).unwrap()).unwrap().platforms, m.platforms);
+            assert_eq!(
+                Manifest::parse(&serde_json::to_vec(&m).unwrap())
+                    .unwrap()
+                    .platforms,
+                m.platforms
+            );
         }
-        for bad in [serde_json::json!([]), serde_json::json!(["PC"]), serde_json::json!(["pc", "pc"]), serde_json::json!("pc"), serde_json::json!(["../x"])] {
+        for bad in [
+            serde_json::json!([]),
+            serde_json::json!(["PC"]),
+            serde_json::json!(["pc", "pc"]),
+            serde_json::json!("pc"),
+            serde_json::json!(["../x"]),
+        ] {
             json["platforms"] = bad;
             assert!(Manifest::parse(&serde_json::to_vec(&json).unwrap()).is_err());
         }
@@ -766,14 +941,34 @@ mod tests {
             serde_json::to_vec(&m).unwrap()
         };
         // a scripts-only package
-        let m = Manifest::parse(&base(serde_json::json!({"scripts":["scripts/a.luau"],"api":1}))).unwrap();
+        let m = Manifest::parse(&base(
+            serde_json::json!({"scripts":["scripts/a.luau"],"api":1}),
+        ))
+        .unwrap();
         assert_eq!(m.scripts, ["scripts/a.luau"]);
         // scripts need format 2 and api 1, .luau paths, no duplicates
         assert!(Manifest::parse(&base(serde_json::json!({"scripts":["scripts/a.luau"]}))).is_err());
-        assert!(Manifest::parse(&base(serde_json::json!({"format":1,"scripts":["scripts/a.luau"],"api":1}))).is_err());
-        assert!(Manifest::parse(&base(serde_json::json!({"scripts":["scripts/a.lua"],"api":1}))).is_err());
-        assert!(Manifest::parse(&base(serde_json::json!({"scripts":["a.luau","A.luau"],"api":1}))).is_err());
-        assert!(Manifest::parse(&base(serde_json::json!({"scripts":["../a.luau"],"api":1}))).is_err());
+        assert!(
+            Manifest::parse(&base(
+                serde_json::json!({"format":1,"scripts":["scripts/a.luau"],"api":1})
+            ))
+            .is_err()
+        );
+        assert!(
+            Manifest::parse(&base(
+                serde_json::json!({"scripts":["scripts/a.lua"],"api":1})
+            ))
+            .is_err()
+        );
+        assert!(
+            Manifest::parse(&base(
+                serde_json::json!({"scripts":["a.luau","A.luau"],"api":1})
+            ))
+            .is_err()
+        );
+        assert!(
+            Manifest::parse(&base(serde_json::json!({"scripts":["../a.luau"],"api":1}))).is_err()
+        );
         // no scripts and no files is still empty
         assert!(Manifest::parse(&base(serde_json::json!({}))).is_err());
         // script contents: source text only
@@ -873,42 +1068,85 @@ mod tests {
         assert!(ok(p.clone()).is_ok());
         let mut nine = p.clone();
         nine.insert("shots/9.png".into(), b"\x89PNG\r\n\x1a\n....".to_vec());
-        assert!(ok(nine).unwrap_err().to_string().contains("more than 8 preview"));
+        assert!(
+            ok(nine)
+                .unwrap_err()
+                .to_string()
+                .contains("more than 8 preview")
+        );
         let mut fake = p.clone();
         fake.insert("shots/0.png".into(), b"GIF89a".to_vec());
         assert!(ok(fake).is_err());
-        for (name, data) in [("docs/README.md", &b"x"[..]), ("notes.txt", b"x"), ("extra.bmg", b"MESGbmg1"), ("README.md", b"PK")] {
+        for (name, data) in [
+            ("docs/README.md", &b"x"[..]),
+            ("notes.txt", b"x"),
+            ("extra.bmg", b"MESGbmg1"),
+            ("README.md", b"PK"),
+        ] {
             let mut bad = p.clone();
             bad.insert(name.into(), data.to_vec());
             assert!(ok(bad).is_err(), "{name}");
         }
         // add files: allowlisted, magic must match, extension kept
-        assert!(ok(package(b"RLCN not a bmg")).unwrap_err().to_string().contains("but this is a .nclr"));
+        assert!(
+            ok(package(b"RLCN not a bmg"))
+                .unwrap_err()
+                .to_string()
+                .contains("but this is a .nclr")
+        );
         let mut json: serde_json::Value = serde_json::from_slice(&p["manifest.json"]).unwrap();
         json["files"] = serde_json::json!({"new.nclr":{"add":"files/new.bmg"}});
         json["type"] = "gameplay".into();
         let mut renamed = p.clone();
         renamed.insert("manifest.json".into(), serde_json::to_vec(&json).unwrap());
-        assert!(ok(renamed).unwrap_err().to_string().contains("keep its extension"));
+        assert!(
+            ok(renamed)
+                .unwrap_err()
+                .to_string()
+                .contains("keep its extension")
+        );
         // manifest.json as a source, blocked target types
-        for files in [serde_json::json!({"a.bmg":{"add":"manifest.json"}}), serde_json::json!({"a.exe":{"add":"files/new.bmg"}})] {
+        for files in [
+            serde_json::json!({"a.bmg":{"add":"manifest.json"}}),
+            serde_json::json!({"a.exe":{"add":"files/new.bmg"}}),
+        ] {
             json["files"] = files;
             assert!(Manifest::parse(&serde_json::to_vec(&json).unwrap()).is_err());
         }
     }
     #[test]
+    #[cfg(feature = "diff")]
     fn large_patches_warn_instead_of_failing() {
         let original: Vec<u8> = (0..70000u32).map(|i| (i * 31 % 251) as u8).collect();
         let mut seed = 12345u32;
-        let modified: Vec<u8> = original.iter().map(|_| { seed = seed.wrapping_mul(1664525).wrapping_add(1013904223); (seed >> 24) as u8 }).collect();
+        let modified: Vec<u8> = original
+            .iter()
+            .map(|_| {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                (seed >> 24) as u8
+            })
+            .collect();
         let mut patch = Vec::new();
-        qbsdiff::Bsdiff::new(&original, &modified).compare(&mut patch).unwrap();
+        qbsdiff::Bsdiff::new(&original, &modified)
+            .compare(&mut patch)
+            .unwrap();
         let manifest = serde_json::json!({"format":1,"type":"gameplay","id":"test.big","name":"Big","version":"1.0.0","author":"Test","game":"AMCE","files":{"original.bin":{"patch":"p.bsdiff"}}});
-        let contents = BTreeMap::from([("manifest.json".to_string(), serde_json::to_vec(&manifest).unwrap()), ("p.bsdiff".to_string(), patch)]);
+        let contents = BTreeMap::from([
+            (
+                "manifest.json".to_string(),
+                serde_json::to_vec(&manifest).unwrap(),
+            ),
+            ("p.bsdiff".to_string(), patch),
+        ]);
         let pkg = Package::validate(contents, &retail(&original)).unwrap();
-        assert!(pkg.warnings.iter().any(|w| w.contains("over 60%")), "{:?}", pkg.warnings);
+        assert!(
+            pkg.warnings.iter().any(|w| w.contains("over 60%")),
+            "{:?}",
+            pkg.warnings
+        );
     }
     #[test]
+    #[cfg(feature = "diff")]
     fn patch_helpers_round_trip_and_zip_installs() {
         let dir = tempfile::tempdir().unwrap();
         let original = vec![17u8; 8192];
@@ -1001,7 +1239,13 @@ pub fn load_order(game: &Path) -> Vec<String> {
     let installed: BTreeSet<String> = installed(game).into_iter().map(|m| m.id).collect();
     let saved = std::fs::read_to_string(game.join("mods/order.txt")).unwrap_or_default();
     let mut out: Vec<String> = Vec::new();
-    for id in saved.lines().map(str::trim).map(str::to_string).chain(enabled(game)).chain(installed.iter().cloned()) {
+    for id in saved
+        .lines()
+        .map(str::trim)
+        .map(str::to_string)
+        .chain(enabled(game))
+        .chain(installed.iter().cloned())
+    {
         if installed.contains(&id) && !out.contains(&id) {
             out.push(id);
         }
@@ -1015,11 +1259,20 @@ pub fn save_load_order(game: &Path, order: &[String], on: &BTreeSet<String>) -> 
     }
     std::fs::create_dir_all(game.join("mods"))?;
     let mut staged = tempfile::NamedTempFile::new_in(game.join("mods"))?;
-    staged.write_all((order.join("
-") + "
-").as_bytes())?;
+    staged.write_all(
+        (order.join(
+            "
+",
+        ) + "
+")
+        .as_bytes(),
+    )?;
     staged.persist(game.join("mods/order.txt"))?;
-    let enabled: Vec<String> = order.iter().filter(|id| on.contains(*id)).cloned().collect();
+    let enabled: Vec<String> = order
+        .iter()
+        .filter(|id| on.contains(*id))
+        .cloned()
+        .collect();
     save_enabled(game, &enabled)
 }
 pub fn installed(game: &Path) -> Vec<Manifest> {
@@ -1082,18 +1335,13 @@ pub fn pack(dir: &Path) -> Result<std::path::PathBuf> {
     }
     let mut contents = BTreeMap::from([("manifest.json".to_string(), manifest_bytes)]);
     let root = dir.canonicalize()?;
-    for e in m.files.values() {
-        let path = root.join(e.source()).canonicalize()?;
+    for source in m.files.values().flat_map(Entry::sources) {
+        let path = root.join(source).canonicalize()?;
         if !path.starts_with(&root) {
             return Err("Payload escapes mod directory".into());
         }
         let data = std::fs::read(path)?;
-        let ext = e
-            .source()
-            .rsplit('.')
-            .next()
-            .unwrap_or("")
-            .to_ascii_lowercase();
+        let ext = source.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
         if ext != "bsdiff" || ds_header(&data) {
             return Err("Patch payload must be a .bsdiff file".into());
         }
@@ -1101,7 +1349,7 @@ pub fn pack(dir: &Path) -> Result<std::path::PathBuf> {
             return Err("Patch too large".into());
         }
         bspatch::Bspatch::new(&data)?;
-        contents.insert(e.source().into(), data);
+        contents.insert(source.into(), data);
     }
     if contents.len() > MAX_FILES
         || contents.values().map(|b| b.len() as u64).sum::<u64>() > MAX_UNPACKED

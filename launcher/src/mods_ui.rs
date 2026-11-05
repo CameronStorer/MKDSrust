@@ -29,7 +29,15 @@ pub struct CreateForm {
 }
 impl Default for CreateForm {
     fn default() -> Self {
-        Self { name: String::new(), author: String::new(), kind: "other", id: String::new(), id_edited: false, extract: true, ds: false }
+        Self {
+            name: String::new(),
+            author: String::new(),
+            kind: "other",
+            id: String::new(),
+            id_edited: false,
+            extract: true,
+            ds: false,
+        }
     }
 }
 
@@ -64,7 +72,9 @@ pub(crate) fn chip(ui: &mut egui::Ui, kind: &str) {
         .stroke(egui::Stroke::new(1., c.gamma_multiply(0.6)))
         .rounding(10.)
         .inner_margin(egui::Margin::symmetric(8., 1.))
-        .show(ui, |ui| ui.label(RichText::new(kind_label(kind)).small().color(c)));
+        .show(ui, |ui| {
+            ui.label(RichText::new(kind_label(kind)).small().color(c))
+        });
 }
 /// The drag handle: three short bars (egui's bundled fonts have no reliable "≡").
 fn grip(ui: &mut egui::Ui) {
@@ -72,12 +82,22 @@ fn grip(ui: &mut egui::Ui) {
     let color = if resp.hovered() { TEAL } else { Color32::GRAY };
     for dy in [-5., 0., 5.] {
         let y = r.center().y + dy;
-        ui.painter().line_segment([egui::pos2(r.left() + 3., y), egui::pos2(r.right() - 3., y)], egui::Stroke::new(2., color));
+        ui.painter().line_segment(
+            [egui::pos2(r.left() + 3., y), egui::pos2(r.right() - 3., y)],
+            egui::Stroke::new(2., color),
+        );
     }
 }
 /// A small up/down arrow button, painted (no font glyph needed).
 fn arrow_button(ui: &mut egui::Ui, up: bool, enabled: bool) -> egui::Response {
-    let (r, resp) = ui.allocate_exact_size(egui::vec2(28., 24.), if enabled { egui::Sense::click() } else { egui::Sense::hover() });
+    let (r, resp) = ui.allocate_exact_size(
+        egui::vec2(28., 24.),
+        if enabled {
+            egui::Sense::click()
+        } else {
+            egui::Sense::hover()
+        },
+    );
     let fill = if !enabled {
         Color32::from_rgb(34, 40, 46)
     } else if resp.hovered() {
@@ -88,9 +108,17 @@ fn arrow_button(ui: &mut egui::Ui, up: bool, enabled: bool) -> egui::Response {
     ui.painter().rect_filled(r, 6., fill);
     let c = r.center();
     let (a, b) = if up { (-4., 3.) } else { (4., -3.) };
-    let color = if enabled { Color32::WHITE } else { Color32::DARK_GRAY };
+    let color = if enabled {
+        Color32::WHITE
+    } else {
+        Color32::DARK_GRAY
+    };
     ui.painter().add(egui::Shape::convex_polygon(
-        vec![c + egui::vec2(0., a), c + egui::vec2(5., b), c + egui::vec2(-5., b)],
+        vec![
+            c + egui::vec2(0., a),
+            c + egui::vec2(5., b),
+            c + egui::vec2(-5., b),
+        ],
         color,
         egui::Stroke::NONE,
     ));
@@ -98,11 +126,68 @@ fn arrow_button(ui: &mut egui::Ui, up: bool, enabled: bool) -> egui::Response {
 }
 fn open_folder(path: &Path) -> Result<(), String> {
     std::fs::create_dir_all(path).map_err(|e| e.to_string())?;
-    std::process::Command::new("explorer.exe").arg(path).spawn().map(|_| ()).map_err(|e| e.to_string())
+    std::process::Command::new("explorer.exe")
+        .arg(path)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+#[path = "../../1_build_tool/tests/common/mod.rs"]
+mod format3_fixtures;
+
+#[test]
+fn format3_install_screens_all_payloads_and_current_member_hashes() {
+    use format3_fixtures::*;
+    let game = tempfile::tempdir().unwrap();
+    std::fs::write(game.path().join("manifest.json"), b"{}").unwrap();
+    let inner = mkds_builder::dsfiles::lz77_compress(&narc(&[
+        ("a.bmg", b"old a".to_vec()),
+        ("b.bmg", b"old b".to_vec()),
+    ]));
+    let image = rom(&[(
+        "a.carc",
+        mkds_builder::dsfiles::lz77_compress(&narc(&[("inner.carc", inner)])),
+    )]);
+    // Exercise the shared installer after the launcher's retail-ROM identity guard;
+    // synthetic fixtures intentionally cannot pass that SHA check.
+    for (id, path, before, after) in [
+        (
+            "test.first",
+            "inner.carc/a.bmg",
+            b"old a".as_slice(),
+            b"new a".as_slice(),
+        ),
+        ("test.second", "inner.carc/b.bmg", b"old b", b"new b"),
+        ("test.chained", "inner.carc/a.bmg", b"new a", b"chained a"),
+    ] {
+        let zip_path = game.path().join(format!("{id}.zip"));
+        zip(&package(id, "a.carc", &[(path, before, after)]), &zip_path);
+        modding::install_zip(game.path(), &image, &zip_path).unwrap();
+    }
+    let zip_path = game.path().join("conflict.zip");
+    zip(
+        &package(
+            "test.conflict",
+            "a.carc",
+            &[("inner.carc/a.bmg", b"old a", b"conflict")],
+        ),
+        &zip_path,
+    );
+    let error = modding::install_zip(game.path(), &image, &zip_path)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("inner.carc/a.bmg"), "{error}");
+    assert!(!game.path().join("mods/test.conflict").exists());
 }
 
 /// Screen a downloaded/dropped zip against the player's ROM and install it (see [`modding::install_zip`]).
-pub(crate) fn screen_and_install(game: &Path, rom: &Path, archive: &Path) -> modpkg::Result<String> {
+pub(crate) fn screen_and_install(
+    game: &Path,
+    rom: &Path,
+    archive: &Path,
+) -> modpkg::Result<String> {
     if !rom::inspect_rom(rom)?.reference_match {
         return Err("Mod screening needs the supported Mario Kart DS (USA, rev 0) ROM".into());
     }
@@ -131,7 +216,8 @@ impl Launcher {
         let (game, rom) = (self.prefs.output.clone(), self.prefs.rom.clone());
         let tx = self.start("Checking the mod against your ROM…");
         std::thread::spawn(move || {
-            let r = screen_and_install(&game, &rom, &archive).map_err(|e| format!("Mod not installed: {e}"));
+            let r = screen_and_install(&game, &rom, &archive)
+                .map_err(|e| format!("Mod not installed: {e}"));
             let _ = tx.send(Event::ModInstalled(r));
         });
     }
@@ -153,13 +239,20 @@ impl Launcher {
                 return;
             }
         };
-        let (game, rom, data) = (self.prefs.output.clone(), self.prefs.rom.clone(), self.dir.clone());
+        let (game, rom, data) = (
+            self.prefs.output.clone(),
+            self.prefs.rom.clone(),
+            self.dir.clone(),
+        );
         let tx = self.start("Downloading the mod from mkdsrust.com…");
         std::thread::spawn(move || {
             let r = (|| -> Result<String, String> {
                 let dir = data.join("downloads");
                 std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-                let file = tempfile::Builder::new().suffix(".zip").tempfile_in(&dir).map_err(|e| e.to_string())?;
+                let file = tempfile::Builder::new()
+                    .suffix(".zip")
+                    .tempfile_in(&dir)
+                    .map_err(|e| e.to_string())?;
                 protocol::download(&url, file.path())?;
                 screen_and_install(&game, &rom, file.path()).map_err(|e| e.to_string())
             })()
@@ -227,7 +320,10 @@ impl Launcher {
                 self.busy = false;
                 match r {
                     Ok(dir) => {
-                        self.message = format!("Created {}. Edit files under romfs/, then Test in game or Pack.", dir.display());
+                        self.message = format!(
+                            "Created {}. Edit files under romfs/, then Test in game or Pack.",
+                            dir.display()
+                        );
                         let _ = open_folder(dir);
                     }
                     Err(e) => self.message = format!("Could not create the mod project: {e}"),
@@ -253,7 +349,9 @@ impl Launcher {
                         self.mods.dev = Some(id.clone());
                         self.mods.report = s.clone();
                         self.play();
-                        self.message = format!("Testing {id}: it is installed last (top priority) until the game closes.");
+                        self.message = format!(
+                            "Testing {id}: it is installed last (top priority) until the game closes."
+                        );
                     }
                     Err(e) => {
                         self.message = "Test failed (see the report on the Mods page).".into();
@@ -293,8 +391,14 @@ impl Launcher {
         let busy = self.busy;
         ui.add_enabled_ui(!busy, |ui| {
             ui.horizontal_wrapped(|ui| {
-                if ui.add_enabled(ready, egui::Button::new("Install .zip…")).clicked() {
-                    if let Some(path) = rfd::FileDialog::new().add_filter("Mod package", &["zip"]).pick_file() {
+                if ui
+                    .add_enabled(ready, egui::Button::new("Install .zip…"))
+                    .clicked()
+                {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Mod package", &["zip"])
+                        .pick_file()
+                    {
                         self.install_mod(path);
                     }
                 }
@@ -304,7 +408,10 @@ impl Launcher {
                 if ui.button("Create mod…").clicked() {
                     self.mods.create = Some(CreateForm::default());
                 }
-                if ui.add_enabled(ready, egui::Button::new("Open mods folder")).clicked() {
+                if ui
+                    .add_enabled(ready, egui::Button::new("Open mods folder"))
+                    .clicked()
+                {
                     if let Err(e) = open_folder(&game.join("mods")) {
                         self.message = e;
                     }
@@ -312,23 +419,43 @@ impl Launcher {
             });
         });
         if !ready {
-            ui.colored_label(Color32::YELLOW, "Build your game first (Setup): mods are installed into the game folder.");
+            ui.colored_label(
+                Color32::YELLOW,
+                "Build your game first (Setup): mods are installed into the game folder.",
+            );
         }
 
         let installed = modpkg::installed(&game);
-        let by_id: BTreeMap<&str, &modpkg::Manifest> = installed.iter().map(|m| (m.id.as_str(), m)).collect();
+        let by_id: BTreeMap<&str, &modpkg::Manifest> =
+            installed.iter().map(|m| (m.id.as_str(), m)).collect();
         let mut order = modpkg::load_order(&game);
         let mut on: BTreeSet<String> = modpkg::enabled(&game).into_iter().collect();
         ui.add_space(4.);
         ui.horizontal_wrapped(|ui| {
-            if ui.selectable_label(self.mods.filter.is_none(), format!("All  {}", installed.len())).clicked() {
+            if ui
+                .selectable_label(
+                    self.mods.filter.is_none(),
+                    format!("All  {}", installed.len()),
+                )
+                .clicked()
+            {
                 self.mods.filter = None;
             }
             for kind in modpkg::TYPES {
                 let n = installed.iter().filter(|m| m.kind == kind).count();
                 let selected = self.mods.filter == Some(kind);
                 let text = RichText::new(format!("{}  {n}", kind_label(kind)));
-                if ui.selectable_label(selected, if n == 0 { text.color(Color32::DARK_GRAY) } else { text }).clicked() {
+                if ui
+                    .selectable_label(
+                        selected,
+                        if n == 0 {
+                            text.color(Color32::DARK_GRAY)
+                        } else {
+                            text
+                        },
+                    )
+                    .clicked()
+                {
                     self.mods.filter = if selected { None } else { Some(kind) };
                 }
             }
@@ -344,8 +471,11 @@ impl Launcher {
                 }
             }
         }
-        let active: Vec<modpkg::Manifest> =
-            order.iter().filter(|id| on.contains(*id)).filter_map(|id| by_id.get(id.as_str()).map(|m| (*m).clone())).collect();
+        let active: Vec<modpkg::Manifest> = order
+            .iter()
+            .filter(|id| on.contains(*id))
+            .filter_map(|id| by_id.get(id.as_str()).map(|m| (*m).clone()))
+            .collect();
 
         if installed.is_empty() {
             ui.label(RichText::new("No mods installed yet. Find some on the Browse tab, drop a .zip here, or make your own with Create mod.").color(Color32::GRAY));
@@ -473,7 +603,10 @@ impl Launcher {
                         self.message = e;
                     }
                 }
-                ui.hyperlink_to("How to make a mod", "https://docs.mkdsrust.com/guides--first-mod.html");
+                ui.hyperlink_to(
+                    "How to make a mod",
+                    "https://docs.mkdsrust.com/guides--first-mod.html",
+                );
             });
         });
         let projects = modding::list(&root);
@@ -483,31 +616,61 @@ impl Launcher {
         let mut action = None;
         ui.add_enabled_ui(!busy, |ui| {
             for ws in &projects {
-                egui::Frame::none().fill(Color32::from_rgb(24, 29, 34)).rounding(8.).inner_margin(egui::Margin::symmetric(10., 6.)).show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(&ws.draft.name).strong());
-                                ui.label(RichText::new(format!("v{}", ws.draft.version)).small().color(Color32::GRAY));
-                                chip(ui, &ws.draft.kind);
+                egui::Frame::none()
+                    .fill(Color32::from_rgb(24, 29, 34))
+                    .rounding(8.)
+                    .inner_margin(egui::Margin::symmetric(10., 6.))
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.vertical(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new(&ws.draft.name).strong());
+                                    ui.label(
+                                        RichText::new(format!("v{}", ws.draft.version))
+                                            .small()
+                                            .color(Color32::GRAY),
+                                    );
+                                    chip(ui, &ws.draft.kind);
+                                });
+                                let short = format!(
+                                    "modding/{}",
+                                    ws.dir
+                                        .file_name()
+                                        .map(|n| n.to_string_lossy())
+                                        .unwrap_or_default()
+                                );
+                                ui.label(RichText::new(short).small().color(Color32::GRAY))
+                                    .on_hover_text(ws.dir.display().to_string());
                             });
-                            let short = format!("modding/{}", ws.dir.file_name().map(|n| n.to_string_lossy()).unwrap_or_default());
-                            ui.label(RichText::new(short).small().color(Color32::GRAY)).on_hover_text(ws.dir.display().to_string());
-                        });
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button("Pack").on_hover_text("Write a ready-to-upload zip with only your changes").clicked() {
-                                action = Some((0, ws.dir.clone()));
-                            }
-                            if ui.add_enabled(ready, egui::Button::new("Test in game")).on_hover_text("Install as a temporary top-priority mod and play").clicked() {
-                                action = Some((1, ws.dir.clone()));
-                            }
-                            if ui.button("Open folder").clicked() {
-                                action = Some((2, ws.dir.clone()));
-                            }
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui
+                                        .button("Pack")
+                                        .on_hover_text(
+                                            "Write a ready-to-upload zip with only your changes",
+                                        )
+                                        .clicked()
+                                    {
+                                        action = Some((0, ws.dir.clone()));
+                                    }
+                                    if ui
+                                        .add_enabled(ready, egui::Button::new("Test in game"))
+                                        .on_hover_text(
+                                            "Install as a temporary top-priority mod and play",
+                                        )
+                                        .clicked()
+                                    {
+                                        action = Some((1, ws.dir.clone()));
+                                    }
+                                    if ui.button("Open folder").clicked() {
+                                        action = Some((2, ws.dir.clone()));
+                                    }
+                                },
+                            );
                         });
                     });
-                });
             }
         });
         match action {
@@ -521,9 +684,14 @@ impl Launcher {
             None => {}
         }
         if !self.mods.report.is_empty() {
-            egui::CollapsingHeader::new("Last pack / test report").default_open(true).show(ui, |ui| {
-                ui.add(egui::Label::new(RichText::new(&self.mods.report).monospace().size(12.)).wrap());
-            });
+            egui::CollapsingHeader::new("Last pack / test report")
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(RichText::new(&self.mods.report).monospace().size(12.))
+                            .wrap(),
+                    );
+                });
         }
         self.create_window(ui.ctx());
     }
@@ -532,7 +700,9 @@ impl Launcher {
         let busy = self.busy;
         let have_rom = !self.prefs.rom.as_os_str().is_empty();
         let root = self.modding_root();
-        let Some(form) = &mut self.mods.create else { return };
+        let Some(form) = &mut self.mods.create else {
+            return;
+        };
         let (mut open, mut submit) = (true, false);
         egui::Window::new("Create a mod")
             .collapsible(false)
