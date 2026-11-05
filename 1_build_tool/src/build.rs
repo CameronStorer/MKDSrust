@@ -303,7 +303,7 @@ fn run_cargo_output(
     }
     if !child.wait()?.success() {
         return err(
-            "Cargo failed (diagnostics above). If downloads failed, check your internet connection and retry; the first build needs crates.io.",
+            "Cargo failed: the lines above say why. If a download failed, check your internet connection and retry (the first build needs crates.io); otherwise please report the issue with the saved build log.",
         );
     }
     executables.retain(|_, e: &mut PathBuf| e.is_file());
@@ -428,6 +428,8 @@ impl Toolchain {
                 llvm_mingw.join("bin"),
             ],
             env: vec![
+                // Its own crate cache and config, never the user's ~/.cargo (see `user_build_setting`).
+                ("CARGO_HOME", root.join("cargo-home")),
                 ("CC", cc.clone()),
                 ("CC_x86_64_pc_windows_gnu", cc),
                 ("CXX", cxx.clone()),
@@ -439,6 +441,26 @@ impl Toolchain {
             ],
         }
     }
+}
+
+/// Environment variables from the user's own Rust setup that change how the portable toolchain builds
+/// (wrappers, targets, linkers, profiles, flags). Network and proxy settings (`CARGO_HTTP_*`, `CARGO_NET_*`,
+/// `HTTPS_PROXY`) are kept so downloads still work behind a proxy.
+fn user_build_setting(key: &str) -> bool {
+    let key = key.to_ascii_uppercase();
+    matches!(
+        key.as_str(),
+        "CARGO_HOME"
+            | "RUSTC_WRAPPER"
+            | "RUSTC_WORKSPACE_WRAPPER"
+            | "RUSTDOCFLAGS"
+            | "CARGO_ENCODED_RUSTDOCFLAGS"
+            | "CARGO_INCREMENTAL"
+            | "CARGO_TARGET_DIR"
+            | "RUSTUP_TOOLCHAIN"
+    ) || ["CARGO_BUILD_", "CARGO_TARGET_", "CARGO_PROFILE_", "CARGO_UNSTABLE_"]
+        .iter()
+        .any(|p| key.starts_with(p))
 }
 
 pub fn recompile_with_toolchain(
@@ -501,9 +523,20 @@ pub fn recompile_with_toolchain(
                 .env("RUSTDOC", t.rustc.with_file_name("rustdoc.exe"));
             // No `--target`/CARGO_BUILD_TARGET: the toolchain's host is its target, so the flags apply to
             // build scripts and proc-macros too. The encoded form keeps paths with spaces intact.
-            c.env_remove("CARGO_BUILD_TARGET")
-                .env_remove("RUSTFLAGS")
+            c.env_remove("RUSTFLAGS")
                 .env("CARGO_ENCODED_RUSTFLAGS", t.rustflags.join("\u{1f}"));
+            // A developer's own Rust setup must not leak into the portable build (issue #2: an sccache
+            // `rustc-wrapper` made every launcher build fail). The private CARGO_HOME (in `t.env`) hides their
+            // `~/.cargo/config.toml`; these variables would override it.
+            for (key, _) in std::env::vars_os() {
+                if key.to_str().is_some_and(user_build_setting) {
+                    c.env_remove(key);
+                }
+            }
+            // The first build downloads a few hundred crates; ride out brief connection resets.
+            if std::env::var_os("CARGO_NET_RETRY").is_none() {
+                c.env("CARGO_NET_RETRY", "10");
+            }
             // Only child PATH: DLLs and linker tools need to be discoverable.
             let mut paths = t.path.clone();
             paths.extend(std::env::split_paths(
@@ -1263,6 +1296,14 @@ mod tests {
         // C++ (Luau) links llvm-mingw's libc++ statically
         assert!(f[4].starts_with("-Clink-arg=-LC:/tc dir/llvm-mingw") && f[5].ends_with("libc++abi.a") && f[6].ends_with("libunwind.a"));
         assert!(t.env.iter().any(|(k, v)| *k == "CXXSTDLIB" && v.to_str() == Some("static:-bundle=c++")));
+        assert!(t.env.iter().any(|(k, v)| *k == "CARGO_HOME" && v == Path::new("C:/tc dir/cargo-home")));
+        for k in ["RUSTC_WRAPPER", "CARGO_BUILD_TARGET", "cargo_build_rustc_wrapper", "CARGO_HOME",
+            "CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER", "CARGO_PROFILE_RELEASE_LTO", "RUSTUP_TOOLCHAIN"] {
+            assert!(user_build_setting(k), "{k}");
+        }
+        for k in ["PATH", "HTTPS_PROXY", "CARGO_HTTP_PROXY", "CARGO_NET_GIT_FETCH_WITH_CLI", "MKDS_ROM"] {
+            assert!(!user_build_setting(k), "{k}");
+        }
         assert!(t.path.iter().any(|p| p.ends_with("self-contained")));
         assert!(t.path.contains(&Path::new("C:/tc dir/llvm-mingw").join("bin")));
     }

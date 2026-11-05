@@ -21,6 +21,18 @@ Remove-Item -LiteralPath $marker -ErrorAction SilentlyContinue
 $rustReady = (Test-Path -LiteralPath $rustMarker) -and (Get-Content -LiteralPath $rustMarker -TotalCount 1) -eq $Version -and
     (Test-Path -LiteralPath (Join-Path $Destination 'bin/rustc.exe')) -and (Test-Path -LiteralPath (Join-Path $Destination 'bin/cargo.exe'))
 
+# Removes a folder even when paths inside it pass Windows' 260-character limit (Remove-Item fails there):
+# robocopy, which handles long paths, empties it first.
+function Remove-Tree([string]$dir) {
+    if (!(Test-Path -LiteralPath $dir)) { return }
+    $empty = Join-Path ([IO.Path]::GetTempPath()) ([IO.Path]::GetRandomFileName())
+    New-Item -ItemType Directory $empty | Out-Null
+    & "$env:SystemRoot\System32\robocopy.exe" $empty $dir /MIR /NFL /NDL /NJH /NJS /NP | Out-Null
+    if ($LASTEXITCODE -ge 8) { throw "Could not remove $dir" }
+    $global:LASTEXITCODE = 0  # robocopy's 1-7 mean success
+    Remove-Item -LiteralPath $empty, $dir -Recurse -Force
+}
+
 # Downloads $url to $archive (resuming a partial file) unless it already has SHA-256 $expected.
 function Get-Verified([string]$label, [string]$url, [string]$archive, [string]$expected) {
     if ($expected -notmatch '^[0-9a-fA-F]{64}$') { throw "Invalid SHA-256 for $label" }
@@ -49,17 +61,16 @@ foreach ($component in @('rustc','cargo','rust-std','rust-mingw') | Where-Object
     $checksum = (Invoke-WebRequest -UseBasicParsing -Uri "$url.sha256").Content
     if ($checksum -is [byte[]]) { $checksum = [Text.Encoding]::UTF8.GetString($checksum) }
     Get-Verified "$component $Version" $url $archive ($checksum.Trim() -split '\s+')[0]
-    & "$env:SystemRoot\System32\tar.exe" -xf $archive -C $downloads
+    # Each part is extracted by tar straight into the toolchain folder. (Copy-Item from an extracted copy failed
+    # with "Could not find a part of the path" once the install folder was long: Windows' 260-character limit.)
+    & "$env:SystemRoot\System32\tar.exe" -xf $archive -C $downloads "$name/components"
     if ($LASTEXITCODE -ne 0) { throw "Could not extract $name" }
     $package = Join-Path $downloads $name
     foreach ($part in Get-Content -LiteralPath (Join-Path $package 'components')) {
-        $payload = Join-Path $package $part
-        foreach ($folder in @('bin','lib','libexec','share')) {
-            $item = Join-Path $payload $folder
-            if (Test-Path -LiteralPath $item) { Copy-Item -LiteralPath $item -Destination $Destination -Recurse -Force }
-        }
+        & "$env:SystemRoot\System32\tar.exe" -xf $archive -C $Destination --strip-components 2 --include "$name/$part/*" --exclude "$name/$part/manifest.in" --exclude "$name/$part/etc"
+        if ($LASTEXITCODE -ne 0) { throw "Could not extract $name ($part)" }
     }
-    Remove-Item -LiteralPath $package -Recurse -Force
+    Remove-Tree $package
 }
 Set-Content -LiteralPath $rustMarker -Value $Version
 
@@ -72,8 +83,8 @@ $llvmName = "llvm-mingw-$LlvmMingw-ucrt-x86_64"
 $llvmArchive = Join-Path $downloads "$llvmName.zip"
 Get-Verified "llvm-mingw $LlvmMingw" "https://github.com/mstorsjo/llvm-mingw/releases/download/$LlvmMingw/$llvmName.zip" $llvmArchive $LlvmMingwSha256
 $llvmDir = Join-Path $Destination 'llvm-mingw'
-if (Test-Path -LiteralPath $llvmDir) { Remove-Item -LiteralPath $llvmDir -Recurse -Force }
-if (Test-Path -LiteralPath (Join-Path $downloads $llvmName)) { Remove-Item -LiteralPath (Join-Path $downloads $llvmName) -Recurse -Force }
+Remove-Tree $llvmDir
+Remove-Tree (Join-Path $downloads $llvmName)
 & "$env:SystemRoot\System32\tar.exe" -xf $llvmArchive -C $downloads "$llvmName/bin" "$llvmName/include" "$llvmName/x86_64-w64-mingw32" "$llvmName/lib/clang/*/include" "$llvmName/lib/clang/*/lib/windows/libclang_rt.builtins-x86_64.a"
 if ($LASTEXITCODE -ne 0) { throw "Could not extract $llvmName" }
 Move-Item -LiteralPath (Join-Path $downloads $llvmName) -Destination $llvmDir
@@ -105,11 +116,18 @@ $clang = Join-Path $llvmDir 'bin/x86_64-w64-mingw32-clang.exe'
 foreach ($name in @('CC', 'CC_x86_64_pc_windows_gnu')) { Set-Item "env:$name" $clang }
 foreach ($name in @('CXX', 'CXX_x86_64_pc_windows_gnu')) { Set-Item "env:$name" (Join-Path $llvmDir 'bin/x86_64-w64-mingw32-clang++.exe') }
 foreach ($name in @('AR', 'AR_x86_64_pc_windows_gnu')) { Set-Item "env:$name" (Join-Path $llvmDir 'bin/llvm-ar.exe') }
-Remove-Item env:RUSTFLAGS, env:CARGO_BUILD_TARGET, env:CFLAGS, env:CXXFLAGS -ErrorAction SilentlyContinue
+Remove-Item env:RUSTFLAGS, env:CFLAGS, env:CXXFLAGS -ErrorAction SilentlyContinue
+# Same isolation as the builder (user_build_setting in build.rs): the toolchain's own CARGO_HOME, and none of the
+# user's own Rust build settings (an sccache rustc-wrapper in ~/.cargo broke builds: issue #2).
+Get-ChildItem env: | Where-Object {
+    $_.Name -in @('RUSTC_WRAPPER','RUSTC_WORKSPACE_WRAPPER','RUSTDOCFLAGS','CARGO_ENCODED_RUSTDOCFLAGS','CARGO_INCREMENTAL','CARGO_TARGET_DIR','RUSTUP_TOOLCHAIN') -or
+    $_.Name -match '^CARGO_(BUILD|TARGET|PROFILE|UNSTABLE)_'
+} | ForEach-Object { Remove-Item "env:$($_.Name)" }
+$env:CARGO_HOME = Join-Path $Destination 'cargo-home'
 $env:RUSTC = Join-Path $Destination 'bin/rustc.exe'
 $env:CARGO_ENCODED_RUSTFLAGS = @("-Cdlltool=$dlltool", "-Clinker=$(Join-Path $rustlib 'rust-lld.exe')", '-Clinker-flavor=ld.lld', '-Clink-self-contained=yes') -join [char]0x1f
 $cprobe = Join-Path $Destination 'toolchain-check-c'
-if (Test-Path -LiteralPath $cprobe) { Remove-Item -LiteralPath $cprobe -Recurse -Force }
+Remove-Tree $cprobe
 New-Item -ItemType Directory -Force (Join-Path $cprobe 'src') | Out-Null
 Set-Content -LiteralPath (Join-Path $cprobe 'Cargo.toml') -Encoding ASCII -Value @'
 [package]
@@ -132,6 +150,6 @@ fn main() { assert_eq!(unsafe { probe(41) }, 42); }
 '@
 & (Join-Path $Destination 'bin/cargo.exe') run --release --quiet --manifest-path (Join-Path $cprobe 'Cargo.toml') --target-dir (Join-Path $cprobe 'target')
 if ($LASTEXITCODE -ne 0) { throw 'Portable C compiler validation failed. See the error above; check internet access and retry installation.' }
-Remove-Item -LiteralPath $cprobe -Recurse -Force
+Remove-Tree $cprobe
 Set-Content -LiteralPath (Join-Path $Destination 'complete') -Value "$Version llvm-mingw-$LlvmMingw cc"
 Write-Output 'Portable toolchain ready. No system settings were changed.'
