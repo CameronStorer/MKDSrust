@@ -97,6 +97,17 @@ fn sdk_leaves_match_rom() {
                 else if n.name == "MI_CpuFill8" { start.r[0] = dst; start.r[1] &= 255; }
                 else { start.r[1] = dst; }
             }
+            // Math pilot: exercise unaligned/overlapping vector storage, wrapped addresses,
+            // and arguments in the saved stack frame, in addition to arbitrary addresses.
+            if matches!(n.entry, 0x0214_848c | 0x0203_9828 | 0x0203_97a8 | 0x0214_7f50) {
+                if case < 256 {
+                    start.r[0] = [0x0230_1000, 0xffff_fffc, start.r[13] - 8][case as usize % 3] + (case & 3);
+                    start.r[1] = if case & 4 == 0 { start.r[0].wrapping_add(4) } else { 0x0230_2000 + (case & 3) };
+                    start.r[2] = [start.r[0], start.r[1], start.r[0].wrapping_sub(4), 0x0230_3000][case as usize % 4];
+                    // Output may alias inputs but must not overwrite the callee saved-register area.
+                    if (start.r[13] - 64..start.r[13]).contains(&start.r[2]) { start.r[2] = 0x0230_3000; }
+                }
+            }
             if n.name == "strlen" { start.r[0] = if case % 8 == 0 { 0xffff_ffc0 } else { 0x0230_1000 + (case & 3) }; }
             let seed = rng.next() as u64;
             // Prior hardware state matters for asynchronous and result-only functions.

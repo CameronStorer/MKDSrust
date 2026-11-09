@@ -53,6 +53,9 @@ pub fn ret(c: &Cpu) -> u32 {
 /// (`tests/native_sdk.rs`).
 mod sdk;
 
+/// T3 pilot: fixed-point value functions and trial ABI adapters.
+pub mod math;
+
 /// Block 5.1: ROM-archive file reads from the in-memory ROM (`MKDS_HW_FS=native`).
 pub mod fs;
 
@@ -63,6 +66,18 @@ pub mod fs;
 pub const EVENT_ENTRIES: &[u32] = &[0x020F_8A04];
 
 pub static NATIVE: &[Native] = &[
+    // Math pilot: opt in with MKDS_NATIVES=all; never installed by VERIFIED.
+    Native { segment: "arm9_main", entry: 0x020738f8, name: "fx_abs", f: math::abs_block },
+    Native { segment: "arm9_main", entry: 0x02091f44, name: "fx_mul_091f44", f: math::mul_trunc_block },
+    Native { segment: "arm9_main", entry: 0x021488e8, name: "FX_Mul", f: math::mul_block },
+    Native { segment: "arm9_main", entry: 0x02039828, name: "vec_dot_product", f: math::dot_trunc_block },
+    Native { segment: "arm9_main", entry: 0x0214848c, name: "VEC_DotProduct", f: math::dot_round_block },
+    Native { segment: "arm9_main", entry: 0x020397a8, name: "vec_cross_product", f: math::cross_block },
+    Native { segment: "arm9_main", entry: 0x02147f50, name: "VEC_Distance", f: math::distance_block },
+    Native { segment: "arm9_main", entry: 0x02146c98, name: "MTX_Identity22", f: math::identity22_block },
+    Native { segment: "arm9_main", entry: 0x02146cbc, name: "MTX_Identity33", f: math::identity33_block },
+    Native { segment: "arm9_main", entry: 0x021471bc, name: "MTX_Identity43", f: math::identity43_block },
+    Native { segment: "arm9_main", entry: 0x02147954, name: "MTX_Identity44", f: math::identity44_block },
     Native { segment: "arm9_main", entry: 0x0200_fe74, name: "MATH_CountLeadingZeros", f: sdk::count_leading_zeros_block },
     Native { segment: "arm9_main", entry: 0x0213_3048, name: "msl_multiply_u64", f: sdk::multiply64_block },
     Native { segment: "arm9_main", entry: 0x0213_a434, name: "strlen", f: sdk::strlen_block },
@@ -71,8 +86,8 @@ pub static NATIVE: &[Native] = &[
     Native { segment: "arm9_main", entry: 0x0214_d02c, name: "MIi_CpuCopy32", f: sdk::copy32_block },
     Native { segment: "arm9_main", entry: 0x0214_d05c, name: "MIi_CpuClearFast", f: sdk::fill_fast_block },
     Native { segment: "arm9_main", entry: 0x0214_d168, name: "MI_CpuFill8", f: sdk::fill8_block },
-    Native { segment: "arm9_main", entry: 0x0214_7cd8, name: "FX_Mod", f: sdk::remainder_block },
-    Native { segment: "arm9_main", entry: 0x0214_7d30, name: "FX_DivS32", f: sdk::divide_block },
+    Native { segment: "arm9_main", entry: 0x0214_7cd8, name: "FX_Mod", f: math::mod_block },
+    Native { segment: "arm9_main", entry: 0x0214_7d30, name: "FX_DivS32", f: math::div_s32_block },
     Native { segment: "arm9_main", entry: 0x0214_7d88, name: "FX_DivAsync", f: sdk::div_async_block },
     Native { segment: "arm9_main", entry: 0x0214_7dc0, name: "FX_GetSqrtResult", f: sdk::sqrt_result_block },
     Native { segment: "arm9_main", entry: 0x0214_7e28, name: "FX_GetDivResult", f: sdk::div_result_block },
@@ -96,20 +111,26 @@ pub static VERIFIED: &[Native] = &[
 ];
 
 /// What a game or tool installs: [`VERIFIED`], or for diagnostics per `MKDS_NATIVES`: `off` = none (the
-/// exact translation everywhere), `all` = every [`NATIVE`] including those on trial.
+/// exact translation everywhere), `all` = every [`NATIVE`] including those on trial,
+/// `math` = [`VERIFIED`] plus only the math pilot trials. Native-timing generation
+/// must use the same `math`/`all` selection to keep those entries on the dispatcher.
 pub fn selected() -> &'static [Native] {
-    let base = match std::env::var("MKDS_NATIVES").as_deref() {
+    let selection = std::env::var("MKDS_NATIVES");
+    let math_only = selection.as_deref() == Ok("math");
+    let base = match selection.as_deref() {
         Ok("off") => &[],
         Ok("all") => NATIVE,
         _ => VERIFIED,
     };
-    if !fs::enabled() {
+    let fs_on = fs::enabled();
+    if !fs_on && !math_only {
         return base;
     }
     // Block 5 hardware services (`MKDS_HW_<UNIT>=native`) come on top of the selection.
     let all: Vec<Native> = base
         .iter()
-        .chain(fs::NATIVES)
+        .chain(NATIVE.iter().filter(|n| math_only && math::ENTRIES.contains(&n.entry)))
+        .chain(fs::NATIVES.iter().filter(|_| fs_on))
         .map(|n| Native { segment: n.segment, entry: n.entry, name: n.name, f: n.f })
         .collect();
     Box::leak(all.into_boxed_slice())
