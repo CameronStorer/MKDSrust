@@ -50,7 +50,7 @@ struct Ctx<'a> {
     native_timing: bool,
     /// Block 5.5: no-spill emission (see [`DirectSig`]).
     nospill: bool,
-    /// Emitting a closed function's direct variant: exits return, nothing may spill.
+    /// Emitting a direct variant: exits return; full spill/reload macros are forbidden.
     selfn: bool,
     /// Original computed jumps, retained for the exact dispatcher fallback.
     tail_fallback: BTreeMap<(u32, u32), E>,
@@ -71,6 +71,8 @@ struct Ctx<'a> {
 //   every register it writes. Nothing can observe `c.r` while it runs, so nothing is spilled.
 // The whole-program part (which functions are closed, their arguments and results) is computed by
 // `mkds_gen` from the [`Facts`] each emission records, and handed back with [`set_direct`].
+// `MKDS_BOUNDARY=1` also admits constant dispatcher calls whose callee is certified to preserve
+// r4-r11 and sp. Only its volatile inputs, sp and lr are synchronized; r4-r11 remain local.
 // ---------------------------------------------------------------------------------------------
 
 /// A closed function's direct variant: register masks (bit n = rn) of its arguments and results, and its
@@ -82,6 +84,27 @@ pub struct DirectSig {
     pub name: String,
 }
 
+/// Dispatcher boundary facts. `params` includes volatile values passed through unchanged: they
+/// must be synchronized too, since the boundary reloads all five volatile registers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoundarySig {
+    pub params: u16,
+    pub preserved: u16,
+}
+
+const CALLEE_SAVED: u16 = 0x2FF0; // r4-r11, sp
+const VOLATILE: u16 = 0x100F; // r0-r3, r12
+
+/// Opt-in generator feature, confined to native no-spill emission.
+pub fn boundary_enabled() -> bool {
+    nospill_enabled() && std::env::var("MKDS_BOUNDARY").as_deref() == Ok("1")
+}
+
+/// Per-segment calling-convention proofs, including rejected rows (with an incomplete mask).
+pub fn set_boundary(map: HashMap<u32, Vec<(String, BoundarySig)>>) {
+    BOUNDARY.with(|d| *d.borrow_mut() = map);
+}
+
 /// What an emission found (no-spill mode): why the function is not closed (`None`: it may be), the
 /// functions it calls by constant address, and its register facts given the current [`set_direct`]
 /// table: registers live at its entry and registers it writes (results of direct calls included).
@@ -91,11 +114,14 @@ pub struct Facts {
     pub calls: Vec<u32>,
     pub live_in: u16,
     pub written: u16,
+    pub preserved: u16,
+    pub boundary_params: u16,
 }
 
 thread_local! {
     /// Direct-callable functions: entry (exact, with the Thumb bit) -> (segment, signature) rows.
     static DIRECT: std::cell::RefCell<HashMap<u32, Vec<(String, DirectSig)>>> = std::cell::RefCell::new(HashMap::new());
+    static BOUNDARY: std::cell::RefCell<HashMap<u32, Vec<(String, BoundarySig)>>> = std::cell::RefCell::new(HashMap::new());
     /// The segment of the function being emitted, and its own signature when it is closed (its direct
     /// variant is emitted, and its T1 entry becomes a wrapper).
     static CURRENT: std::cell::RefCell<(String, Option<DirectSig>)> = std::cell::RefCell::new((String::new(), None));
@@ -137,6 +163,22 @@ fn direct_for(target: u32) -> Option<DirectSig> {
         let rows = d.get(&target)?;
         rows.iter().find(|(s, _)| *s == seg).or_else(|| rows.iter().find(|(s, _)| !s.starts_with("ov9_"))).map(|r| r.1.clone())
     })
+}
+
+fn convention_for(target: u32) -> Option<BoundarySig> {
+    if !boundary_enabled() { return None; }
+    let seg = CURRENT.with(|c| c.borrow().0.clone());
+    BOUNDARY.with(|d| {
+        let d = d.borrow();
+        let rows = d.get(&target)?;
+        rows.iter().find(|(s, _)| *s == seg)
+            .or_else(|| rows.iter().find(|(s, _)| !s.starts_with("ov9_")))
+            .map(|r| r.1.clone())
+    })
+}
+
+fn boundary_for(target: u32) -> Option<BoundarySig> {
+    convention_for(target).filter(|d| d.preserved & CALLEE_SAVED == CALLEE_SAVED)
 }
 
 fn mask_regs(m: u16) -> impl Iterator<Item = u8> {
@@ -195,6 +237,11 @@ fn regs_ext(s: &S, all: u16, used: &mut BTreeSet<u8>, written: &mut BTreeSet<u8>
         if let Some(d) = direct_for(*t) {
             used.extend(mask_regs(d.params));
             written.extend(mask_regs(d.rets));
+            return;
+        }
+        if let Some(d) = boundary_for(*t) {
+            used.extend(mask_regs(d.params | 1 << 13 | 1 << 14));
+            written.extend(mask_regs(VOLATILE));
             return;
         }
     }
@@ -300,7 +347,7 @@ impl SymState {
 /// (offsets from the entry sp); stores through other pointers are assumed not to hit those slots (the
 /// calling convention: nothing else writes a frame's saved registers). `kept(target)`: the registers a
 /// direct callee keeps. Closed functions have no loops, so one pass in reverse postorder suffices.
-fn preserved_regs(blocks: &BTreeMap<u32, Block>, order: &[u32], entry: u32, all: u16, switches: &BTreeMap<u32, Vec<u32>>, kept: &dyn Fn(u32) -> Option<u16>) -> (u16, bool) {
+fn preserved_regs(blocks: &BTreeMap<u32, Block>, order: &[u32], entry: u32, all: u16, switches: &BTreeMap<u32, Vec<u32>>, kept: &dyn Fn(u32) -> Option<u16>, boundary: bool) -> (u16, bool) {
     let thumb = entry & 1;
     let internal = |t: u32| blocks.contains_key(&((t & !1) | thumb));
     let mut start = SymState { regs: std::array::from_fn(|i| Sym::Entry(i as u8)), slots: BTreeMap::new() };
@@ -311,6 +358,9 @@ fn preserved_regs(blocks: &BTreeMap<u32, Block>, order: &[u32], entry: u32, all:
     // every return goes to the link register's entry value
     let mut ret_ok = true;
     let check = |st: &SymState, keep: &mut u16| {
+        if boundary && mask_regs(VOLATILE).any(|r| matches!(st.regs[r as usize], Sym::Entry(4..=11))) {
+            *keep = 0;
+        }
         for r in 4..12u8 {
             if st.regs[r as usize] != Sym::Entry(r) {
                 *keep &= !(1 << r);
@@ -325,6 +375,22 @@ fn preserved_regs(blocks: &BTreeMap<u32, Block>, order: &[u32], entry: u32, all:
     let dbg = std::env::var("MKDS_NOSPILL_DEBUG").ok().and_then(|v| u32::from_str_radix(v.trim_start_matches("0x"), 16).ok()) == Some(entry & !1);
     let step = |st: &mut Option<SymState>, s: &S, b: u32, ins_state: &mut BTreeMap<u32, SymState>, keep: &mut u16, ret_ok: &mut bool| {
         let Some(x) = st.as_mut() else { return };
+        if boundary {
+            // Saving an incoming saved register in our frame is allowed. Using it as an
+            // implicit argument is not: a narrow caller keeps that value only in its locals.
+            let saves = matches!(s, S::Store { addr, val, .. }
+                if matches!(x.eval(addr), Sym::Sp(_)) && matches!(x.eval(val), Sym::Entry(4..=11)));
+            if !saves {
+                let (mut used, mut written) = (BTreeSet::new(), BTreeSet::new());
+                regs_s(s, &mut used, &mut written);
+                if let S::Call { target: E::Const(t), .. } = s {
+                    used.extend(mask_regs(convention_for(*t).map_or(VOLATILE, |d| d.params)));
+                }
+                if used.iter().any(|&r| r < 15 && matches!(x.regs[r as usize], Sym::Entry(4..=11))) {
+                    *keep = 0;
+                }
+            }
+        }
         // the pc a block load returns to, read before the load changes the state
         if let Some(e) = block_return(s) {
             let (_, pre, up, _, rn, list) = plain_block(e).unwrap();
@@ -403,6 +469,10 @@ fn preserved_regs(blocks: &BTreeMap<u32, Block>, order: &[u32], entry: u32, all:
             || matches!(s, S::Do(e) | S::SetReg(_, e) if syncs(e))
             || matches!(s, S::Let(ir::Tmp::Fa | ir::Tmp::Fb | ir::Tmp::Fz, _))
     };
+    // Boundary callees may contain loops. Join back edges until the symbolic inputs settle;
+    // a one-pass proof could miss a register changed on a later iteration.
+    for _round in 0..64 {
+    let before = ins_state.clone();
     for &b in order {
         let Some(st0) = ins_state.get(&b).cloned() else { continue };
         let blk = &blocks[&b];
@@ -411,6 +481,16 @@ fn preserved_regs(blocks: &BTreeMap<u32, Block>, order: &[u32], entry: u32, all:
         let mut st = Some(st0);
         let mut alt: Option<(String, Option<SymState>, Option<E>)> = None;
         for ins in &blk.insts {
+            if boundary {
+                if let Some(g) = &ins.guard {
+                    let mut used = BTreeSet::new();
+                    regs_e(g, &mut used);
+                    if st.as_ref().is_some_and(|s| used.iter().any(|&r|
+                        r < 15 && matches!(s.regs[r as usize], Sym::Entry(4..=11)))) {
+                        keep = 0;
+                    }
+                }
+            }
             let cond = ins.cond != 14 || ins.guard.is_some();
             if cond {
                 let key = if ins.cond != 14 { ins.cond.to_string() } else { format!("{:?}", ins.guard) };
@@ -463,7 +543,9 @@ fn preserved_regs(blocks: &BTreeMap<u32, Block>, order: &[u32], entry: u32, all:
             }
         }
     }
-    (keep, ret_ok)
+    if !boundary || ins_state == before { return (keep, ret_ok); }
+    }
+    (0, false)
 }
 
 fn step_sym(st: &mut SymState, s: &S, all: u16, kept: &dyn Fn(u32) -> Option<u16>) {
@@ -536,9 +618,12 @@ fn step_sym(st: &mut SymState, s: &S, all: u16, kept: &dyn Fn(u32) -> Option<u16
         }
         S::Call { target: E::Const(t), .. } => {
             let d = direct_for(*t);
-            let keeps = kept(*t).unwrap_or(0);
+            let proof = kept(*t);
+            let keeps = proof.unwrap_or(0);
             // not (yet) in the direct table: the calling convention's clobbers (checked once it is)
-            let rets = d.map_or(0x500F, |d| d.rets);
+            let rets = d.map_or_else(|| {
+                if proof.is_some() { 0x500F | (CALLEE_SAVED & !keeps) } else { 0x500F }
+            }, |d| d.rets);
             for r in mask_regs(rets & !keeps) {
                 st.regs[r as usize] = Sym::Unk;
             }
@@ -2243,6 +2328,7 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
         let all0 = to_mask(&all);
         let (mut u2, mut w2) = (BTreeSet::new(), BTreeSet::new());
         let mut escape: Option<&'static str> = None;
+        let mut boundary_bad = false;
         let mut calls = Vec::new();
         for b in blocks.values() {
             if header.contains(&b.start) || crate::lift::polls(b.start) {
@@ -2250,12 +2336,14 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
             }
             if b.falls_to.is_some_and(|t| !internal(t)) {
                 escape.get_or_insert("falls through");
+                boundary_bad = true;
             }
             for ins in &b.insts {
                 for s in &ins.stmts {
                     regs_ext(s, all0, &mut u2, &mut w2);
                     if let Some(e) = stmt_escape(s) {
                         escape.get_or_insert(e);
+                        boundary_bad = true;
                     }
                     if let S::Call { target: E::Const(t), .. } = s {
                         calls.push(*t);
@@ -2272,8 +2360,18 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
         written = w2.into_iter().filter(|&i| i < 15).collect();
         all = u2.union(&written).copied().filter(|&i| i < 15).collect();
         let mut rets = to_mask(&written);
+        let mut preserved = 0;
+        if boundary_enabled() {
+            // Helpers, computed calls and abnormal returns require the full register file.
+            if !boundary_bad {
+                let (keep, ok) = preserved_regs(&blocks, &order, f.entry, to_mask(&all), &switches,
+                    &|t| Some(convention_for(t).map_or(0, |d| d.preserved)), true);
+                if ok { preserved = keep; }
+            }
+        }
         if escape.is_none() {
-            let (keep, ret_ok) = preserved_regs(&blocks, &order, f.entry, to_mask(&all), &switches, &|_| None);
+            let (keep, ret_ok) = preserved_regs(&blocks, &order, f.entry, to_mask(&all), &switches,
+                &|_| None, false);
             if !ret_ok {
                 // a jump through a register or a popped value that is not the return address (a tail call)
                 escape = Some("returns elsewhere");
@@ -2284,6 +2382,7 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
         }
         let allm = to_mask(&all);
         // register liveness (backward, to a fixed point); every exit reads the results
+        let entry_live = |results: u16| {
         let mut lin: BTreeMap<u32, u16> = blocks.keys().map(|&b| (b, 0)).collect();
         loop {
             let mut changed = false;
@@ -2291,7 +2390,7 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
                 let blk = &blocks[&b];
                 let mut live = blk.succ.iter().fold(0u16, |a, s| a | lin.get(s).copied().unwrap_or(0));
                 if blk.falls_to.is_some_and(|t| !internal(t)) {
-                    live |= rets;
+                    live |= results;
                 }
                 for ins in blk.insts.iter().rev() {
                     let cond = ins.cond != 14 || ins.guard.is_some();
@@ -2300,7 +2399,7 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
                         regs_ext(s, allm, &mut u, &mut w);
                         match s {
                             S::Goto(E::Const(t)) if internal(*t) => live |= lin.get(&((t & !1) | thumb)).copied().unwrap_or(0),
-                            S::Goto(_) | S::IfSome(..) | S::ExcReturn(_) => live |= rets,
+                            S::Goto(_) | S::IfSome(..) | S::ExcReturn(_) => live |= results,
                             _ => {}
                         }
                         if !cond {
@@ -2323,8 +2422,11 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
                 break;
             }
         }
-        let live_in = lin[&f.entry];
-        LAST_FACTS.with(|x| *x.borrow_mut() = Some(Facts { escape, calls, live_in, written: rets }));
+        lin[&f.entry]
+        };
+        let live_in = entry_live(rets);
+        let boundary_params = if boundary_enabled() { entry_live(VOLATILE) & VOLATILE } else { 0 };
+        LAST_FACTS.with(|x| *x.borrow_mut() = Some(Facts { escape, calls, live_in, written: rets, preserved, boundary_params }));
         if let Some(o) = &own {
             // the signature handed in must cover what this emission found (mkds_gen iterates to a fixed point)
             if o.params & live_in != live_in || o.rets & rets != rets {
@@ -2620,6 +2722,11 @@ fn stmt_code(c: &Ctx, x: u32, s: &S, depth: usize, out: &mut String) {
                 else { format!("let x: u32; (x, {}) = {call};", rets.join(", ")) };
             line(out, &format!("{stmt} exit!(x);"));
         }
+        S::Goto(E::Const(t)) if c.selfn && boundary_for(*t).is_some() => {
+            let d = boundary_for(*t).unwrap();
+            line(out, &boundary_call(*t, &ir::reg_name(14), &d));
+            line(out, "exit!(x);");
+        }
         S::Goto(e) => {
             let original = match e { E::Const(t) => c.tail_fallback.get(&(x, *t)).unwrap_or(e), _ => e };
             line(out, &format!("exit!({});", ir::expr_locals(original)));
@@ -2639,6 +2746,12 @@ fn stmt_code(c: &Ctx, x: u32, s: &S, depth: usize, out: &mut String) {
             let stmt = if rets.is_empty() { format!("let x = {call};") } else { format!("let x: u32; (x, {}) = {call};", rets.join(", ")) };
             let bad = if c.selfn { format!("R::bad_return(x, {ret:#X})") } else { "exit!(x)".into() };
             line(out, &format!("{stmt} if x != {ret:#X} {{ {bad}; }}{name}"))
+        }
+        S::Call { target: E::Const(t), ret } if c.selfn && boundary_for(*t).is_some() => {
+            let d = boundary_for(*t).unwrap();
+            line(out, &boundary_call(*t, &format!("{ret:#X}"), &d));
+            let bad = if c.selfn { format!("R::bad_return(x, {ret:#X})") } else { "exit!(x)".into() };
+            line(out, &format!("if x != {ret:#X} {{ {bad}; }}"));
         }
         S::IfSome(e, _) if c.nospill && block_return(s).is_some() => {
             line(out, &format!("{} exit!(iw(v));{}", inline_block(e), block_note(e)))
@@ -2681,4 +2794,12 @@ fn stmt_code(c: &Ctx, x: u32, s: &S, depth: usize, out: &mut String) {
             line(out, &format!("{text}{note}"))
         }
     }
+}
+
+fn boundary_call(target: u32, ret: &str, d: &BoundarySig) -> String {
+    let spill: String = mask_regs(d.params | 1 << 13 | 1 << 14)
+        .map(|r| format!("c.r[{r}] = {}; ", ir::reg_name(r))).collect();
+    let reload: String = mask_regs(VOLATILE)
+        .map(|r| format!("{} = c.r[{r}]; ", ir::reg_name(r))).collect();
+    format!("{spill}let x = m.call(c, {target:#X}, {ret}); {reload}// checked dispatcher boundary")
 }

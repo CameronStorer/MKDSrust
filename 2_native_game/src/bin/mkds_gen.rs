@@ -1398,8 +1398,42 @@ fn run() -> Result<ExitCode, String> {
             r.ok().and(facts)
         };
         raise_emit::set_direct(HashMap::new());
-        let facts: Vec<Option<raise_emit::Facts>> = jobs.iter().map(|(seg, f, id, src)| emit_facts(seg, f, id, src)).collect();
+        raise_emit::set_boundary(HashMap::new());
+        let boundary_requested = raise_emit::boundary_enabled();
+        let mut direct_before = 0;
+        let mut before_entries = HashSet::new();
+        for boundary_pass in 0..if boundary_requested { 2 } else { 1 } {
+        // Run the unchanged selection first so the before/after counts use the same ROM and facts.
+        unsafe { std::env::set_var("MKDS_BOUNDARY", if boundary_pass == 1 { "1" } else { "0" }); }
+        raise_emit::set_direct(HashMap::new());
+        raise_emit::set_boundary(HashMap::new());
         let excluded = direct_excluded();
+        if boundary_pass == 1 {
+            let mut conventions: HashMap<u32, Vec<(String, raise_emit::BoundarySig)>> = HashMap::new();
+            for (seg, f, _, _) in &jobs {
+                conventions.entry(f.entry).or_default().push((seg.clone(), raise_emit::BoundarySig {
+                    params: 0, preserved: if excluded.contains(&(f.entry & !1)) { 0 } else { 0x2FF0 },
+                }));
+            }
+            // Greatest fixed point for preservation, least fixed point for arguments. Unknown
+            // callees clobber saved registers; context/native/hook entries never certify a boundary.
+            let mut converged = false;
+            for _ in 0..64 {
+                raise_emit::set_boundary(conventions.clone());
+                let mut next = conventions.clone();
+                for (seg, f, id, src) in &jobs {
+                    let x = emit_facts(seg, f, id, src);
+                    let d = &mut next.get_mut(&f.entry).unwrap().iter_mut().find(|r| r.0 == *seg).unwrap().1;
+                    d.preserved &= x.as_ref().map_or(0, |x| x.preserved);
+                    d.params |= x.as_ref().map_or(0x100F, |x| x.boundary_params);
+                }
+                if next == conventions { converged = true; break; }
+                conventions = next;
+            }
+            if !converged { return Err("boundary calling conventions did not converge".into()); }
+            raise_emit::set_boundary(conventions);
+        }
+        let facts: Vec<Option<raise_emit::Facts>> = jobs.iter().map(|(seg, f, id, src)| emit_facts(seg, f, id, src)).collect();
         let mut closed: Vec<bool> = jobs.iter().zip(&facts).map(|((_, f, _, _), x)| x.as_ref().is_some_and(|x| x.escape.is_none()) && !excluded.contains(&(f.entry & !1))).collect();
         let mut rows: HashMap<u32, Vec<usize>> = HashMap::new();
         for (i, (_, f, _, _)) in jobs.iter().enumerate() {
@@ -1410,13 +1444,16 @@ fn run() -> Result<ExitCode, String> {
             let r = rows.get(&t)?;
             r.iter().copied().find(|&j| closed[j] && jobs[j].0 == seg).or_else(|| r.iter().copied().find(|&j| closed[j] && !jobs[j].0.starts_with("ov9_")))
         };
+        let boundary_rows: Vec<bool> = jobs.iter().zip(&facts).map(|((_, f, _, _), x)|
+            !excluded.contains(&(f.entry & !1)) && x.as_ref().is_some_and(|x| x.preserved & 0x2FF0 == 0x2FF0)).collect();
         // closed functions that fail the return check once the callee signatures are known
         let mut dropped: HashSet<usize> = HashSet::new();
         let (sigs, rounds) = 'outer: loop {
         loop {
             let mut changed = false;
             for i in 0..jobs.len() {
-                if closed[i] && facts[i].as_ref().unwrap().calls.iter().any(|&t| reaches(&closed, &jobs[i].0, t).is_none()) {
+                if closed[i] && facts[i].as_ref().unwrap().calls.iter().any(|&t| reaches(&closed, &jobs[i].0, t).is_none()
+                    && (boundary_pass == 0 || reaches(&boundary_rows, &jobs[i].0, t).is_none())) {
                     closed[i] = false;
                     changed = true;
                 }
@@ -1512,9 +1549,22 @@ fn run() -> Result<ExitCode, String> {
             .map(|(i, x)| x.calls.iter().filter(|&&t| reaches(&closed, &jobs[i].0, t).is_some()).count())
             .sum();
         eprintln!("mkds_gen: no-spill: {} closed functions, signatures in {rounds} rounds, {sites} call sites call them directly ({:.1}s)", sigs.len(), t.elapsed().as_secs_f64());
+        if boundary_pass == 0 {
+            direct_before = sigs.len();
+            before_entries.extend(sigs.keys().copied());
+        }
+        if boundary_pass == 1 {
+            if before_entries.iter().any(|i| !sigs.contains_key(i)) {
+                return Err("boundary selection lost an existing direct function".into());
+            }
+            eprintln!("mkds_gen: boundary: direct functions {direct_before} -> {} (MKDS_BOUNDARY=1)", sigs.len());
+        }
+        own_sig.clear();
         for (i, d) in sigs {
             own_sig.insert((jobs[i].0.clone(), jobs[i].1.entry), d);
         }
+    }
+        if boundary_requested { unsafe { std::env::set_var("MKDS_BOUNDARY", "1"); } }
     }
     for (seg, f, id, src) in &jobs {
         let img = image(src);
