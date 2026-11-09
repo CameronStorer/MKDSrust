@@ -338,6 +338,10 @@ impl Launcher {
                             self.info = Some(info);
                             self.save();
                         }
+                        // A remembered ROM that was moved or deleted: say so in words (Home shows it too).
+                        Err(_) if !self.prefs.rom.is_file() => {
+                            self.message = "Your ROM was moved or deleted: choose it again on Home.".into()
+                        }
                         Err(e) => self.message = e,
                     }
                 }
