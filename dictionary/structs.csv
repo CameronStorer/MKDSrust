@@ -477,3 +477,72 @@ WifiUserId,,,,,,from the struct review of untyped arguments (2026-11-03): Output
 WmCallbackArg,,,,,,from the struct review of untyped arguments (2026-11-03): WM completion callback: tests the error code halfword at +2 to choose between event 0xB and connect handling
 WmConnectCallbackArg,,,,,,from the struct review of untyped arguments (2026-11-03): Connect callback: error code at +2 and state at +8 select which user callback to call
 WmScanCallbackArg,,,,,,from the struct review of untyped arguments (2026-11-03): Scan result callback: checks error code and state then validates the buffer pointer at +0x3C before processing the beacon
+AnimationClock,,,,,,from the struct review of untyped arguments (2026-11-03): Initializes looping mode and duration with unit playback rate and zero frame state.
+AnimationPlayer,,,,,,from the struct review of untyped arguments (2026-11-03): Allocates parallel clip arrays and initializes animation selection and crossfade state.
+BillboardQuadParams,,,,,,from the struct review of untyped arguments (2026-11-03): Words and enable halfword written to geometry command ports for a billboard quad.
+BitReader,,,,,,from the struct review of untyped arguments (2026-11-03): Reads n bits from a byte at +5 refilling from the pointer at +0.
+BooStateContext,,,,,,from the struct review of untyped arguments (2026-11-03): The kart at +0x10 is passed to item_boo_activate and the object at +0xc receives a state change.
+CallbackRecord,,,,,,from the struct review of untyped arguments (2026-11-03): Initializer zeroes four words and stores one parameter at +4.
+CompactRecordBlock,,,,,,from the struct review of untyped arguments (2026-11-03): Returns base plus two header bytes plus count times record size.
+CpuHeldItemTimer,,,,,,from the struct review of untyped arguments (2026-11-03): Looks up a racer and counts qualifying held ticks to 120 with a five tick grace period.
+EffectParticleListOwner,,,,,,from the struct review of untyped arguments (2026-11-03): Owns the list at 0x8 whose particles age and return to a pool on expiry.
+EffectPoseController,,,,,,from the struct review of untyped arguments (2026-11-03): Initializes pose vectors and resets the referenced sprite object before installing its callback.
+EffectQuadDrawParams,,,,,,from the struct review of untyped arguments (2026-11-03): Converts the word at 0x1c into a geometry texture-coordinate register value.
+EffectQuadPose,,,,,,from the struct review of untyped arguments (2026-11-03): Builds a local matrix from the rotation parameter and translation triple before concatenating it.
+EffectSoundTimer,,,,,,from the struct review of untyped arguments (2026-11-03): Decrements a countdown and replaces the callback when it reaches zero.
+EffectStartPosition,,,,,,from the struct review of untyped arguments (2026-11-03): Initializes a parameter and counter then copies a source position after shifting each component right by four.
+FriendDate,,,,,,from the struct review of untyped arguments (2026-11-03): The output receives the seven-bit year four-bit month and five-bit day from a packed date.
+G2dCellRecordSet,,,,,,from the struct review of untyped arguments (2026-11-03): Cell record set with a count halfword at +6 that sizes an allocation.
+G2dCellRect,,,,,,from the struct review of untyped arguments (2026-11-03): Four halfwords read as the position and size of a sprite cell.
+G3dResIndexedList,,,,,,"from the struct review of untyped arguments (2026-11-03): Index list with offset, count and flags bytes used to reset indexed sub-objects."
+GhostRecordCardRenderer,,,,,,from the struct review of untyped arguments (2026-11-03): Uses message and cell resources to draw a ghost record card.
+GlyphLookupResult,,,,,,from the struct review of untyped arguments (2026-11-03): Stores a font query result followed by the glyph data pointer.
+GridCellCoord,,,,,,from the struct review of untyped arguments (2026-11-03): Two halfwords index a per-kind lookup table of bytes.
+HudSpriteResourceSet,,,,,,from the struct review of untyped arguments (2026-11-03): The object supplies cell allocation arguments and character and palette transfer sources.
+InputStatusRecord,,,,,,from the struct review of untyped arguments (2026-11-03): Copies status 7 to the result member and otherwise clears that member.
+ItemMemberEvent,,,,,,from the struct review of untyped arguments (2026-11-03): Matches item network IDs and dispatches racer parameters to matching members.
+KartEffectDrawContext,,,,,,from the struct review of untyped arguments (2026-11-03): Reads a draw-record byte and an owner-linked object before updating its camera-relative effect vectors.
+KartEffectResourceSet,,,,,,from the struct review of untyped arguments (2026-11-03): Uses the resource id at 0x4 to replace the kart slot emitter.
+KartFaceTextureState,,,,,,from the struct review of untyped arguments (2026-11-03): The object gates face texture uploads and selects a model resource using kind values 0x22 and 0x23.
+KartLinkedEffectObject,,,,,,from the struct review of untyped arguments (2026-11-03): Draws a billboard only when its gate and scale are positive and sends the scale to geometry commands.
+KartPreviewTransform,,,,,,from the struct review of untyped arguments (2026-11-03): The scale feeds FX_Mul and the two angles build Y and X rotation matrices.
+KeyInputState,,,,,,from the struct review of untyped arguments (2026-11-03): Initializes the key edge and repeat record with delay 20 and interval 8.
+MainDisplayParams,,,,,,from the struct review of untyped arguments (2026-11-03): Seven halfwords stored from arguments as display parameters.
+MbBlockTransfer,,,,,,from the struct review of untyped arguments (2026-11-03): Maps a block index into source and destination addresses with length capped to the block size.
+MbReadTask,,,,,,from the struct review of untyped arguments (2026-11-03): Uses the cache entry and file context to seek and read a cached file range.
+MenuPositionState,,,,,,from the struct review of untyped arguments (2026-11-03): Combines base coordinates with scaled offsets to produce a screen position.
+ModelVectorSubmission,,,,,,from the struct review of untyped arguments (2026-11-03): Replaces polygon alpha bits 16 through 20 before gx_submit_model_vectors.
+MtxFx44,,,,,,from the struct review of untyped arguments (2026-11-03): 16-word fixed-point matrix multiply with two inputs and an output.
+NetChannelTransferContext,,,,,,from the struct review of untyped arguments (2026-11-03): Clears eight channel words and adjacent counters and flags while resetting transfer buffers.
+NetReliableEndpoint,,,,,,from the struct review of untyped arguments (2026-11-03): Owner of connection records: copies a handshake message to +0x38/+0x3c and passes +0xC table to the hash-table helper.
+NetScanKey,,,,,,from the struct review of untyped arguments (2026-11-03): The scan key builder writes a type byte and copies selected key material into the output at +2.
+NetScanStatus,,,,,,from the struct review of untyped arguments (2026-11-03): The function walks four-byte scan status records and compares their channel bytes to BSS descriptor channels.
+NetSlotNotification,,,,,,from the struct review of untyped arguments (2026-11-03): Uses notification event codes to advance the network slot initialization sequence.
+NetSlotRequest,,,,,,from the struct review of untyped arguments (2026-11-03): Completes the request by copying its requested value to the result and setting state 4.
+NetSocketConfig,,,,,,from the struct review of untyped arguments (2026-11-03): Halfword sizes at +2/+6/+8/+0xa/+0xc are aligned and summed to the socket memory size.
+NetSocketHolder,,,,,,from the struct review of untyped arguments (2026-11-03): Socket handle at +0 is closed and reset to -1 then state 4 stored at +0x10.
+PaletteFadeBlock,,,,,,from the struct review of untyped arguments (2026-11-03): Palette fade state stored from a channel mask with halfword fields.
+PlaneEquation,,,,,,"from the struct review of untyped arguments (2026-11-03): Output of dot products against basis vectors, seven words written."
+QuatFx32,,,,,,"from the struct review of untyped arguments (2026-11-03): Writes zero then sine, zero, cosine of half a yaw as a four-word rotation."
+RaceCellSpriteGroup,,,,,,from the struct review of untyped arguments (2026-11-03): Seven words read to draw a group of cell sprites with a first-word gate.
+RaceLightComponents,,,,,,from the struct review of untyped arguments (2026-11-03): Three words stored as halfword light components into the render state.
+RaceResultsListRef,,,,,,from the struct review of untyped arguments (2026-11-03): Holder whose first word points to the allocated list object.
+RaceSettingsBlock,,,,,,from the struct review of untyped arguments (2026-11-03): Packed settings copied into the race config including u16 pairs and byte options.
+RecordChangeSnapshot,,,,,,from the struct review of untyped arguments (2026-11-03): Compares eleven halfwords and additional record members against another snapshot.
+RemoteKartSnapshot,,,,,,from the struct review of untyped arguments (2026-11-03): Expands packed position and speed into the kart and copies yaw and remote state words.
+RequestTimer,,,,,,from the struct review of untyped arguments (2026-11-03): Halfword at +0x10 holds the start value and +0x12 the countdown derived from it.
+SoundHandleOwner,,,,,,from the struct review of untyped arguments (2026-11-03): Stores a freshly created sound object at +0x94 and a table pointer at +0x70.
+SoundSharedWork,,,,,,from the struct review of untyped arguments (2026-11-03): Init clears head words and fills 16 rows of 16 halfwords with -1.
+TileIndexPair,,,,,,from the struct review of untyped arguments (2026-11-03): Two bytes index a 2D table of tile values.
+TouchInputHistory,,,,,,from the struct review of untyped arguments (2026-11-03): Initializes current and previous touch samples and a hold counter.
+TrafficObjectList,,,,,,from the struct review of untyped arguments (2026-11-03): Reads an object pointer array and count before preprocessing the referenced traffic routes.
+Vec2Fx32,,,,,,from the struct review of untyped arguments (2026-11-03): Two fx32 components dotted with rounding.
+VecFx16,,,,,,from the struct review of untyped arguments (2026-11-03): Three s16 components read or written as a 16-bit fixed-point vector.
+VecS16,,,,,,from the struct review of untyped arguments (2026-11-03): Three halfwords copied to the object position halfwords.
+WanderCurveSpec,,,,,,from the struct review of untyped arguments (2026-11-03): Record whose first word and a vector at +0x4 are fed to the path segment builder.
+WmCallbackMessage,,,,,,from the struct review of untyped arguments (2026-11-03): The FIFO callback invalidates a 0x100-byte message and dispatches using its leading API identifier.
+WmCallbackResult,,,,,,from the struct review of untyped arguments (2026-11-03): Dispatches wireless manager results by API id and callback state with variant-dependent payloads.
+WmChannelMeasurementResult,,,,,,from the struct review of untyped arguments (2026-11-03): Tracks the minimum measured busy ratio and accumulates a mask of equally good channels.
+WmChannelTransferResult,,,,,,from the struct review of untyped arguments (2026-11-03): Adds the reported count to the indexed channel counter on success and recovers the session on error.
+WmDataSet,,,,,,from the struct review of untyped arguments (2026-11-03): Both halfwords are tested against the requested station bit before locating shared data at +4.
+WmScanParamsEx,,,,,,from the struct review of untyped arguments (2026-11-03): WM_StartScanEx validates a nonnull scan buffer and a buffer size no larger than 0x400.
