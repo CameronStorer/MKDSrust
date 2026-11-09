@@ -59,6 +59,8 @@ struct Launcher {
     page: usize,
     /// A game started from Play is running (the launcher may close meanwhile).
     playing: bool,
+    /// Asking whether to quit while a build or install runs.
+    confirm_quit: bool,
     catalog: catalog_ui::Catalog,
     info: Option<RomInfo>,
     title: String,
@@ -220,6 +222,7 @@ impl Launcher {
             page: 0,
             catalog: Default::default(),
             playing: false,
+            confirm_quit: false,
             info: None,
             title: String::new(),
             message: errors.join("\n"),
@@ -468,12 +471,7 @@ impl Launcher {
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         std::thread::spawn(move || {
-            let mut env: Vec<_> = ["MKDS_HW_FS", "MKDS_HW_ARM7", "MKDS_HW_TIME", "MKDS_HW_SND"]
-                .into_iter()
-                .filter_map(|k| accuracy.then_some((k, Some("exact"))))
-                .collect();
-            env.push(("MKDS_VERBOSE", Some(if verbose { "1" } else { "0" })));
-            if accuracy { env.push(("MKDS_NO_MODS", Some("1"))); }
+            let env = play_env(accuracy, verbose);
             let _ = tx.send(Event::Played(
                 build::launch_with_env(&output, &[], &env).map_err(|e| e.to_string()),
             ));
@@ -726,6 +724,16 @@ impl Launcher {
             });
     }
     fn settings_page(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if ui.button("Create desktop shortcut").clicked() {
+                self.message = match create_shortcut() {
+                    Ok(p) => format!("Shortcut created: {}. It starts your game directly.", p.display()),
+                    Err(e) => format!("Could not create the shortcut: {e}"),
+                };
+            }
+            ui.small("A desktop icon that starts your built game without opening the launcher.");
+        });
+        ui.add_space(8.);
         egui::CollapsingHeader::new("Advanced").show(ui, |ui| {
             if ui.checkbox(&mut self.prefs.verbose, "Verbose game logging (show console)").changed() { self.save(); }
             if ui.button("Open logs").clicked() {
@@ -1216,7 +1224,34 @@ impl Launcher {
         let blocking = self.busy && !(self.playing && !self.prefs.verbose && self.mods.dev.is_none());
         if blocking && ctx.input(|i| i.viewport().close_requested()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.message = if self.playing { "Close the game first (verbose logging or a mod test is running).".into() } else { "Wait for the build to finish before closing.".into() };
+            self.confirm_quit = true;
+        }
+        if self.confirm_quit && !self.busy {
+            self.confirm_quit = false; // the work finished while asking: nothing to confirm any more
+        }
+        if self.confirm_quit {
+            let text = if self.playing {
+                "The game is still running from the launcher (verbose logging or a mod test). Quitting also closes the game."
+            } else {
+                "MKDSrust is still working (building your game or installing tools). If you quit now, it stops; your progress is kept and the next build continues from it."
+            };
+            egui::Window::new("Quit while working?")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0., 0.))
+                .show(ctx, |ui| {
+                    ui.label(text);
+                    ui.add_space(8.);
+                    ui.horizontal(|ui| {
+                        if ui.button("Keep working").clicked() {
+                            self.confirm_quit = false;
+                        }
+                        if ui.button(RichText::new("Quit anyway").color(Color32::from_rgb(242, 120, 83))).clicked() {
+                            self.save();
+                            quit_with_children();
+                        }
+                    });
+                });
         }
     }
 }
@@ -1300,8 +1335,72 @@ fn data_dir() -> PathBuf {
 fn link_arg() -> Option<String> {
     std::env::args().find(|a| a.to_ascii_lowercase().starts_with("mkdsrust:"))
 }
+/// Ends the launcher and everything it started (Cargo and the compiler during a build, a game started in
+/// verbose or test mode), so no build keeps running in the background and holding the build cache.
+fn quit_with_children() -> ! {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = std::process::Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &std::process::id().to_string()])
+            .creation_flags(0x08000000)
+            .status();
+    }
+    std::process::exit(0);
+}
+
+/// The game's environment for the launcher's settings (accuracy mode, verbose logging).
+fn play_env(accuracy: bool, verbose: bool) -> Vec<(&'static str, Option<&'static str>)> {
+    let mut env: Vec<_> = ["MKDS_HW_FS", "MKDS_HW_ARM7", "MKDS_HW_TIME", "MKDS_HW_SND"]
+        .into_iter()
+        .filter_map(|k| accuracy.then_some((k, Some("exact"))))
+        .collect();
+    env.push(("MKDS_VERBOSE", Some(if verbose { "1" } else { "0" })));
+    if accuracy {
+        env.push(("MKDS_NO_MODS", Some("1")));
+    }
+    env
+}
+
+/// `MKDSrust.exe --play` (the desktop shortcut): start the built game with the launcher's settings and exit, with no
+/// launcher window. A problem opens the launcher instead, so it can be explained.
+fn play_from_shortcut() -> bool {
+    let dir = data_dir();
+    let Ok(bytes) = std::fs::read(dir.join("launcher.json")) else { return false };
+    let Ok(prefs) = serde_json::from_slice::<Preferences>(&bytes) else { return false };
+    if prefs.output.as_os_str().is_empty() {
+        return false;
+    }
+    build::launch_detached(&prefs.output, &[], &play_env(prefs.accuracy, false)).is_ok()
+}
+
+/// Creates `MKDSrust.lnk` on the desktop: this launcher with `--play`, its icon, starting in its folder.
+fn create_shortcut() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let quote = |p: &Path| p.display().to_string().replace('\'', "''");
+    let script = format!(
+        "$d = [Environment]::GetFolderPath('Desktop'); $p = Join-Path $d 'MKDSrust.lnk'; \
+         $s = (New-Object -ComObject WScript.Shell).CreateShortcut($p); \
+         $s.TargetPath = '{exe}'; $s.Arguments = '--play'; $s.WorkingDirectory = '{dir}'; \
+         $s.IconLocation = '{exe},0'; $s.Description = 'Play MKDSrust'; $s.Save(); Write-Output $p",
+        exe = quote(&exe),
+        dir = quote(exe.parent().unwrap_or(Path::new("."))),
+    );
+    let out = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .map_err(|e| format!("Could not start PowerShell: {e}"))?;
+    if !out.status.success() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
+}
+
 fn main() -> eframe::Result<()> {
     portable::initialize();
+    if std::env::args().any(|a| a == "--play") && play_from_shortcut() {
+        return Ok(());
+    }
     // one launcher per data folder: a second one (e.g. Windows opening a mkdsrust:// link) hands over and exits
     let mut primary = None;
     if !std::env::args().any(|a| a == "--smoke-test") {
@@ -1378,6 +1477,7 @@ mod tests {
             page: 0,
             catalog: Default::default(),
             playing: false,
+            confirm_quit: false,
             info: None,
             title: String::new(),
             message: String::new(),

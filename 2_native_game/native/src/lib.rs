@@ -894,16 +894,13 @@ struct Bindings {
 
 impl From<&Controls> for Bindings {
     fn from(c: &Controls) -> Self {
-        let hint = |a: usize| c.describe(a);
         Self {
             buttons: std::array::from_fn(|a| c.keys[a].clone()),
             quit_keys: c.keys[controls::QUIT].clone(),
             pad: std::array::from_fn(|a| c.pad[a].clone()),
             quit_pad: c.pad[controls::QUIT].clone(),
-            title: format!(
-                "MKDSrust | A={} B={} L={} R={} Start={} | mouse = touch | F10 = menu | F11 = fullscreen | {} = quit",
-                hint(0), hint(1), hint(9), hint(8), hint(3), hint(controls::QUIT)
-            ),
+            // Controls are listed in the F10 menu; the title stays short.
+            title: "MKDSrust".into(),
         }
     }
 }

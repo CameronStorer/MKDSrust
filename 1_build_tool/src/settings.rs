@@ -43,6 +43,12 @@ pub struct Settings {
     pub layout: Layout,
     /// Screen shape with the Widescreen mod (GPU renderer); ignored without it.
     pub widescreen: Widescreen,
+    /// Widescreen mod: show the other screen (race map) small in a corner of the 3D screen. F9 toggles it.
+    pub map_overlay: bool,
+    /// Its height as a percentage of the screen (25-75).
+    pub map_overlay_size: u32,
+    /// Its opacity in percent (30-100).
+    pub map_overlay_opacity: u32,
     pub fullscreen: bool,
     /// Folder of replacement textures (`<id>.png`).
     pub texture_pack: Option<PathBuf>,
@@ -61,6 +67,9 @@ impl Default for Settings {
             smooth: false,
             layout: Layout::Stacked,
             widescreen: Widescreen::Off,
+            map_overlay: false,
+            map_overlay_size: 45,
+            map_overlay_opacity: 85,
             fullscreen: false,
             texture_pack: None,
             dump_textures: None,
@@ -169,6 +178,12 @@ impl Settings {
                 "widescreen" => {
                     s.widescreen = Widescreen::parse(value).ok_or_else(|| bad("Widescreen must be Off, 16:10, 16:9 or 21:9"))?
                 }
+                "mapoverlay" => s.map_overlay = yes_no(value).ok_or_else(|| bad("MapOverlay must be Yes or No"))?,
+                "mapoverlaysize" | "mapoverlayopacity" => {
+                    let (min, max) = if key == "mapoverlaysize" { (25, 75) } else { (30, 100) };
+                    let n = value.parse::<u32>().ok().filter(|n| (min..=max).contains(n)).ok_or_else(|| bad(&format!("{key} must be {min}-{max}")))?;
+                    if key == "mapoverlaysize" { s.map_overlay_size = n } else { s.map_overlay_opacity = n }
+                }
                 "fullscreen" => s.fullscreen = yes_no(value).ok_or_else(|| bad("Fullscreen must be Yes or No"))?,
                 "texturepack" => s.texture_pack = (!value.is_empty()).then(|| PathBuf::from(value)),
                 "dumptextures" => s.dump_textures = (!value.is_empty()).then(|| PathBuf::from(value)),
@@ -212,6 +227,11 @@ impl Settings {
              # With the Widescreen mod (GPU renderer): Off, 16:10, 16:9 or 21:9. The 3D screen shows more of the track at\n\
              # the sides; the HUD stays in the middle. Combine with SingleScreen = Yes for a full-width TV picture.\n\
              Widescreen = {}\n\
+             # Widescreen mod: Yes shows the touch screen (race map) small in the bottom-right corner of the 3D screen;\n\
+             # F9 switches it on and off. Size is a percentage of the screen height (25-75), opacity 30-100.\n\
+             MapOverlay = {}\n\
+             MapOverlaySize = {}\n\
+             MapOverlayOpacity = {}\n\
              \n\
              # Yes: start in fullscreen. F11 switches between window and fullscreen at any time.\n\
              Fullscreen = {}\n\
@@ -228,6 +248,9 @@ impl Settings {
             if self.smooth { "Smooth" } else { "Sharp" },
             if self.layout == Layout::Stacked { "Stacked" } else { "SideBySide" },
             self.widescreen.name(),
+            if self.map_overlay { "Yes" } else { "No" },
+            self.map_overlay_size,
+            self.map_overlay_opacity,
             if self.fullscreen { "Yes" } else { "No" },
             path(&self.texture_pack),
             path(&self.dump_textures),
@@ -284,6 +307,10 @@ mod tests {
         assert_eq!(Settings::parse("Widescreen = 16:9").unwrap().widescreen.margin(), 40);
         assert!(Settings::parse("Widescreen = 4:3").is_err());
         assert_eq!(Settings::default().widescreen, Widescreen::Off);
+        let s = Settings { map_overlay: true, map_overlay_size: 60, map_overlay_opacity: 70, ..Settings::default() };
+        let back = Settings::parse(&s.to_text()).unwrap();
+        assert_eq!((back.map_overlay, back.map_overlay_size, back.map_overlay_opacity), (true, 60, 70));
+        assert!(Settings::parse("MapOverlaySize = 90").is_err());
     }
 
     #[test]

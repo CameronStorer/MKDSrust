@@ -279,6 +279,12 @@ impl ApplicationHandler for App {
             .with_inner_size(LogicalSize::new(w * factor, h * factor))
             .with_min_inner_size(LogicalSize::new(w / 2, h / 2))
             .with_fullscreen(self.display.fullscreen.then_some(Fullscreen::Borderless(None)));
+        // The taskbar shows the large icon, which Windows does not take from the small title-bar one.
+        #[cfg(windows)]
+        let attrs = {
+            use winit::platform::windows::WindowAttributesExtWindows;
+            attrs.with_taskbar_icon(Some(brand_icon()))
+        };
         let made = event_loop.create_window(attrs).map_err(|e| format!("Cannot open game window: {e}")).and_then(|w| {
             let w = Arc::new(w);
             Presenter::new(Arc::clone(&w), self.display.clone()).map(|p| (w, p))
@@ -347,6 +353,13 @@ impl ApplicationHandler for App {
             }
             WindowEvent::KeyboardInput { event, .. } => {
                 let PhysicalKey::Code(code) = event.physical_key else { return };
+                if event.state == ElementState::Pressed && !event.repeat && code == KeyCode::F9 && self.display.widescreen_mod {
+                    if let Some(g) = &mut self.gfx {
+                        g.menu.settings.map_overlay = !g.menu.settings.map_overlay;
+                    }
+                    if let Some(w) = &self.window { w.request_redraw(); }
+                    return;
+                }
                 if event.state == ElementState::Pressed && !event.repeat && code == KeyCode::F11 {
                     if let Some(w) = &self.window {
                         if let Some(g) = &mut self.gfx { g.menu.settings.fullscreen = w.fullscreen().is_none(); }
@@ -454,6 +467,20 @@ fn physical_name(code: KeyCode) -> Option<&'static str> {
         AltLeft => "LeftAlt", AltRight => "RightAlt", SuperLeft => "LeftSuper", SuperRight => "RightSuper",
         _ => return None,
     })
+}
+
+/// The map overlay's rectangle (DS pixels of the 3D screen, bottom-right with a small inset) and opacity 0-255,
+/// when the Widescreen mod's MapOverlay is on.
+pub fn map_overlay(display: &Display, margin: u32) -> Option<([u32; 4], u32)> {
+    let s = &display.settings;
+    if !display.widescreen_mod || !s.map_overlay {
+        return None;
+    }
+    let h = 192 * s.map_overlay_size.clamp(25, 75) / 100;
+    let w = h * 4 / 3;
+    let inset = 4;
+    let width = 256 + 2 * margin;
+    Some(([width - w - inset, 192 - h - inset, w, h], s.map_overlay_opacity.clamp(30, 100) * 255 / 100))
 }
 
 /// A screen's rectangle in window pixels.
@@ -749,6 +776,7 @@ impl Presenter {
                 self.gpu_path = Some((renderer, compositor, bind));
             }
             let (renderer, compositor, _) = self.gpu_path.as_mut().unwrap();
+            compositor.set_overlay(map_overlay(&self.display, self.layout.margin));
             let layer = renderer.render(&self.gpu, &f.snap);
             let start = std::time::Instant::now();
             compositor.render_raw(&self.gpu, &f.snap, layer);

@@ -211,9 +211,35 @@ impl Drop for CacheLock {
     }
 }
 
+/// Whether a process with this id is running (a build that was stopped leaves its lock file behind).
+fn process_alive(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+            .creation_flags(0x08000000)
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains(&format!("\"{pid}\"")))
+            .unwrap_or(true)
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("kill").args(["-0", &pid.to_string()]).status().map(|s| s.success()).unwrap_or(true)
+    }
+}
+
 fn lock_cache(dir: &Path) -> Result<CacheLock, BuildError> {
     std::fs::create_dir_all(dir)?;
     let lock = dir.join("build.lock");
+    // A lock left by a build that is no longer running (stopped, crashed, or the launcher quit) is taken over.
+    let stale = std::fs::read_to_string(&lock)
+        .ok()
+        .and_then(|t| t.trim().strip_prefix("pid ").and_then(|p| p.trim().parse::<u32>().ok()))
+        .is_some_and(|pid| pid != std::process::id() && !process_alive(pid));
+    if stale {
+        let _ = std::fs::remove_file(&lock);
+    }
     match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -1224,6 +1250,23 @@ pub fn launch_with_env(
     extra: &[String],
     env: &[(&str, Option<&str>)],
 ) -> Result<i32, BuildError> {
+    launch_impl(bundle, extra, env, true).map(|code| code.unwrap_or(0))
+}
+
+/// Starts the game (verified like [`launch_with_env`], logging to `logs/game.log`, no console) and returns at once:
+/// for desktop shortcuts, where the starter exits while the game runs.
+#[allow(dead_code)] // used by the launcher (desktop shortcut), not by this binary
+pub fn launch_detached(bundle: &Path, extra: &[String], env: &[(&str, Option<&str>)]) -> Result<(), BuildError> {
+    let env: Vec<_> = env.iter().filter(|(k, _)| *k != "MKDS_VERBOSE").copied().chain([("MKDS_VERBOSE", Some("0"))]).collect();
+    launch_impl(bundle, extra, &env, false).map(|_| ())
+}
+
+fn launch_impl(
+    bundle: &Path,
+    extra: &[String],
+    env: &[(&str, Option<&str>)],
+    wait: bool,
+) -> Result<Option<i32>, BuildError> {
     let m: serde_json::Value =
         serde_json::from_slice(&std::fs::read(bundle.join("manifest.json"))?)
             .map_err(|e| BuildError(format!("Bad manifest: {e}")))?;
@@ -1291,8 +1334,11 @@ pub fn launch_with_env(
     if !verbose {
         // The game writes its log itself: it keeps running normally if whoever started it (the launcher) closes.
         command.stdout(Stdio::from(file.try_clone()?)).stderr(Stdio::from(file));
-        let status = command.spawn()?.wait()?;
-        return Ok(status.code().unwrap_or(1));
+        let mut child = command.spawn()?;
+        if !wait {
+            return Ok(None);
+        }
+        return Ok(Some(child.wait()?.code().unwrap_or(1)));
     }
     // Verbose: also echo to a console window, which needs this process to copy the output.
     let log = std::sync::Arc::new(std::sync::Mutex::new(file));
@@ -1322,7 +1368,7 @@ pub fn launch_with_env(
     let stderr = drain(child.stderr.take().unwrap(), log, verbose, true);
     let status = child.wait()?;
     for worker in [stdout, stderr] { worker.join().map_err(|_| BuildError("Game log worker panicked".into()))??; }
-    Ok(status.code().unwrap_or(1))
+    Ok(Some(status.code().unwrap_or(1)))
 }
 
 /// The game command for a verified bundle: `launch_args` from the manifest with `{rom}` (the verified
@@ -1393,6 +1439,18 @@ fn dictionary_tables(source: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_build_lock_is_taken_over() {
+        let d = tempfile::tempdir().unwrap();
+        // A process id that is not running (ids are multiples of 4 on Windows; this one is far beyond any in use).
+        std::fs::write(d.path().join("build.lock"), "pid 4294967292
+").unwrap();
+        let lock = lock_cache(d.path()).unwrap();
+        assert!(lock_cache(d.path()).is_err(), "a live lock still blocks");
+        drop(lock);
+        assert!(!d.path().join("build.lock").exists());
+    }
 
     #[test]
     fn staged_source_is_self_contained() {

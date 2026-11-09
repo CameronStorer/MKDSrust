@@ -8,6 +8,13 @@ the sides at the same height ("Hor+"), so nothing is stretched or zoomed. The HU
 2. In the game, press **F10** → Display → **Widescreen**, and pick 16:10, 16:9 or 21:9.
    Or put `Widescreen = 16:9` in `data/settings.txt`.
 3. For a full-width picture on a TV or monitor, also turn on **Single screen** (and F11 for fullscreen).
+4. Want the race map on that single screen? Turn on **Map in the corner** in F10 (or press **F9**): the touch screen
+   (positions and map) appears in the bottom-right corner of the 3D screen. Size and opacity are adjustable
+   (`MapOverlay`, `MapOverlaySize`, `MapOverlayOpacity` in settings.txt).
+
+## Changes
+- 1.1.0: map overlay (F9); no more flickering side bars when both screens show 3D (the pre-race course preview).
+- 1.0.0: first release.
 
 ## How it works
 The game's 3D geometry already reaches past the DS screen's left and right edges; the DS simply never showed it. The

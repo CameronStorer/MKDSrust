@@ -25,6 +25,10 @@ struct Frame {
     /// Widescreen: DS pixels added on each side of both screens.
     margin: u32,
     pad: u32,
+    /// Map overlay: x, y, width, height in output pixels of the 3D screen (0 alpha = none).
+    overlay: [u32; 4],
+    overlay_alpha: u32,
+    pad2: [u32; 3],
 }
 
 const PIXELS: usize = 256 * 192;
@@ -32,6 +36,8 @@ const PIXELS: usize = 256 * 192;
 pub struct Compositor {
     scale: u32,
     margin: u32,
+    /// Map overlay rectangle in DS pixels of the (wide) 3D screen and its opacity 0-255; `None` = off.
+    overlay: Option<([u32; 4], u32)>,
     pipeline: wgpu::ComputePipeline,
     base: wgpu::Buffer,
     other: wgpu::Buffer,
@@ -93,7 +99,9 @@ impl Compositor {
             .map(|_| {
                 device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("display capture"),
-                    size: wgpu::Extent3d { width: 256 * scale, height: 192 * scale, depth_or_array_layers: 1 },
+                    // The whole (widescreen) row: the game shows captures on alternate frames when both screens
+                    // show 3D, so a 256-column copy would make the side columns flicker.
+                    size: wgpu::Extent3d { width: width * scale, height: 192 * scale, depth_or_array_layers: 1 },
                     mip_level_count: 1,
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
@@ -106,6 +114,7 @@ impl Compositor {
         Compositor {
             scale,
             margin,
+            overlay: None,
             captured,
             capture_age: [None; 4],
             pipeline,
@@ -130,6 +139,18 @@ impl Compositor {
 
     pub fn margin(&self) -> u32 {
         self.margin
+    }
+
+    /// Shows the other screen inside `rect` (x, y, width, height in DS pixels of the 3D screen) at `alpha`.
+    pub fn set_overlay(&mut self, overlay: Option<([u32; 4], u32)>) {
+        self.overlay = overlay.filter(|(r, a)| *a > 0 && r[2] > 0 && r[3] > 0);
+    }
+
+    fn overlay_fields(&self) -> ([u32; 4], u32) {
+        match self.overlay {
+            Some((r, a)) => (r.map(|v| v * self.scale), a.min(255)),
+            None => ([0; 4], 0),
+        }
     }
 
     /// The output texture (both screens, top first), also between frames.
@@ -160,7 +181,8 @@ impl Compositor {
             master: s.master.1,
             pad: [0; 2],
         };
-        let frame = Frame { engines: [engine(a), engine(b)], scale: self.scale, a_top: a_top as u32, margin: self.margin, pad: 0 };
+        let (overlay, overlay_alpha) = self.overlay_fields();
+        let frame = Frame { engines: [engine(a), engine(b)], scale: self.scale, a_top: a_top as u32, margin: self.margin, pad: 0, overlay, overlay_alpha, pad2: [0; 3] };
         gpu.queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&frame));
         self.dispatch(gpu, layer3d)
     }
@@ -183,8 +205,9 @@ impl Compositor {
                 master_mode: if active { r(0x6c) >> 14 } else { 0 },
                 master: if active { (r(0x6c) & 31).min(16) } else { 0 }, pad: [0; 2] }
         };
+        let (overlay, overlay_alpha) = self.overlay_fields();
         let frame = Frame { engines: [engine(0), engine(0x1000)], scale: self.scale,
-            a_top: ((snap.io[0x305] >> 7) & 1) as u32, margin: self.margin, pad: 0 };
+            a_top: ((snap.io[0x305] >> 7) & 1) as u32, margin: self.margin, pad: 0, overlay, overlay_alpha, pad2: [0; 3] };
         gpu.queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&frame));
         self.dispatch(gpu, layer3d);
         self.carry_capture(gpu, snap);
@@ -195,12 +218,11 @@ impl Compositor {
     /// (at this scale); remember this frame's engine A if it captures.
     fn carry_capture(&mut self, gpu: &Gpu, snap: &recomp::machine::RenderSnapshot) {
         let h = 192 * self.scale;
-        let size = wgpu::Extent3d { width: 256 * self.scale, height: h, depth_or_array_layers: 1 };
+        let size = wgpu::Extent3d { width: (256 + 2 * self.margin) * self.scale, height: h, depth_or_array_layers: 1 };
         fn at(texture: &wgpu::Texture, x: u32, y: u32) -> wgpu::TexelCopyTextureInfo<'_> {
             wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d { x, y, z: 0 }, aspect: wgpu::TextureAspect::All }
         }
-        // Captures hold the console's 256 columns: the centre of a wide screen.
-        let x = self.margin * self.scale;
+        let x = 0;
         let (a_y, b_y) = if snap.a_top() { (0, h) } else { (h, 0) };
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let mut used = false;

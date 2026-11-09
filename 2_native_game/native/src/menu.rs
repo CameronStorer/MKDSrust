@@ -107,8 +107,8 @@ impl Menu {
         }
         if let Some((false, action)) = self.capture {
             if let PhysicalKey::Code(code) = event.physical_key {
-                if code == KeyCode::F11 {
-                    self.status = "F10 and F11 are reserved for the menu and fullscreen.".into();
+                if code == KeyCode::F11 || (code == KeyCode::F9 && self.widescreen_mod) {
+                    self.status = "F9, F10 and F11 are reserved (map overlay, menu, fullscreen).".into();
                     return;
                 }
                 if let Some(key) = crate::window::key_index(code, &event.logical_key) {
@@ -255,6 +255,11 @@ impl Menu {
                         && self.settings.renderer != settings::Renderer::Gpu
                     {
                         ui.small("Widescreen needs the GPU renderer.");
+                    }
+                    ui.checkbox(&mut self.settings.map_overlay, "Map in the corner of the 3D screen (F9)");
+                    if self.settings.map_overlay {
+                        ui.add(egui::Slider::new(&mut self.settings.map_overlay_size, 25..=75).text("Map size %"));
+                        ui.add(egui::Slider::new(&mut self.settings.map_overlay_opacity, 30..=100).text("Map opacity %"));
                     }
                 }
                 ui.checkbox(&mut self.settings.single_screen, "Single screen");
