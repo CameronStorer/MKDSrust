@@ -46,20 +46,20 @@ The launcher checks ROM compatibility and verifies the bundle before play.
 Rebuilding into a nonempty destination stages a sibling folder and switches only after success.
 
 Release downloads need no source checkout, Rust installation, or Visual Studio. The launcher embeds
-an allowlisted compressed archive of `1_build_tool`, `2_native_game`, and the address dictionary;
+an allowlisted compressed archive of `1_build_tool`, `2_native_game`, the address dictionary and `Mods/`;
 it extracts a versioned copy in its data folder. No ROM, extracted assets, generated workspace,
 or compiled game is embedded. Rust 1.96.0 GNU components are downloaded from the official Rust
 distribution server and checked against its SHA-256 files. Toolchain downloads support retry
 and resume. Initial crate downloads still require internet access. A future release may provide
 a separately downloadable archive of vendored lockfile dependencies for offline builds.
 
-**Advanced** offers system Rust, accuracy mode, rebuilding, logs, and folders. **Mods** keeps every
-installed mod in one load order (enable, drag to reorder, later wins, overlap warnings), installs a
-mod `.zip` dropped anywhere on the window or sent by the site's *Install with MKDSrust* button
-(`mkdsrust://` links, registered per user), and makes new mods: *Create mod* copies your ROM's files
-into a project folder, *Test in game* runs it, *Pack* writes a screened, ready-to-upload zip of
-patches (also `mkds_builder mod create|pack|install`). Settings and controls remain shared with the
-builder and game.
+**Home** is the whole flow: choose your ROM, **Build**, **Play**, and **View source** (the readable Rust generated
+from your ROM, a self-contained folder you can rebuild anywhere with `cargo build --release`). Each built game folder
+is portable: saves and settings live in its `data/` folder. **Mods** lists the official and community mods from
+[`Mods/`](Mods/README.md) (refreshed from GitHub); tick them and rebuild to compile them into your game
+(`mkds_builder --mod widescreen`). **Advanced** offers system Rust, accuracy mode, rebuilding, logs, folders and the
+older content packages (`.zip` mods: load order, *Create mod*, *Test in game*, *Pack*; also
+`mkds_builder mod create|pack|install`). Settings and controls remain shared with the builder and game.
 `MKDSrust.exe --smoke-test` saves all pages and setup stages to `release_shots/` and exits.
 Keep the checkout for future builds. Logs appear in the launcher and are saved beside
 `%APPDATA%\MKDS Native Builder\launcher.json` as `launcher-build.log`.
@@ -165,6 +165,6 @@ Project code is [GPL-3.0-or-later](LICENSE); this license does not cover Nintend
 See [the documentation](https://docs.mkdsrust.com) for technical details,
 research, verification procedures and the roadmap.
 
-Community mods: [mkdsrust.com](https://mkdsrust.com). Making one: [Making your first mod](https://docs.mkdsrust.com/guides--first-mod.html).
+Mods: [mkdsrust.com/mods](https://mkdsrust.com/mods) and [`Mods/`](Mods/README.md) (official, and community ones reviewed through pull requests).
 
 Portable Windows installs keep data next to MKDSrust.exe; see [README.txt](README.txt) for storage, migration and fallback details.

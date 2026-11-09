@@ -15,7 +15,7 @@ GPU renderer keeps those parts and draws them into extra columns on each side (2
 2D layers (HUD, menus) are drawn in the middle as before; the other screen gets black bars.
 
 ## Known limits
-- The game hides some objects (karts, items, props) once they leave its own 4:3 view, so they can appear late at
+- The game hides some objects (karts, items, props) once they leave its own 4:3 view, so they may appear late at
   the far edges.
 - 2D screens (menus, the HUD) stay 4:3 in the middle.
 - Needs the GPU renderer (the software renderer stays 4:3).
