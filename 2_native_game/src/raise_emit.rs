@@ -2801,5 +2801,6 @@ fn boundary_call(target: u32, ret: &str, d: &BoundarySig) -> String {
         .map(|r| format!("c.r[{r}] = {}; ", ir::reg_name(r))).collect();
     let reload: String = mask_regs(VOLATILE)
         .map(|r| format!("{} = c.r[{r}]; ", ir::reg_name(r))).collect();
-    format!("{spill}let x = m.call(c, {target:#X}, {ret}); {reload}// checked dispatcher boundary")
+    // `c.r[13]` is not a result of a direct function: put back the value it had before the spill
+    format!("let sp0 = c.r[13]; {spill}let x = m.call(c, {target:#X}, {ret}); c.r[13] = sp0; {reload}// checked dispatcher boundary")
 }

@@ -295,7 +295,7 @@ fn boundary_direct_calls_match_translation_on_random_states() {
     src.push_str(&emit_full(&open, "open", Some(&img), None, true));
     for (name, entry, end) in [("boundary", base, base + 28), ("tail", base + 0x40, base + 0x48)] {
         let f = discover(&img, entry, Some((entry, end)), 100).unwrap();
-        set_current("arm9_main", Some(DirectSig { params: 0x7FFF, rets: 0x7FFF, name: format!("d_{name}") }));
+        set_current("arm9_main", Some(DirectSig { params: 0x7FFF, rets: 0x5FFF, name: format!("d_{name}") }));
         let t1 = emit_t1(&f, name, Some(&img)).unwrap();
         assert_eq!(take_facts().unwrap().escape, None, "caller {name}");
         let d = take_direct().unwrap();
@@ -498,7 +498,7 @@ impl recomp::rt::Bus for CheckBus {
             let mut calls = String::new();
             for (_, f) in funcs {
                 let name = format!("boundary_{:08x}", f.entry);
-                set_current(seg, Some(DirectSig { params: 0x7FFF, rets: 0x7FFF, name: format!("d_{name}") }));
+                set_current(seg, Some(DirectSig { params: 0x7FFF, rets: 0x5FFF, name: format!("d_{name}") }));
                 let t1 = emit_t1(f, &name, Some(&img_for(seg))).unwrap();
                 let direct = take_direct().unwrap();
                 assert!(direct.contains("checked dispatcher boundary"));
