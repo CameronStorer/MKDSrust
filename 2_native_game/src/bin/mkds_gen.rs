@@ -1412,7 +1412,7 @@ fn run() -> Result<ExitCode, String> {
         };
         // closed functions that fail the return check once the callee signatures are known
         let mut dropped: HashSet<usize> = HashSet::new();
-        let (sigs, rounds) = 'outer: loop {
+        let (mut sigs, rounds) = 'outer: loop {
         loop {
             let mut changed = false;
             for i in 0..jobs.len() {
@@ -1456,7 +1456,7 @@ fn run() -> Result<ExitCode, String> {
                 Some(n) => format!("{n}_{}", jobs[i].2.to_lowercase()),
                 None => format!("sub_{}", jobs[i].2.to_lowercase()),
             };
-            sigs.insert(i, raise_emit::DirectSig { params: 0, rets: 0, name });
+            sigs.insert(i, raise_emit::DirectSig { cpu: true, params: 0, rets: 0, name });
         }
         let table = |sigs: &BTreeMap<usize, raise_emit::DirectSig>| -> HashMap<u32, Vec<(String, raise_emit::DirectSig)>> {
             let mut m: HashMap<u32, Vec<(String, raise_emit::DirectSig)>> = HashMap::new();
@@ -1507,6 +1507,45 @@ fn run() -> Result<ExitCode, String> {
             dropped.insert(i);
         }
         };
+        if raise_emit::flag_locals_enabled() {
+            // CPU arguments only disappear: a caller can become CPU-free once its
+            // direct callees have, so iterate separately from register signatures.
+            let mut before = (0usize, 0usize);
+            let mut after = (0usize, 0usize);
+            for round in 0..64 {
+                let mut table: HashMap<u32, Vec<(String, raise_emit::DirectSig)>> = HashMap::new();
+                for (&i, d) in &sigs {
+                    table.entry(jobs[i].1.entry).or_default().push((jobs[i].0.clone(), d.clone()));
+                }
+                raise_emit::set_direct(table);
+                let mut changed = false;
+                after = (0, 0);
+                for (&i, d) in &mut sigs {
+                    let (seg, f, id, src) = &jobs[i];
+                    let img = image(src);
+                    raise_emit::set_current(seg, Some(d.clone()));
+                    with_notes9(seg, f.entry, |n| raise_emit::emit_t1_annotated(f, id, Some(&img), n))
+                        .map_err(|e| format!("flag-locals: {seg}/{id}: {e}"))?;
+                    let x = raise_emit::take_facts().expect("direct function facts");
+                    let _ = raise_emit::take_direct();
+                    let _ = raise_emit::take_types();
+                    let _ = raise_emit::take_dump();
+                    let _ = ir::take_field_uses();
+                    if round == 0 { before.0 += x.cpu_before_flags as usize; before.1 += x.flag_calls_before; }
+                    after.0 += x.cpu as usize;
+                    after.1 += x.flag_calls_after;
+                    if d.cpu != x.cpu { d.cpu = x.cpu; changed = true; }
+                }
+                if !changed { break; }
+                if round == 63 { return Err("flag-locals: CPU signatures did not converge".into()); }
+            }
+            let mut table: HashMap<u32, Vec<(String, raise_emit::DirectSig)>> = HashMap::new();
+            for (&i, d) in &sigs {
+                table.entry(jobs[i].1.entry).or_default().push((jobs[i].0.clone(), d.clone()));
+            }
+            raise_emit::set_direct(table);
+            eprintln!("mkds_gen: flag-locals: {} direct functions; still using c: {} -> {}; R::*(c, ...) arithmetic sites: {} -> {}", sigs.len(), before.0, after.0, before.1, after.1);
+        }
         let sites: usize = (0..jobs.len())
             .filter_map(|i| facts[i].as_ref().map(|x| (i, x)))
             .map(|(i, x)| x.calls.iter().filter(|&&t| reaches(&closed, &jobs[i].0, t).is_some()).count())
