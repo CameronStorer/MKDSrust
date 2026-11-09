@@ -498,8 +498,14 @@ impl recomp::rt::Bus for CheckBus {
             let mut calls = String::new();
             for (_, f) in funcs {
                 let name = format!("boundary_{:08x}", f.entry);
-                set_current(seg, Some(DirectSig { params: 0x7FFF, rets: 0x5FFF, name: format!("d_{name}") }));
-                let t1 = emit_t1(f, &name, Some(&img_for(seg))).unwrap();
+                // results as the generator gives them (sp is not one unless the function leaves it moved)
+                let mut t1 = Err("");
+                for rets in [0x5FFF, 0x7FFF] {
+                    set_current(seg, Some(DirectSig { params: 0x7FFF, rets, name: format!("d_{name}") }));
+                    t1 = emit_t1(f, &name, Some(&img_for(seg)));
+                    if t1.is_ok() { break; }
+                }
+                let t1 = t1.unwrap();
                 let direct = take_direct().unwrap();
                 assert!(direct.contains("checked dispatcher boundary"));
                 src.push_str(&emit_full(f, &name, Some(&img_for(seg)), None, true));
