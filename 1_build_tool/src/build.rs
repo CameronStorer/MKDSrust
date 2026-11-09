@@ -358,6 +358,107 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), BuildError> {
     Ok(())
 }
 
+/// Makes a staged `source/` folder self-contained: copies the runtime crates it builds against (`1_build_tool`,
+/// `2_native_game`) into `source/runtime/` and rewrites every absolute path into the checkout as a relative one,
+/// so the folder can be moved and rebuilt anywhere with `cargo build --release`.
+fn vendor_runtime(checkout: &Path, source: &Path) -> Result<(), BuildError> {
+    fn copy_crate(from: &Path, to: &Path) -> Result<(), BuildError> {
+        std::fs::create_dir_all(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let dest = to.join(&name);
+            if entry.file_type()?.is_dir() {
+                if !["target", ".git"].contains(&name.to_string_lossy().as_ref()) {
+                    copy_crate(&entry.path(), &dest)?;
+                }
+            } else {
+                std::fs::copy(entry.path(), dest)?;
+            }
+        }
+        Ok(())
+    }
+    let runtime = source.join("runtime");
+    // Path dependencies inside a workspace folder become members; keep the runtime out so its own tools,
+    // tests and dev-dependencies don't join the game's build and lock file.
+    let manifest = source.join("Cargo.toml");
+    if manifest.is_file() {
+        let text = std::fs::read_to_string(&manifest)?;
+        if !text.contains("exclude = ") {
+            std::fs::write(&manifest, text.replacen("[workspace]
+", "[workspace]
+exclude = [\"runtime\"]
+", 1))?;
+        }
+    }
+    // The crates plus what they embed from outside themselves (the window icon).
+    for name in ["1_build_tool", "2_native_game", "assets/branding"] {
+        if checkout.join(name).is_dir() {
+            copy_crate(&checkout.join(name), &runtime.join(name))?;
+        }
+    }
+    if checkout.join("LICENSE").is_file() {
+        std::fs::copy(checkout.join("LICENSE"), runtime.join("LICENSE"))?;
+    }
+    let clean = |p: &Path| -> String {
+        let p = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+        let s = p.to_string_lossy().replace('\\', "/");
+        s.trim_start_matches("//?/")
+            .trim_end_matches('/')
+            .to_string()
+    };
+    let root = clean(checkout);
+    // Member crates sit one level below `source/`: a Cargo.toml reaches the copy through `../runtime`, a
+    // `#[path]` in `<crate>/src/bin/` through `../../../runtime` (it resolves from the file's own folder).
+    let relative = |quoted: &str, up: &str| -> Option<String> {
+        let path = quoted.replace("\\\\", "/").replace('\\', "/");
+        let path = path.trim_start_matches("//?/");
+        let rest = path.strip_prefix(&root)?;
+        Some(format!("{up}runtime{rest}"))
+    };
+    let rewrite = |file: &Path, up: &str| -> Result<(), BuildError> {
+        let text = std::fs::read_to_string(file)?;
+        let mut out = String::with_capacity(text.len());
+        let mut changed = false;
+        let mut rest = text.as_str();
+        while let Some(start) = rest.find('"') {
+            let Some(len) = rest[start + 1..].find('"') else {
+                break;
+            };
+            let quoted = &rest[start + 1..start + 1 + len];
+            out.push_str(&rest[..=start]);
+            match relative(quoted, up) {
+                Some(r) => {
+                    out.push_str(&r);
+                    changed = true;
+                }
+                None => out.push_str(quoted),
+            }
+            out.push('"');
+            rest = &rest[start + 2 + len..];
+        }
+        out.push_str(rest);
+        if changed {
+            std::fs::write(file, out)?;
+        }
+        Ok(())
+    };
+    for entry in std::fs::read_dir(source)? {
+        let dir = entry?.path();
+        if dir.is_dir() && dir.file_name().is_some_and(|n| n != "runtime") {
+            for (file, up) in [
+                (dir.join("Cargo.toml"), "../"),
+                (dir.join("src/bin/acceptance.rs"), "../../../"),
+            ] {
+                if file.is_file() {
+                    rewrite(&file, up)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// ROM -> generated Rust workspace -> compiled native executable -> staged bundle.
 /// Every stage receives the selected ROM and metadata explicitly. Nothing is staged on failure.
 pub fn recompile(
@@ -804,10 +905,13 @@ pub fn recompile_with_toolchain(
     std::fs::copy(ws.join("coverage.csv"), bundle.join("coverage.csv"))?;
     if opts.keep_source {
         copy_tree(&ws, &bundle.join("source"))?;
+        vendor_runtime(&opts.source, &bundle.join("source"))?;
         std::fs::write(bundle.join("source/README.txt"), SOURCE_README)?;
     }
     let exe_name = exe.file_name().unwrap().to_string_lossy().into_owned();
     std::fs::copy(&exe, bundle.join(&exe_name))?;
+    // Saves and settings stay next to the game, so the whole folder can be moved or copied.
+    std::fs::create_dir_all(bundle.join("data"))?;
     let acceptance_name = match &acceptance {
         Some(a) => {
             let name = a.file_name().unwrap().to_string_lossy().into_owned();
@@ -894,9 +998,11 @@ How to read it: open tiers.csv, find a function by name, then its crate code_<ar
 `budget!(..)` lines keep the console's timing; `spill!()`/`reload!()` keep the CPU registers exact around
 calls; `R::ld32`/`R::st32` etc. are the game's memory accesses (DS addresses).
 
-Rebuild (from this folder, with the project checkout still where it was when you built):
-    cargo build --release --locked --offline
-The runtime crates (recomp, mkds_native, mkds_builder) are referenced by absolute path into that checkout.
+runtime/  the MKDSrust runtime this code builds against (recomp, mkds_native, mkds_builder; GPL-3.0-or-later),
+          copied here so the folder is self-contained.
+
+Rebuild (from this folder; it can be moved anywhere first):
+    cargo build --release --locked --offline     (drop --offline on a machine without cached dependencies)
 Environment switches when running: MKDS_T1=off (exact translations only), MKDS_FLAT=1 (no fibers).
 This code is derived from copyrighted game data: keep it for your own use and do not distribute it.
 ";
@@ -1267,6 +1373,108 @@ fn dictionary_tables(source: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn staged_source_is_self_contained() {
+        let d = tempfile::tempdir().unwrap();
+        let checkout = d.path().join("checkout");
+        for (file, text) in [
+            (
+                "1_build_tool/Cargo.toml",
+                "[package]\nname = \"mkds_builder\"\n",
+            ),
+            ("1_build_tool/src/lib.rs", ""),
+            ("1_build_tool/target/junk", "x"),
+            ("2_native_game/Cargo.toml", "[package]\nname = \"recomp\"\n"),
+            ("2_native_game/tests/t.rs", ""),
+            (
+                "2_native_game/native/Cargo.toml",
+                "[package]\nname = \"mkds_native\"\n",
+            ),
+            ("2_native_game/native/src/bin/race_check.rs", ""),
+            ("LICENSE", "GPL"),
+            ("assets/branding/icon.png", "png"),
+            ("assets/other/big.bin", "x"),
+        ] {
+            let path = checkout.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        let canon = checkout.canonicalize().unwrap();
+        let q = |rel: &str| {
+            format!(
+                "{:?}",
+                canon
+                    .join(rel)
+                    .to_string_lossy()
+                    .trim_start_matches(r"\?\")
+                    .to_string()
+            )
+        };
+        let source = d.path().join("bundle/source");
+        std::fs::create_dir_all(source.join("game/src/bin")).unwrap();
+        std::fs::create_dir_all(source.join("code_kart_1")).unwrap();
+        std::fs::write(source.join("Cargo.toml"), "[workspace]
+members = [\"game\", \"code_kart_1\"]
+resolver = \"3\"
+").unwrap();
+        std::fs::write(
+            source.join("game/Cargo.toml"),
+            format!("[dependencies]\nrecomp = {{ path = {} }}\nlifted = {{ path = \"../lifted\" }}\nmkds_native = {{ path = {} }}\n", q("2_native_game"), q("2_native_game/native")),
+        )
+        .unwrap();
+        std::fs::write(
+            source.join("game/src/bin/acceptance.rs"),
+            format!(
+                "#[path = {}]\nmod race_check;\n",
+                q("2_native_game/native/src/bin/race_check.rs")
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            source.join("code_kart_1/Cargo.toml"),
+            format!(
+                "[dependencies]\nrecomp = {{ path = {} }}\n",
+                q("2_native_game")
+            ),
+        )
+        .unwrap();
+        vendor_runtime(&checkout, &source).unwrap();
+        let game = std::fs::read_to_string(source.join("game/Cargo.toml")).unwrap();
+        assert!(
+            game.contains("recomp = { path = \"../runtime/2_native_game\" }"),
+            "{game}"
+        );
+        assert!(
+            game.contains("mkds_native = { path = \"../runtime/2_native_game/native\" }"),
+            "{game}"
+        );
+        assert!(game.contains("lifted = { path = \"../lifted\" }"));
+        let acc = std::fs::read_to_string(source.join("game/src/bin/acceptance.rs")).unwrap();
+        assert!(
+            acc.contains(
+                "#[path = \"../../../runtime/2_native_game/native/src/bin/race_check.rs\"]"
+            ),
+            "{acc}"
+        );
+        let kart = std::fs::read_to_string(source.join("code_kart_1/Cargo.toml")).unwrap();
+        assert!(kart.contains("\"../runtime/2_native_game\""), "{kart}");
+        assert!(
+            source
+                .join("runtime/2_native_game/native/src/bin/race_check.rs")
+                .is_file()
+        );
+        assert!(source.join("runtime/LICENSE").is_file());
+        assert!(source.join("runtime/assets/branding/icon.png").is_file());
+        assert!(!source.join("runtime/assets/other").exists());
+        let ws = std::fs::read_to_string(source.join("Cargo.toml")).unwrap();
+        assert!(ws.starts_with("[workspace]
+exclude = [\"runtime\"]
+"), "{ws}");
+        assert!(!source.join("runtime/1_build_tool/target").exists());
+        assert!(source.join("runtime/2_native_game/tests/t.rs").is_file());
+    }
+
 
     #[cfg(windows)]
     #[test]

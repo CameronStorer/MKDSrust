@@ -1,10 +1,18 @@
 //! Shared portable paths. Game processes only discover existing data; launchers select and create it.
 use std::path::{Path, PathBuf};
+/// Where a game keeps saves and settings: an explicit folder, else the launcher's shared `data/` (the game lives in
+/// `<launcher>/games/<id>/`), else a `data/` folder next to the game itself (a standalone, movable bundle).
+/// `None` means the per-user folder.
 pub fn game_data(exe: &Path, explicit: Option<PathBuf>) -> Option<PathBuf> {
-    explicit.or_else(|| {
-        let p = exe.parent()?.parent()?.parent()?.join("data");
-        p.is_dir().then_some(p)
-    })
+    explicit
+        .or_else(|| {
+            let p = exe.parent()?.parent()?.parent()?.join("data");
+            p.is_dir().then_some(p)
+        })
+        .or_else(|| {
+            let p = exe.parent()?.join("data");
+            p.is_dir().then_some(p)
+        })
 }
 pub fn data_dir() -> Option<PathBuf> {
     game_data(&std::env::current_exe().ok()?, std::env::var_os("MKDS_DATA_DIR").filter(|s| !s.is_empty()).map(PathBuf::from))
@@ -44,5 +52,13 @@ mod tests {
         std::fs::create_dir(t.path().join("data")).unwrap();
         assert_eq!(game_data(&exe, None), Some(t.path().join("data")));
         assert_eq!(game_data(&exe, Some(t.path().join("custom"))), Some(t.path().join("custom")));
+        // A standalone bundle with its own data folder; the launcher's shared folder still wins.
+        let t2 = tempfile::tempdir().unwrap();
+        let exe = t2.path().join("bundle/game.exe");
+        std::fs::create_dir_all(t2.path().join("bundle/data")).unwrap();
+        assert_eq!(game_data(&exe, None), Some(t2.path().join("bundle/data")));
+        let exe = t.path().join("games/MKDSrust/game.exe");
+        std::fs::create_dir_all(t.path().join("games/MKDSrust/data")).unwrap();
+        assert_eq!(game_data(&exe, None), Some(t.path().join("data")));
     }
 }
