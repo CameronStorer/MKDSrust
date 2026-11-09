@@ -801,7 +801,12 @@ static TYPE_DUMP: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new
 /// `OS_GetTick`), and the thread-context code, which must see the true registers in `c.r` (AMCE revision
 /// 0: `OS_Rescheduler` 0x0200DE50, `OS_SaveContext` 0x0200E6EC, `OS_LoadContext` 0x0200E738).
 fn direct_excluded() -> HashSet<u32> {
-    let mut x: HashSet<u32> = recomp::native::NATIVE.iter().chain(recomp::native::fs::NATIVES).map(|n| n.entry & !1).collect();
+    // Adding a trial must not change the default native call graph (and safe-point timing).
+    // Opt in at generation as well as execution; exact generation has no direct variants.
+    let math_on = matches!(std::env::var("MKDS_NATIVES").as_deref(), Ok("math" | "all"));
+    let mut x: HashSet<u32> = recomp::native::NATIVE.iter()
+        .filter(|n| math_on || !recomp::native::math::is_new_entry(n.entry))
+        .chain(recomp::native::fs::NATIVES).map(|n| n.entry & !1).collect();
     x.extend(recomp::os_hle::SAFE_ENTRIES.iter().map(|e| e.0 & !1));
     x.extend(recomp::native::EVENT_ENTRIES.iter().map(|e| e & !1));
     x.extend([recomp::os_hle::OS_GET_TICK, 0x0200_DE50, 0x0200_E6EC, 0x0200_E738]);
