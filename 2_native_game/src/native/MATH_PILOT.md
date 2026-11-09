@@ -49,28 +49,39 @@ the value core. No Nintendo SDK source was consulted or copied.
 - Shadow: `MKDS_FLAT=1 MKDS_SHADOW=1`, **0 mismatches**. Default fiber execution
   bypasses the current shadow hook and produced an empty tally; that run is not
   counted as evidence. No runtime/shadow plumbing was changed in this lane.
-- Changed native race results: pending below.
+- Native-timing race, math pilot on the dispatcher (bundle generated and run with `MKDS_NATIVES=math`):
+  first at frame **11262**, place 1, 335,249,408 instructions, 567,054 IRQs; the unchanged native baseline
+  is frame **11260**, place 1, 335,036,416 instructions, 567,039 IRQs. So place is kept, but the finish is
+  2 frames later and telemetry is NOT identical (first difference at frame 2572, a position delta). Native
+  timing charges per-entry costs instead of per-instruction time, so any native that is switched on moves
+  timing slightly; this is not a correctness failure of the maths (shadow shows 0 mismatches), but the
+  "keep finish frame exactly" goal is not met and the entries stay on trial. The earlier all-trials
+  runs (`MKDS_NATIVES=all`) finished at 11481/11575 for the same reason (existing trial natives).
+- Exact-timing race (default natives): telemetry, inputs and all screenshots identical in both modes.
+  The fiber run's only difference from `race_main` is the overlay-instruction counter (0 vs 77,107) in the
+  stats line, which the lane before this one recorded as the documented fiber-mode artifact; flat mode
+  prints IDENTICAL outright.
 
 ## Shadow coverage
 
 | Function | Calls | Mismatches | At least 50 calls |
 |---|---:|---:|---|
-| `fx_abs` | 20,485 | 0 | yes |
+| `fx_abs` | 20,153 | 0 | yes |
 | `fx_mul_091f44` | 0 | 0 | no |
-| `FX_Mul` | 3,475 | 0 | yes |
-| `vec_dot_product` | 1,788,266 | 0 | yes |
-| `VEC_DotProduct` | 529,556 | 0 | yes |
-| `vec_cross_product` | 179,293 | 0 | yes |
+| `FX_Mul` | 3,472 | 0 | yes |
+| `vec_dot_product` | 1,760,843 | 0 | yes |
+| `VEC_DotProduct` | 514,368 | 0 | yes |
+| `vec_cross_product` | 175,456 | 0 | yes |
 | `VEC_Distance` | 0 | 0 | no |
 | `MTX_Identity22` | 738 | 0 | yes |
 | `MTX_Identity33` | 380 | 0 | yes |
-| `MTX_Identity43` | 22,827 | 0 | yes |
+| `MTX_Identity43` | 22,873 | 0 | yes |
 | `MTX_Identity44` | 8 | 0 | no |
 | `FX_Mod` | 0 | 0 | no |
 | `FX_DivS32` | 0 | 0 | no |
 
 Eight entries meet this race's call threshold; five need more corpus coverage.
-The pilot entries account for **2,545,028 checked calls**, with zero mismatches.
+The pilot entries account for **2,498,291 checked calls** (final run: `MKDS_NATIVES=math`, flat, `MKDS_SHADOW=1`, bundle generated with the same selector), with zero mismatches.
 All remain on trial as requested.
 
 ## Cost per call
