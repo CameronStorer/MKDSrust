@@ -258,6 +258,14 @@ impl Menu {
                     }
                     ui.checkbox(&mut self.settings.map_overlay, "Map in the corner of the 3D screen (F9)");
                     if self.settings.map_overlay {
+                        ui.horizontal(|ui| {
+                            ui.label("Show");
+                            ui.selectable_value(&mut self.settings.map_overlay_track, false, "Whole touch screen");
+                            ui.selectable_value(&mut self.settings.map_overlay_track, true, "Track and heads only");
+                        });
+                        if self.settings.map_overlay_track {
+                            ui.small("Click the map once to switch the game to its whole-course view.");
+                        }
                         ui.add(egui::Slider::new(&mut self.settings.map_overlay_size, 25..=75).text("Map size %"));
                         ui.add(egui::Slider::new(&mut self.settings.map_overlay_opacity, 30..=100).text("Map opacity %"));
                     }

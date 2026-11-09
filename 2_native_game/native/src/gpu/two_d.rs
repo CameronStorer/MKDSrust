@@ -35,7 +35,7 @@ impl Renderer2d {
         }
     }
 
-    pub fn render(&mut self, gpu: &Gpu, snap: &RenderSnapshot, base: &wgpu::Buffer, other: &wgpu::Buffer, info: &wgpu::Buffer) {
+    pub fn render(&mut self, gpu: &Gpu, snap: &RenderSnapshot, base: &wgpu::Buffer, other: &wgpu::Buffer, info: &wgpu::Buffer, top: &wgpu::Buffer) {
         let mut bytes = vec![0; RAW_SIZE];
         bytes[..0x1070].copy_from_slice(&snap.io[..0x1070]);
         bytes[0x1100..0x1900].copy_from_slice(&snap.palette[..0x800]);
@@ -94,7 +94,7 @@ impl Renderer2d {
             wgpu::BindGroupEntry { binding, resource: buffer.as_entire_binding() }
         }
         let mapping = bind(&self.mapping, &[entry(0, &self.raw), entry(1, &self.mapped), entry(2, &self.maps)]);
-        let split = bind(&self.pipeline, &[entry(0, &self.raw), entry(1, &self.mapped), entry(3, base), entry(4, other), entry(5, info)]);
+        let split = bind(&self.pipeline, &[entry(0, &self.raw), entry(1, &self.mapped), entry(3, base), entry(4, other), entry(5, info), entry(6, top)]);
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         {
             let mut pass = encoder.begin_compute_pass(&Default::default());

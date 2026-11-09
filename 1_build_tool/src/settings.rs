@@ -49,6 +49,8 @@ pub struct Settings {
     pub map_overlay_size: u32,
     /// Its opacity in percent (30-100).
     pub map_overlay_opacity: u32,
+    /// `false`: the whole touch screen; `true`: only the course map's track and heads, see-through elsewhere.
+    pub map_overlay_track: bool,
     pub fullscreen: bool,
     /// Folder of replacement textures (`<id>.png`).
     pub texture_pack: Option<PathBuf>,
@@ -70,6 +72,7 @@ impl Default for Settings {
             map_overlay: false,
             map_overlay_size: 45,
             map_overlay_opacity: 85,
+            map_overlay_track: false,
             fullscreen: false,
             texture_pack: None,
             dump_textures: None,
@@ -179,6 +182,13 @@ impl Settings {
                     s.widescreen = Widescreen::parse(value).ok_or_else(|| bad("Widescreen must be Off, 16:10, 16:9 or 21:9"))?
                 }
                 "mapoverlay" => s.map_overlay = yes_no(value).ok_or_else(|| bad("MapOverlay must be Yes or No"))?,
+                "mapoverlaystyle" => {
+                    s.map_overlay_track = match value.to_ascii_lowercase().as_str() {
+                        "picture" => false,
+                        "track" => true,
+                        _ => return Err(bad("MapOverlayStyle must be Picture or Track")),
+                    }
+                }
                 "mapoverlaysize" | "mapoverlayopacity" => {
                     let (min, max) = if key == "mapoverlaysize" { (25, 75) } else { (30, 100) };
                     let n = value.parse::<u32>().ok().filter(|n| (min..=max).contains(n)).ok_or_else(|| bad(&format!("{key} must be {min}-{max}")))?;
@@ -232,6 +242,9 @@ impl Settings {
              MapOverlay = {}\n\
              MapOverlaySize = {}\n\
              MapOverlayOpacity = {}\n\
+             # Picture: the whole touch screen. Track: only the course map's track, heads and timer over the 3D view\n\
+             # (tap the map once for the game's whole-course view). F9 cycles Off, Picture, Track.\n\
+             MapOverlayStyle = {}\n\
              \n\
              # Yes: start in fullscreen. F11 switches between window and fullscreen at any time.\n\
              Fullscreen = {}\n\
@@ -251,6 +264,7 @@ impl Settings {
             if self.map_overlay { "Yes" } else { "No" },
             self.map_overlay_size,
             self.map_overlay_opacity,
+            if self.map_overlay_track { "Track" } else { "Picture" },
             if self.fullscreen { "Yes" } else { "No" },
             path(&self.texture_pack),
             path(&self.dump_textures),
@@ -310,6 +324,8 @@ mod tests {
         let s = Settings { map_overlay: true, map_overlay_size: 60, map_overlay_opacity: 70, ..Settings::default() };
         let back = Settings::parse(&s.to_text()).unwrap();
         assert_eq!((back.map_overlay, back.map_overlay_size, back.map_overlay_opacity), (true, 60, 70));
+        let t = Settings { map_overlay_track: true, ..Settings::default() };
+        assert!(Settings::parse(&t.to_text()).unwrap().map_overlay_track);
         assert!(Settings::parse("MapOverlaySize = 90").is_err());
     }
 

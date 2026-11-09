@@ -11,8 +11,13 @@ the sides at the same height ("Hor+"), so nothing is stretched or zoomed. The HU
 4. Want the race map on that single screen? Turn on **Map in the corner** in F10 (or press **F9**): the touch screen
    (positions and map) appears in the bottom-right corner of the 3D screen. Size and opacity are adjustable
    (`MapOverlay`, `MapOverlaySize`, `MapOverlayOpacity` in settings.txt).
+5. Prefer just the track? Choose **Track and heads only** (or press **F9** again): the course outline, the racers'
+   heads and the timer float over the 3D view, with the map's background left out. Click the map once to switch the
+   game to its whole-course view; clicking the overlay taps the touch screen. F9 cycles Off → Picture → Track.
 
 ## Changes
+- 1.2.0: Track style for the map overlay (outline and heads only, no background); clicking the overlay taps the
+  touch screen.
 - 1.1.0: map overlay (F9); no more flickering side bars when both screens show 3D (the pre-race course preview).
 - 1.0.0: first release.
 

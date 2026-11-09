@@ -5,6 +5,9 @@
 @group(0) @binding(3) var<storage, read_write> base: array<u32>;
 @group(0) @binding(4) var<storage, read_write> other: array<u32>;
 @group(0) @binding(5) var<storage, read_write> info: array<u32>;
+// Map overlay (Widescreen mod): the top layer's own colour, 0 where it is the backdrop or the background layer
+// (the enabled background drawn furthest back), so a map can be shown without its backdrop pattern.
+@group(0) @binding(6) var<storage, read_write> top: array<u32>;
 const STRIDE = 0xca000u;
 var<private> engine: u32;
 var<private> d: u32;
@@ -237,7 +240,7 @@ fn split(@builtin(global_invocation_id) id: vec3<u32>) {
     engine = id.z;
     d = reg(0u) | (reg(2u) << 16u);
     let x = id.x; let y = id.y; let index = engine * 49152u + y * 256u + x;
-    base[index] = 0xffffffffu; other[index] = 0u; info[index] = 0u;
+    base[index] = 0xffffffffu; other[index] = 0u; info[index] = 0u; top[index] = 0u;
     let display = (d >> 16u) & 3u;
     if display == 0u || (d & 0x80u) != 0u { return; }
     if display != 1u { base[index] = 0u; return; }
@@ -264,6 +267,13 @@ fn split(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let without = fold(mask,scanned,n,false);
     base[index] = blend_stack(mask,without[0],without[1]);
+    var back = 5u; var back_key = 0u;
+    for (var bg = 0u; bg < 4u; bg++) {
+        if (d & (0x100u << bg)) == 0u || (bg == 0u && (d & 8u) != 0u) { continue; }
+        let key = ((reg(8u + bg * 2u) & 3u) << 2u) | bg;
+        if back == 5u || key >= back_key { back = bg; back_key = key; }
+    }
+    if without[0].x != 5u && without[0].x != back { top[index] = without[0].y | 255u; }
     if (d & 0x108u) != 0x108u || (mask & 1u) == 0u { return; }
     let stack3 = fold(mask,scanned,n,true);
     let effects = (mask & 32u) != 0u; let blend = reg(0x50u); let mode = (blend >> 6u) & 3u;

@@ -11,6 +11,9 @@ const SUBMIT: &str = "https://github.com/CameronStorer/MKDSrust/blob/main/Mods/R
 #[derive(Default)]
 pub struct Catalog {
     pub mods: Vec<ModInfo>,
+    /// The mods included with this launcher (id, version): a newer version on GitHub needs a newer launcher,
+    /// because a mod's runtime code ships with MKDSrust.
+    embedded: Vec<(String, String)>,
     pub status: String,
     rx: Option<Receiver<Result<Vec<ModInfo>, String>>>,
     loaded: bool,
@@ -49,6 +52,7 @@ impl Launcher {
         self.catalog.loaded = true;
         if let Ok(dir) = portable::source(&self.dir, &mut |_| {}) {
             if let Ok(mods) = mkds_builder::mods_repo::list(&dir) {
+                self.catalog.embedded = mods.iter().map(|m| (m.id.clone(), m.version.clone())).collect();
                 self.catalog.mods = mods;
             }
         }
@@ -159,6 +163,20 @@ impl Launcher {
                         ui.label(RichText::new(format!("{}  ·  {}  ·  by {}", m.version, m.category, m.authors.join(", "))).color(Color32::GRAY));
                     });
                     ui.label(&m.summary);
+                    let here = self.catalog.embedded.iter().find(|(id, _)| id == &m.id).map(|(_, v)| v.clone());
+                    let newer = here.as_ref().is_some_and(|v| {
+                        matches!((semver::Version::parse(&m.version), semver::Version::parse(v)), (Ok(a), Ok(b)) if a > b)
+                    });
+                    if newer {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new(format!(
+                                "Version {} is out; this launcher builds {}.",
+                                m.version,
+                                here.unwrap_or_default()
+                            )).color(Color32::from_rgb(245, 194, 74)));
+                            ui.hyperlink_to("Get the latest launcher", "https://github.com/CameronStorer/MKDSrust/releases/latest");
+                        });
+                    }
                     egui::CollapsingHeader::new("Details").id_salt(&m.id).show(ui, |ui| {
                         for paragraph in m.description.split("\n\n") {
                             ui.label(paragraph);

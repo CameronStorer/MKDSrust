@@ -1,7 +1,7 @@
 //! Native window (block 2 stage B2.1): a `winit` window presented with `wgpu` on the main thread. The emulation runs on
 //! its own thread and talks to the window only through [`HostLink`]: it reads the input state and hands over finished
 //! frames; the window owns the event loop, scaling, fullscreen and the mouse-to-touch-screen mapping.
-use crate::gpu::{Compositor, Gpu, Renderer3d};
+use crate::gpu::{compose::OverlayStyle, Compositor, Gpu, Renderer3d};
 use recomp::machine::RenderSnapshot;
 use mkds_builder::controls;
 use std::collections::{HashMap, VecDeque};
@@ -259,7 +259,7 @@ impl App {
     fn update_touch(&self) {
         let enabled = !self.link.menu_open.load(Ordering::Acquire) && self.link.preferences.lock().unwrap().as_ref().is_none_or(|(s,_)| s.touch_mouse);
         let touch = match (self.mouse_down && enabled, self.cursor, &self.gfx) {
-            (true, Some(c), Some(g)) => g.layout.touch(c.x, c.y),
+            (true, Some(c), Some(g)) => g.layout.touch(c.x, c.y).or_else(|| overlay_touch(&g.display, &g.layout, c.x, c.y)),
             _ => None,
         };
         self.link.input.lock().unwrap().touch = touch;
@@ -355,7 +355,13 @@ impl ApplicationHandler for App {
                 let PhysicalKey::Code(code) = event.physical_key else { return };
                 if event.state == ElementState::Pressed && !event.repeat && code == KeyCode::F9 && self.display.widescreen_mod {
                     if let Some(g) = &mut self.gfx {
-                        g.menu.settings.map_overlay = !g.menu.settings.map_overlay;
+                        // Off -> Picture -> Track -> Off
+                        let s = &mut g.menu.settings;
+                        (s.map_overlay, s.map_overlay_track) = match (s.map_overlay, s.map_overlay_track) {
+                            (false, _) => (true, false),
+                            (true, false) => (true, true),
+                            (true, true) => (false, false),
+                        };
                     }
                     if let Some(w) = &self.window { w.request_redraw(); }
                     return;
@@ -469,18 +475,33 @@ fn physical_name(code: KeyCode) -> Option<&'static str> {
     })
 }
 
-/// The map overlay's rectangle (DS pixels of the 3D screen, bottom-right with a small inset) and opacity 0-255,
-/// when the Widescreen mod's MapOverlay is on.
-pub fn map_overlay(display: &Display, margin: u32) -> Option<([u32; 4], u32)> {
+/// The map overlay's rectangle (DS pixels of the 3D screen, bottom-right with a small inset), opacity 0-255 and
+/// style, when the Widescreen mod's MapOverlay is on.
+pub fn map_overlay(display: &Display, margin: u32) -> Option<([u32; 4], u32, OverlayStyle)> {
     let s = &display.settings;
     if !display.widescreen_mod || !s.map_overlay {
         return None;
     }
+    let style = if s.map_overlay_track { OverlayStyle::Track } else { OverlayStyle::Picture };
     let h = 192 * s.map_overlay_size.clamp(25, 75) / 100;
-    let w = h * 4 / 3;
+    let w = h * style.source_columns().1 / 192;
     let inset = 4;
     let width = 256 + 2 * margin;
-    Some(([width - w - inset, 192 - h - inset, w, h], s.map_overlay_opacity.clamp(30, 100) * 255 / 100))
+    Some(([width - w - inset, 192 - h - inset, w, h], s.map_overlay_opacity.clamp(30, 100) * 255 / 100, style))
+}
+
+/// Window pixel inside the map overlay -> the touch-screen pixel it shows (clicking the overlay taps the map).
+fn overlay_touch(display: &Display, layout: &Layout, px: f64, py: f64) -> Option<(u8, u8)> {
+    let (r, _, style) = map_overlay(display, layout.margin)?;
+    let t = layout.top;
+    let sw = 256.0 + 2.0 * layout.margin as f64;
+    let (x, y) = ((px - t.x) / t.w * sw, (py - t.y) / t.h * 192.0);
+    let (rx, ry, rw, rh) = (r[0] as f64, r[1] as f64, r[2] as f64, r[3] as f64);
+    if t.w <= 0.0 || x < rx || x >= rx + rw || y < ry || y >= ry + rh {
+        return None;
+    }
+    let (x0, cols) = style.source_columns();
+    Some(((x0 as f64 + (x - rx) / rw * cols as f64).min(255.0) as u8, ((y - ry) / rh * 192.0).min(191.0) as u8))
 }
 
 /// A screen's rectangle in window pixels.
@@ -874,6 +895,14 @@ mod tests {
         assert_eq!(w.touch(40.0,192.0),Some((0,0)));
         assert_eq!(w.touch(295.0,192.0),Some((255,0)));
         assert_eq!(w.touch(20.0,192.0),None);
+        // Clicking the map overlay taps the touch screen: single 16:9 screen, overlay at 50% height, Track style.
+        let settings = mkds_builder::settings::Settings { single_screen: true, map_overlay: true, map_overlay_size: 50, map_overlay_track: true, ..s.clone() };
+        let display = Display { settings: settings.clone(), controls_path: None, scale: None, smooth: false, side_by_side: false, fullscreen: false, texture_pack: None, dump_textures: None, widescreen_mod: true };
+        let l = Layout::configured(336,192,&settings,40);
+        let (r, _, _) = map_overlay(&display, 40).unwrap();
+        assert_eq!(r, [336 - 72 - 4, 192 - 96 - 4, 72, 96]);
+        assert_eq!(overlay_touch(&display, &l, (r[0] + 36) as f64, (r[1] + 48) as f64), Some((112 + 72, 96)));
+        assert_eq!(overlay_touch(&display, &l, 10.0, 10.0), None);
         s.gap = 32;
         let l = Layout::configured(256,416,&s,0);
         assert_eq!(l.touch(128.0,200.0),None);

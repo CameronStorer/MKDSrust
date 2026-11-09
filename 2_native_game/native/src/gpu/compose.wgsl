@@ -1,13 +1,14 @@
 // Screen compositor (block 2 stage B2.3): `recomp::gfx2d::Split::pixel` for every sample of both screens.
 // Integer maths throughout, so a 3D layer of 256x192 reproduces the software screens exactly.
 struct Engine { eva: u32, evb: u32, bright_mode: u32, bright: u32, master_mode: u32, master: u32, pad0: u32, pad1: u32 }
-struct Frame { engines: array<Engine, 2>, scale: u32, a_top: u32, margin: u32, pad1: u32, overlay: vec4<u32>, overlay_alpha: u32, pad2: u32, pad3: u32, pad4: u32 }
+struct Frame { engines: array<Engine, 2>, scale: u32, a_top: u32, margin: u32, pad1: u32, overlay: vec4<u32>, overlay_alpha: u32, overlay_style: u32, pad3: u32, pad4: u32 }
 @group(0) @binding(0) var<storage, read> base: array<u32>;   // [engine][pixel] packed RRGGBBAA
 @group(0) @binding(1) var<storage, read> other: array<u32>;  // [engine][pixel]
 @group(0) @binding(2) var<storage, read> info: array<u32>;   // [engine][pixel]
 @group(0) @binding(3) var layer3d: texture_2d<f32>;          // (256+2*margin)*scale x 192*scale, engine A only
 @group(0) @binding(4) var output: texture_storage_2d<rgba8unorm, write>; // (256+2*margin)*scale x 384*scale
 @group(0) @binding(5) var<uniform> frame: Frame;
+@group(0) @binding(6) var<storage, read> top: array<u32>;    // [engine][pixel] foreground only (0 = see-through)
 
 fn ch(c: u32, s: u32) -> u32 { return (c >> s) & 255u; }
 fn pack(r: u32, g: u32, b: u32) -> u32 { return (r << 24u) | (g << 16u) | (b << 8u) | 255u; }
@@ -79,10 +80,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Map overlay (Widescreen mod): the other screen, scaled into a rectangle of the 3D screen.
     let r = frame.overlay;
     if engine == 0u && frame.overlay_alpha != 0u && gid.x >= r.x && gid.x < r.x + r.z && y3 >= r.y && y3 < r.y + r.w {
-        let ox = min((gid.x - r.x) * 256u / r.z, 255u);
         let oy = min((y3 - r.y) * 192u / r.w, 191u);
-        let mini = screen_pixel(1u, ox, oy, 0u);
-        c = mix_weights(mini, frame.overlay_alpha, c, 255u - frame.overlay_alpha, 255u);
+        if frame.overlay_style == 1u {
+            // Track: the map half, only where a foreground layer (track, heads, text) is.
+            let ox = min(112u + (gid.x - r.x) * 144u / r.z, 255u);
+            let fg = top[49152u + oy * 256u + ox];
+            if (fg & 255u) != 0u { c = mix_weights(fg, frame.overlay_alpha, c, 255u - frame.overlay_alpha, 255u); }
+        } else {
+            let ox = min((gid.x - r.x) * 256u / r.z, 255u);
+            let mini = screen_pixel(1u, ox, oy, 0u);
+            c = mix_weights(mini, frame.overlay_alpha, c, 255u - frame.overlay_alpha, 255u);
+        }
     }
     textureStore(output, vec2<u32>(gid.xy), vec4<f32>(vec4<u32>(ch(c, 24u), ch(c, 16u), ch(c, 8u), 255u)) / 255.0);
 }

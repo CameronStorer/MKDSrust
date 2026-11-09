@@ -28,20 +28,46 @@ struct Frame {
     /// Map overlay: x, y, width, height in output pixels of the 3D screen (0 alpha = none).
     overlay: [u32; 4],
     overlay_alpha: u32,
-    pad2: [u32; 3],
+    overlay_style: u32,
+    pad2: [u32; 2],
 }
+
+/// How the map overlay shows the other screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverlayStyle {
+    /// The whole screen, as it is.
+    Picture = 0,
+    /// Its map half (DS columns 104-255) without the backdrop or the background layer: the course outline and the
+    /// racers' heads float over the 3D view (best with the game's whole-course map: tap the map once).
+    Track = 1,
+}
+
+impl OverlayStyle {
+    /// DS columns of the other screen it shows.
+    pub fn source_columns(self) -> (u32, u32) {
+        match self {
+            OverlayStyle::Picture => (0, 256),
+            OverlayStyle::Track => (TRACK_X0, 256 - TRACK_X0),
+        }
+    }
+}
+
+/// First DS column of the map half of the race touch screen (the positions list is left of it).
+pub const TRACK_X0: u32 = 112;
 
 const PIXELS: usize = 256 * 192;
 
 pub struct Compositor {
     scale: u32,
     margin: u32,
-    /// Map overlay rectangle in DS pixels of the (wide) 3D screen and its opacity 0-255; `None` = off.
-    overlay: Option<([u32; 4], u32)>,
+    /// Map overlay rectangle in DS pixels of the (wide) 3D screen, its opacity 0-255 and style; `None` = off.
+    overlay: Option<([u32; 4], u32, OverlayStyle)>,
     pipeline: wgpu::ComputePipeline,
     base: wgpu::Buffer,
     other: wgpu::Buffer,
     info: wgpu::Buffer,
+    /// Per pixel, the top layer's colour without the backdrop/background layer (0 = see-through), for the map overlay.
+    top: wgpu::Buffer,
     uniform: wgpu::Buffer,
     output: wgpu::Texture,
     staging: Vec<u32>,
@@ -121,6 +147,7 @@ impl Compositor {
             base: storage("compositor base"),
             other: storage("compositor other"),
             info: storage("compositor info"),
+            top: storage("compositor top"),
             uniform: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("compositor frame"),
                 size: std::mem::size_of::<Frame>() as u64,
@@ -142,14 +169,14 @@ impl Compositor {
     }
 
     /// Shows the other screen inside `rect` (x, y, width, height in DS pixels of the 3D screen) at `alpha`.
-    pub fn set_overlay(&mut self, overlay: Option<([u32; 4], u32)>) {
-        self.overlay = overlay.filter(|(r, a)| *a > 0 && r[2] > 0 && r[3] > 0);
+    pub fn set_overlay(&mut self, overlay: Option<([u32; 4], u32, OverlayStyle)>) {
+        self.overlay = overlay.filter(|(r, a, _)| *a > 0 && r[2] > 0 && r[3] > 0);
     }
 
-    fn overlay_fields(&self) -> ([u32; 4], u32) {
+    fn overlay_fields(&self) -> ([u32; 4], u32, u32) {
         match self.overlay {
-            Some((r, a)) => (r.map(|v| v * self.scale), a.min(255)),
-            None => ([0; 4], 0),
+            Some((r, a, style)) => (r.map(|v| v * self.scale), a.min(255), style as u32),
+            None => ([0; 4], 0, 0),
         }
     }
 
@@ -181,8 +208,8 @@ impl Compositor {
             master: s.master.1,
             pad: [0; 2],
         };
-        let (overlay, overlay_alpha) = self.overlay_fields();
-        let frame = Frame { engines: [engine(a), engine(b)], scale: self.scale, a_top: a_top as u32, margin: self.margin, pad: 0, overlay, overlay_alpha, pad2: [0; 3] };
+        let (overlay, overlay_alpha, style) = self.overlay_fields();
+        let frame = Frame { engines: [engine(a), engine(b)], scale: self.scale, a_top: a_top as u32, margin: self.margin, pad: 0, overlay, overlay_alpha, overlay_style: style, pad2: [0; 2] };
         gpu.queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&frame));
         self.dispatch(gpu, layer3d)
     }
@@ -195,7 +222,7 @@ impl Compositor {
     pub fn render_raw(&mut self, gpu: &Gpu, snap: &recomp::machine::RenderSnapshot, layer3d: &wgpu::Texture) -> &wgpu::Texture {
         assert_eq!((layer3d.width(), layer3d.height()), ((256 + 2 * self.margin) * self.scale, 192 * self.scale), "3D layer scale");
         let renderer = self.two_d.get_or_insert_with(|| super::two_d::Renderer2d::new(gpu));
-        renderer.render(gpu, snap, &self.base, &self.other, &self.info);
+        renderer.render(gpu, snap, &self.base, &self.other, &self.info, &self.top);
         let engine = |offset: usize| {
             let r = |a: usize| u16::from_le_bytes([snap.io[offset + a], snap.io[offset + a + 1]]) as u32;
             let d = r(0) | r(2) << 16;
@@ -205,9 +232,9 @@ impl Compositor {
                 master_mode: if active { r(0x6c) >> 14 } else { 0 },
                 master: if active { (r(0x6c) & 31).min(16) } else { 0 }, pad: [0; 2] }
         };
-        let (overlay, overlay_alpha) = self.overlay_fields();
+        let (overlay, overlay_alpha, style) = self.overlay_fields();
         let frame = Frame { engines: [engine(0), engine(0x1000)], scale: self.scale,
-            a_top: ((snap.io[0x305] >> 7) & 1) as u32, margin: self.margin, pad: 0, overlay, overlay_alpha, pad2: [0; 3] };
+            a_top: ((snap.io[0x305] >> 7) & 1) as u32, margin: self.margin, pad: 0, overlay, overlay_alpha, overlay_style: style, pad2: [0; 2] };
         gpu.queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&frame));
         self.dispatch(gpu, layer3d);
         self.carry_capture(gpu, snap);
@@ -286,6 +313,7 @@ impl Compositor {
                 wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&view3d) },
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&out) },
                 wgpu::BindGroupEntry { binding: 5, resource: self.uniform.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 6, resource: self.top.as_entire_binding() },
             ],
         });
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
