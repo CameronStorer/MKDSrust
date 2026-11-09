@@ -57,6 +57,8 @@ struct Launcher {
     settings: Settings,
     controls: Controls,
     page: usize,
+    /// A game started from Play is running (the launcher may close meanwhile).
+    playing: bool,
     catalog: catalog_ui::Catalog,
     info: Option<RomInfo>,
     title: String,
@@ -217,6 +219,7 @@ impl Launcher {
             controls,
             page: 0,
             catalog: Default::default(),
+            playing: false,
             info: None,
             title: String::new(),
             message: errors.join("\n"),
@@ -368,6 +371,7 @@ impl Launcher {
                 Event::ModInstalled(_) | Event::ModCreated(_) | Event::ModPacked(_) | Event::ModTest(_) => {}
                 Event::Played(result) => {
                     self.busy = false;
+                    self.playing = false;
                     self.finish_test();
                     self.message = match result {
                         Ok(0) => "Game closed.".into(),
@@ -457,6 +461,7 @@ impl Launcher {
     }
     fn play(&mut self) {
         self.busy = true;
+        self.playing = true;
         let output = self.prefs.output.clone();
         let accuracy = self.prefs.accuracy;
         let verbose = self.prefs.verbose;
@@ -1206,9 +1211,12 @@ impl Launcher {
                 7 => self.mods_page(ui),
                 4 => self.advanced(ui), 5 => self.about(ui), _ => self.setup(ui),
             } });       }); });
-        if self.busy && ctx.input(|i| i.viewport().close_requested()) {
+        // A running game does not need the launcher (it writes its own log), except when its output is echoed to a
+        // console (verbose) or a mod test copy must be removed afterwards.
+        let blocking = self.busy && !(self.playing && !self.prefs.verbose && self.mods.dev.is_none());
+        if blocking && ctx.input(|i| i.viewport().close_requested()) {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.message = "Wait for the build or game to finish before closing.".into();
+            self.message = if self.playing { "Close the game first (verbose logging or a mod test is running).".into() } else { "Wait for the build to finish before closing.".into() };
         }
     }
 }
@@ -1369,6 +1377,7 @@ mod tests {
             controls: Controls::default(),
             page: 0,
             catalog: Default::default(),
+            playing: false,
             info: None,
             title: String::new(),
             message: String::new(),

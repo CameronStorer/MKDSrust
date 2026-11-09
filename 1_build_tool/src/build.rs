@@ -1287,7 +1287,15 @@ pub fn launch_with_env(
     for (from, to) in [("game.log.2", "game.log.3"), ("game.log.1", "game.log.2"), ("game.log", "game.log.1")] {
         if logs.join(from).exists() { std::fs::rename(logs.join(from), logs.join(to))?; }
     }
-    let log = std::sync::Arc::new(std::sync::Mutex::new(std::fs::File::create(logs.join("game.log"))?));
+    let file = std::fs::File::create(logs.join("game.log"))?;
+    if !verbose {
+        // The game writes its log itself: it keeps running normally if whoever started it (the launcher) closes.
+        command.stdout(Stdio::from(file.try_clone()?)).stderr(Stdio::from(file));
+        let status = command.spawn()?.wait()?;
+        return Ok(status.code().unwrap_or(1));
+    }
+    // Verbose: also echo to a console window, which needs this process to copy the output.
+    let log = std::sync::Arc::new(std::sync::Mutex::new(file));
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn()?;
     fn drain<R: std::io::Read + Send + 'static>(mut reader: R, log: std::sync::Arc<std::sync::Mutex<std::fs::File>>, verbose: bool, stderr: bool) -> std::thread::JoinHandle<std::io::Result<()>> {
