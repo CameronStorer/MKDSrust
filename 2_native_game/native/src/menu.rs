@@ -35,6 +35,8 @@ pub struct Menu {
     fps_start: Instant,
     frames: u32,
     fps: f32,
+    /// The Widescreen mod is part of this build: show its setting.
+    widescreen_mod: bool,
 }
 impl Menu {
     pub fn new(window: &Window, gpu: &Gpu, format: wgpu::TextureFormat, display: &Display) -> Self {
@@ -58,6 +60,7 @@ impl Menu {
         settings.smooth = display.smooth;
         settings.fullscreen = display.fullscreen;
         Self {
+            widescreen_mod: display.widescreen_mod,
             open: false,
             saved_settings: settings.clone(),
             settings,
@@ -241,6 +244,19 @@ impl Menu {
                         "Side by side",
                     );
                 });
+                if self.widescreen_mod {
+                    ui.horizontal(|ui| {
+                        ui.label("Widescreen (mod)");
+                        for w in settings::Widescreen::ALL {
+                            ui.selectable_value(&mut self.settings.widescreen, w, w.name());
+                        }
+                    });
+                    if self.settings.widescreen != settings::Widescreen::Off
+                        && self.settings.renderer != settings::Renderer::Gpu
+                    {
+                        ui.small("Widescreen needs the GPU renderer.");
+                    }
+                }
                 ui.checkbox(&mut self.settings.single_screen, "Single screen");
                 ui.checkbox(
                     &mut self.settings.swap_screens,
@@ -449,6 +465,7 @@ mod tests {
         let settings = Settings::default();
         let controls = Controls::default();
         let mut menu = Menu {
+            widescreen_mod: false,
             open: true,
             settings: settings.clone(),
             saved_settings: settings,

@@ -41,6 +41,8 @@ pub struct Settings {
     /// Linear filtering when the screens are stretched (`false` = sharp pixels).
     pub smooth: bool,
     pub layout: Layout,
+    /// Screen shape with the Widescreen mod (GPU renderer); ignored without it.
+    pub widescreen: Widescreen,
     pub fullscreen: bool,
     /// Folder of replacement textures (`<id>.png`).
     pub texture_pack: Option<PathBuf>,
@@ -58,10 +60,48 @@ impl Default for Settings {
             scale: None,
             smooth: false,
             layout: Layout::Stacked,
+            widescreen: Widescreen::Off,
             fullscreen: false,
             texture_pack: None,
             dump_textures: None,
         }
+    }
+}
+
+/// Screen shape with the Widescreen mod: how many DS pixels are added on each side of the 256-pixel screens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Widescreen {
+    #[default]
+    Off,
+    /// 304 x 192 (about 16:10).
+    W16x10,
+    /// 336 x 192 (about 16:9).
+    W16x9,
+    /// 448 x 192 (21:9).
+    W21x9,
+}
+
+impl Widescreen {
+    pub const ALL: [Widescreen; 4] = [Widescreen::Off, Widescreen::W16x10, Widescreen::W16x9, Widescreen::W21x9];
+    /// DS pixels added on each side (a multiple of 8, the 3D renderer's tile size).
+    pub fn margin(self) -> u32 {
+        match self {
+            Widescreen::Off => 0,
+            Widescreen::W16x10 => 24,
+            Widescreen::W16x9 => 40,
+            Widescreen::W21x9 => 96,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Widescreen::Off => "Off",
+            Widescreen::W16x10 => "16:10",
+            Widescreen::W16x9 => "16:9",
+            Widescreen::W21x9 => "21:9",
+        }
+    }
+    pub fn parse(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|w| w.name().eq_ignore_ascii_case(value.trim()))
     }
 }
 
@@ -126,6 +166,9 @@ impl Settings {
                         _ => return Err(bad("Layout must be Stacked or SideBySide")),
                     }
                 }
+                "widescreen" => {
+                    s.widescreen = Widescreen::parse(value).ok_or_else(|| bad("Widescreen must be Off, 16:10, 16:9 or 21:9"))?
+                }
                 "fullscreen" => s.fullscreen = yes_no(value).ok_or_else(|| bad("Fullscreen must be Yes or No"))?,
                 "texturepack" => s.texture_pack = (!value.is_empty()).then(|| PathBuf::from(value)),
                 "dumptextures" => s.dump_textures = (!value.is_empty()).then(|| PathBuf::from(value)),
@@ -166,6 +209,10 @@ impl Settings {
              # SideBySide: top screen on the left, touch screen on the right; better on wide monitors.\n\
              Layout = {}\n\
              \n\
+             # With the Widescreen mod (GPU renderer): Off, 16:10, 16:9 or 21:9. The 3D screen shows more of the track at\n\
+             # the sides; the HUD stays in the middle. Combine with SingleScreen = Yes for a full-width TV picture.\n\
+             Widescreen = {}\n\
+             \n\
              # Yes: start in fullscreen. F11 switches between window and fullscreen at any time.\n\
              Fullscreen = {}\n\
              \n\
@@ -180,6 +227,7 @@ impl Settings {
             self.scale.map_or("Auto".to_string(), |s| s.to_string()),
             if self.smooth { "Smooth" } else { "Sharp" },
             if self.layout == Layout::Stacked { "Stacked" } else { "SideBySide" },
+            self.widescreen.name(),
             if self.fullscreen { "Yes" } else { "No" },
             path(&self.texture_pack),
             path(&self.dump_textures),
@@ -225,6 +273,18 @@ pub fn save_folder() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn widescreen_round_trips() {
+        for w in Widescreen::ALL {
+            let s = Settings { widescreen: w, ..Settings::default() };
+            assert_eq!(Settings::parse(&s.to_text()).unwrap().widescreen, w);
+            assert_eq!(w.margin() % 8, 0);
+        }
+        assert_eq!(Settings::parse("Widescreen = 16:9").unwrap().widescreen.margin(), 40);
+        assert!(Settings::parse("Widescreen = 4:3").is_err());
+        assert_eq!(Settings::default().widescreen, Widescreen::Off);
+    }
 
     #[test]
     fn defaults_round_trip_and_values_parse() {

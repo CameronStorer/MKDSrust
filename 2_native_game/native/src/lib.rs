@@ -60,6 +60,11 @@ pub struct Options {
     pub list_courses: bool,
     /// `--script FILE` (repeatable): Luau scripts to run (see `scripting.rs`), besides enabled mods' scripts.
     pub scripts: Vec<PathBuf>,
+    /// Code mods compiled into this build (their ids, from the repository's `Mods/` folder), set by the generated
+    /// `main`. A mod's features and settings exist only when it is listed here.
+    pub mods: Vec<String>,
+    /// `--widescreen off|16:10|16:9|21:9`: overrides `settings.txt` for one run (needs the Widescreen mod).
+    pub widescreen: Option<mkds_builder::settings::Widescreen>,
 }
 
 impl Options {
@@ -73,6 +78,13 @@ impl Options {
                 "--race" => result.race = Some(race::RaceSpec::parse(&args.next().ok_or("--race needs a spec, e.g. course=1,character=0")?)?),
                 "--list-courses" => result.list_courses = true,
                 "--script" => result.scripts.push(args.next().ok_or("--script needs a .luau file")?.into()),
+                "--widescreen" => {
+                    let value = args.next().ok_or("--widescreen needs off, 16:10, 16:9 or 21:9")?;
+                    result.widescreen = Some(
+                        mkds_builder::settings::Widescreen::parse(&value)
+                            .ok_or("--widescreen needs off, 16:10, 16:9 or 21:9")?,
+                    );
+                }
                 "--mute" => result.mute = true,
                 "--stats" => result.stats = true,
                 "--diagnostic-arm7-interpreter" => result.diagnostic_arm7_interpreter = true,
@@ -388,7 +400,10 @@ fn run_internal(
     }
     let bindings = load_bindings(&options)?;
     let title = bindings.title.clone();
-    let settings = load_settings()?;
+    let mut settings = load_settings()?;
+    if let Some(w) = options.widescreen {
+        settings.widescreen = w;
+    }
     let mut options = options;
     options.software_renderer = Some(options.software_renderer.unwrap_or(settings.renderer == Renderer::Software));
     let display = window::Display {
@@ -400,6 +415,7 @@ fn run_internal(
         fullscreen: settings.fullscreen,
         texture_pack: settings.texture_pack.clone(),
         dump_textures: settings.dump_textures.clone(),
+        widescreen_mod: options.mods.iter().any(|m| m == "widescreen"),
     };
     // The window needs the main thread; the game runs on a second one and meets it through `HostLink`.
     window::run(&title, display, move |link| emulate(rom, image, table, signatures, table7, &options, Some(link), bindings))?

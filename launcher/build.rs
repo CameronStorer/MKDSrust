@@ -19,7 +19,7 @@ fn files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
             }
         } else if matches!(
             p.extension().and_then(|e| e.to_str()),
-            Some("rs" | "toml" | "lock" | "csv" | "wgsl" | "md")
+            Some("rs" | "toml" | "lock" | "csv" | "wgsl" | "md" | "json")
         ) {
             println!("cargo:rerun-if-changed={}", p.display());
             out.push(p.strip_prefix(root).unwrap().to_owned());
@@ -44,7 +44,7 @@ fn main() {
         println!("cargo:rustc-link-arg={}", res.display());
     }
     let mut paths = Vec::new();
-    for name in ["1_build_tool", "2_native_game", "dictionary"] {
+    for name in ["1_build_tool", "2_native_game", "dictionary", "Mods"] {
         files(&root, &root.join(name), &mut paths);
     }
     // Project branding (not game assets): the game window embeds the icon.

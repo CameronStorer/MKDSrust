@@ -168,6 +168,19 @@ pub struct Display {
     pub texture_pack: Option<std::path::PathBuf>,
     /// Save every texture the game uses into this folder.
     pub dump_textures: Option<std::path::PathBuf>,
+    /// The Widescreen mod is compiled into this build: `settings.widescreen` applies (GPU renderer).
+    pub widescreen_mod: bool,
+}
+
+impl Display {
+    /// DS pixels added on each side of the screens: the Widescreen mod's setting, with the GPU renderer only.
+    pub fn margin(&self, gpu: bool) -> u32 {
+        if self.widescreen_mod && gpu && self.settings.renderer == mkds_builder::settings::Renderer::Gpu {
+            self.settings.widescreen.margin()
+        } else {
+            0
+        }
+    }
 }
 
 /// Highest scale `Auto` picks: beyond 4x the GPU cost grows faster than the screens get sharper.
@@ -459,6 +472,8 @@ pub struct Layout {
     pub top: Rect,
     pub bottom: Rect,
     pub side_by_side: bool,
+    /// Widescreen DS pixels on each side of both screens.
+    pub margin: u32,
 }
 
 impl Layout {
@@ -469,27 +484,29 @@ impl Layout {
         let (w, h) = (256.0 * s, 192.0 * s);
         let top = Rect { x, y, w, h };
         let bottom = if side_by_side { Rect { x: x + w, y, w, h } } else { Rect { x, y: y + h, w, h } };
-        Layout { top, bottom, side_by_side }
+        Layout { top, bottom, side_by_side, margin: 0 }
     }
 
-    fn configured(width: u32, height: u32, settings: &mkds_builder::settings::Settings) -> Layout {
+    /// `margin`: widescreen DS pixels on each side of both screens (0 = the DS's 256 columns).
+    fn configured(width: u32, height: u32, settings: &mkds_builder::settings::Settings, margin: u32) -> Layout {
         let side = settings.layout == mkds_builder::settings::Layout::SideBySide;
         let gap = settings.gap as f64;
-        let (cw,ch) = if settings.single_screen { (256.0,192.0) } else if side { (512.0+gap,192.0) } else { (256.0,384.0+gap) };
+        let sw = 256.0 + 2.0 * margin as f64;
+        let (cw,ch) = if settings.single_screen { (sw,192.0) } else if side { (2.0*sw+gap,192.0) } else { (sw,384.0+gap) };
         let scale = (width as f64 / cw).min(height as f64 / ch);
-        let first = Rect { x: (width as f64-cw*scale)/2.0, y: (height as f64-ch*scale)/2.0, w: 256.0*scale, h: 192.0*scale };
-        let second = if settings.single_screen { Rect { w: 0.0, h: 0.0, ..first } } else if side { Rect { x: first.x+(256.0+gap)*scale, ..first } } else { Rect { y: first.y+(192.0+gap)*scale, ..first } };
+        let first = Rect { x: (width as f64-cw*scale)/2.0, y: (height as f64-ch*scale)/2.0, w: sw*scale, h: 192.0*scale };
+        let second = if settings.single_screen { Rect { w: 0.0, h: 0.0, ..first } } else if side { Rect { x: first.x+(sw+gap)*scale, ..first } } else { Rect { y: first.y+(192.0+gap)*scale, ..first } };
         let (top,bottom) = if settings.swap_screens { (second,first) } else { (first,second) };
-        Layout { top,bottom,side_by_side: side }
+        Layout { top,bottom,side_by_side: side, margin }
     }
 
-    /// Window pixel -> bottom-screen pixel, if it lies on the bottom screen.
+    /// Window pixel -> bottom-screen pixel, if it lies on the bottom screen (outside a widescreen side bar).
     pub fn touch(&self, px: f64, py: f64) -> Option<(u8, u8)> {
         let r = self.bottom;
         if r.w <= 0.0 {
             return None;
         }
-        let x = (px - r.x) / r.w * 256.0;
+        let x = (px - r.x) / r.w * (256.0 + 2.0 * self.margin as f64) - self.margin as f64;
         let y = (py - r.y) / r.h * 192.0;
         ((0.0..256.0).contains(&x) && (0.0..192.0).contains(&y)).then(|| (x as u8, y as u8))
     }
@@ -636,7 +653,7 @@ impl Presenter {
         if !compute_ok {
             eprintln!("This graphics adapter cannot run the GPU renderer; the CPU finishes each frame (as --renderer software).");
         }
-        let layout = Layout::configured(config.width, config.height, &display.settings);
+        let layout = Layout::configured(config.width, config.height, &display.settings, display.margin(compute_ok));
         let scale = display.scale.unwrap_or_else(|| layout.auto_scale());
         eprintln!("Display: {} renderer at {scale}x, {}", gpu.adapter.get_info().name, if display.scale.is_none() { "Auto" } else { "fixed" });
         let menu = crate::menu::Menu::new(&window, &gpu, config.format, &display);
@@ -683,7 +700,10 @@ impl Presenter {
         self.config.width = size.width;
         self.config.height = size.height;
         self.surface.configure(&self.gpu.device, &self.config);
-        self.layout = Layout::configured(size.width, size.height, &self.display.settings);
+        self.layout = Layout::configured(size.width, size.height, &self.display.settings, self.display.margin(self.compute_ok));
+        if self.gpu_path.as_ref().is_some_and(|(r, _, _)| r.margin() != self.layout.margin) {
+            self.gpu_path = None; // rebuilt at the new width with the next frame
+        }
         if self.display.scale.is_none() && self.layout.auto_scale() != self.scale {
             self.scale = self.layout.auto_scale();
             self.gpu_path = None; // rebuilt at the new scale with the next frame
@@ -716,7 +736,7 @@ impl Presenter {
         };
         if let Some(Frame::Gpu(f)) = &frame {
             if self.gpu_path.is_none() {
-                let mut renderer = Renderer3d::new(&self.gpu, self.scale);
+                let mut renderer = Renderer3d::new_wide(&self.gpu, self.scale, self.layout.margin);
                 renderer.set_texture_dump(self.display.dump_textures.clone());
                 if let Some(pack) = &self.display.texture_pack {
                     match renderer.set_texture_pack(Some(pack.clone())) {
@@ -724,7 +744,7 @@ impl Presenter {
                         Err(e) => eprintln!("Texture pack not used: {e}"),
                     }
                 }
-                let compositor = Compositor::new(&self.gpu, self.scale);
+                let compositor = Compositor::new_wide(&self.gpu, self.scale, self.layout.margin);
                 let bind = self.bind_texture(compositor.output(), self.config.format.is_srgb());
                 self.gpu_path = Some((renderer, compositor, bind));
             }
@@ -816,19 +836,28 @@ mod tests {
     #[test]
     fn gap_swap_and_single_screen_keep_touch_on_the_visible_bottom_screen() {
         let mut s = mkds_builder::settings::Settings::default();
-        assert_eq!(Layout::configured(512,768,&s), Layout::fit(512,768,false));
+        assert_eq!(Layout::configured(512,768,&s,0), Layout::fit(512,768,false));
+        // Widescreen 16:9 (40 extra DS pixels per side): a 1920x1080 single screen fills the height, 336:192 wide.
+        let single = mkds_builder::settings::Settings { single_screen: true, ..s.clone() };
+        let w = Layout::configured(1920,1080,&single,40);
+        assert_eq!((w.top.w, w.top.h), (336.0 * 5.625, 1080.0));
+        // Touch lands on the bottom screen's centred 256 columns; the side bars are not the touch screen.
+        let w = Layout::configured(336,384,&s,40);
+        assert_eq!(w.touch(40.0,192.0),Some((0,0)));
+        assert_eq!(w.touch(295.0,192.0),Some((255,0)));
+        assert_eq!(w.touch(20.0,192.0),None);
         s.gap = 32;
-        let l = Layout::configured(256,416,&s);
+        let l = Layout::configured(256,416,&s,0);
         assert_eq!(l.touch(128.0,200.0),None);
         assert_eq!(l.touch(128.0,224.0),Some((128,0)));
         s.swap_screens = true;
-        assert_eq!(Layout::configured(256,416,&s).touch(128.0,0.0),Some((128,0)));
+        assert_eq!(Layout::configured(256,416,&s,0).touch(128.0,0.0),Some((128,0)));
         s.single_screen = true;
-        let l = Layout::configured(512,384,&s);
+        let l = Layout::configured(512,384,&s,0);
         assert_eq!(l.touch(256.0,192.0),Some((128,96)));
         assert_eq!(l.auto_scale(),2);
         s.swap_screens = false;
-        assert_eq!(Layout::configured(512,384,&s).touch(256.0,192.0),None);
+        assert_eq!(Layout::configured(512,384,&s,0).touch(256.0,192.0),None);
     }
 
     #[test]

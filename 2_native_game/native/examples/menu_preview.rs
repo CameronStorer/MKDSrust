@@ -11,6 +11,7 @@ fn main() {
         fullscreen: false,
         texture_pack: None,
         dump_textures: None,
+        widescreen_mod: true,
     };
     window::run("MKDSrust menu preview (no ROM) — F10", display, |link| {
         while link.is_open() {

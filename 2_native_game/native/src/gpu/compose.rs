@@ -22,13 +22,16 @@ struct Frame {
     engines: [Engine; 2],
     scale: u32,
     a_top: u32,
-    pad: [u32; 2],
+    /// Widescreen: DS pixels added on each side of both screens.
+    margin: u32,
+    pad: u32,
 }
 
 const PIXELS: usize = 256 * 192;
 
 pub struct Compositor {
     scale: u32,
+    margin: u32,
     pipeline: wgpu::ComputePipeline,
     base: wgpu::Buffer,
     other: wgpu::Buffer,
@@ -47,7 +50,14 @@ impl Compositor {
     pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
     pub fn new(gpu: &Gpu, scale: u32) -> Compositor {
+        Self::new_wide(gpu, scale, 0)
+    }
+
+    /// A compositor whose screens are `margin` DS pixels wider on each side (widescreen). The 3D screen shows the
+    /// wide 3D layer there; the 2D layers stay centred, and the other screen gets black bars.
+    pub fn new_wide(gpu: &Gpu, scale: u32, margin: u32) -> Compositor {
         let device = &gpu.device;
+        let width = 256 + 2 * margin;
         let storage = |label| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
@@ -70,7 +80,7 @@ impl Compositor {
         });
         let output = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("screens"),
-            size: wgpu::Extent3d { width: 256 * scale, height: 384 * scale, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d { width: width * scale, height: 384 * scale, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -95,6 +105,7 @@ impl Compositor {
             .collect();
         Compositor {
             scale,
+            margin,
             captured,
             capture_age: [None; 4],
             pipeline,
@@ -117,6 +128,10 @@ impl Compositor {
         self.scale
     }
 
+    pub fn margin(&self) -> u32 {
+        self.margin
+    }
+
     /// The output texture (both screens, top first), also between frames.
     pub fn output(&self) -> &wgpu::Texture {
         &self.output
@@ -124,7 +139,7 @@ impl Compositor {
 
     /// Both screens (top first) at the compositor's scale. `layer3d` must be 256*scale x 192*scale `Rgba8Unorm`.
     pub fn render(&mut self, gpu: &Gpu, a: &Split, b: &Split, a_top: bool, layer3d: &wgpu::Texture) -> &wgpu::Texture {
-        assert_eq!((layer3d.width(), layer3d.height()), (256 * self.scale, 192 * self.scale), "3D layer scale");
+        assert_eq!((layer3d.width(), layer3d.height()), ((256 + 2 * self.margin) * self.scale, 192 * self.scale), "3D layer scale");
         let mut upload = |buffer: &wgpu::Buffer, field: &dyn Fn(&Split, usize) -> u32| {
             for (e, split) in [a, b].into_iter().enumerate() {
                 for i in 0..PIXELS {
@@ -145,7 +160,7 @@ impl Compositor {
             master: s.master.1,
             pad: [0; 2],
         };
-        let frame = Frame { engines: [engine(a), engine(b)], scale: self.scale, a_top: a_top as u32, pad: [0; 2] };
+        let frame = Frame { engines: [engine(a), engine(b)], scale: self.scale, a_top: a_top as u32, margin: self.margin, pad: 0 };
         gpu.queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&frame));
         self.dispatch(gpu, layer3d)
     }
@@ -156,7 +171,7 @@ impl Compositor {
 
     /// Build the split buffers on the GPU directly from the raw snapshot.
     pub fn render_raw(&mut self, gpu: &Gpu, snap: &recomp::machine::RenderSnapshot, layer3d: &wgpu::Texture) -> &wgpu::Texture {
-        assert_eq!((layer3d.width(), layer3d.height()), (256 * self.scale, 192 * self.scale), "3D layer scale");
+        assert_eq!((layer3d.width(), layer3d.height()), ((256 + 2 * self.margin) * self.scale, 192 * self.scale), "3D layer scale");
         let renderer = self.two_d.get_or_insert_with(|| super::two_d::Renderer2d::new(gpu));
         renderer.render(gpu, snap, &self.base, &self.other, &self.info);
         let engine = |offset: usize| {
@@ -169,7 +184,7 @@ impl Compositor {
                 master: if active { (r(0x6c) & 31).min(16) } else { 0 }, pad: [0; 2] }
         };
         let frame = Frame { engines: [engine(0), engine(0x1000)], scale: self.scale,
-            a_top: ((snap.io[0x305] >> 7) & 1) as u32, pad: [0; 2] };
+            a_top: ((snap.io[0x305] >> 7) & 1) as u32, margin: self.margin, pad: 0 };
         gpu.queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&frame));
         self.dispatch(gpu, layer3d);
         self.carry_capture(gpu, snap);
@@ -181,9 +196,11 @@ impl Compositor {
     fn carry_capture(&mut self, gpu: &Gpu, snap: &recomp::machine::RenderSnapshot) {
         let h = 192 * self.scale;
         let size = wgpu::Extent3d { width: 256 * self.scale, height: h, depth_or_array_layers: 1 };
-        fn at(texture: &wgpu::Texture, y: u32) -> wgpu::TexelCopyTextureInfo<'_> {
-            wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d { x: 0, y, z: 0 }, aspect: wgpu::TextureAspect::All }
+        fn at(texture: &wgpu::Texture, x: u32, y: u32) -> wgpu::TexelCopyTextureInfo<'_> {
+            wgpu::TexelCopyTextureInfo { texture, mip_level: 0, origin: wgpu::Origin3d { x, y, z: 0 }, aspect: wgpu::TextureAspect::All }
         }
+        // Captures hold the console's 256 columns: the centre of a wide screen.
+        let x = self.margin * self.scale;
         let (a_y, b_y) = if snap.a_top() { (0, h) } else { (h, 0) };
         let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let mut used = false;
@@ -191,11 +208,11 @@ impl Compositor {
             *age += 1;
         }
         if let Some(bank) = recomp::machine::CaptureCarry::shown(snap, self.capture_age) {
-            encoder.copy_texture_to_texture(at(&self.captured[bank], 0), at(&self.output, b_y), size);
+            encoder.copy_texture_to_texture(at(&self.captured[bank], 0, 0), at(&self.output, x, b_y), size);
             used = true;
         }
         if let Some(bank) = snap.capture_bank() {
-            encoder.copy_texture_to_texture(at(&self.output, a_y), at(&self.captured[bank], 0), size);
+            encoder.copy_texture_to_texture(at(&self.output, x, a_y), at(&self.captured[bank], 0, 0), size);
             self.capture_age[bank] = Some(0);
             used = true;
         }
@@ -254,7 +271,7 @@ impl Compositor {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("compose"), timestamp_writes: None });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind, &[]);
-            pass.dispatch_workgroups((256 * self.scale).div_ceil(8), (384 * self.scale).div_ceil(8), 1);
+            pass.dispatch_workgroups(((256 + 2 * self.margin) * self.scale).div_ceil(8), (384 * self.scale).div_ceil(8), 1);
         }
         gpu.queue.submit([encoder.finish()]);
         &self.output

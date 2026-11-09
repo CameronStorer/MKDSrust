@@ -350,6 +350,7 @@ fn start_build(info: RomInfo, cfg: &Config) -> Screen {
                     offline,
                     allow_incomplete: false,
                     keep_source: true,
+                    mods: Vec::new(),
                     with_acceptance: false,
                     jobs: None,
                     with_interpreter: false,

@@ -27,6 +27,15 @@ struct Args {
     /// Validate the ROM without building
     #[arg(long, conflicts_with_all = ["build", "run"])]
     inspect: bool,
+    /// Compile a mod from the checkout's Mods/ folder into the game (repeatable), e.g. --mod widescreen
+    #[arg(long = "mod", value_name = "ID")]
+    mods: Vec<String>,
+    /// List the checkout's mods, or with --write rewrite Mods/index.json, then exit
+    #[arg(long)]
+    mods_index: bool,
+    /// With --mods-index: write Mods/index.json instead of printing the list
+    #[arg(long, requires = "mods_index")]
+    write: bool,
     /// Rip the ROM's files into <out>/assets (loose files + manifest.json), then exit
     #[arg(long, conflicts_with_all = ["inspect", "build", "run", "reference_port", "emit_tables"])]
     rip: bool,
@@ -238,6 +247,18 @@ fn run() -> Result<i32, BuildError> {
         std::fs::write(out, serde_json::to_vec_pretty(&index).map_err(|e| BuildError(e.to_string()))?)?;
         return Ok(0);
     }
+    if args.mods_index {
+        let source = find_source(args.source.clone())?;
+        if args.write {
+            std::fs::write(mkds_builder::mods_repo::index_path(&source), mkds_builder::mods_repo::index_json(&source)?)?;
+            println!("Wrote {}", mkds_builder::mods_repo::index_path(&source).display());
+        } else {
+            for m in mkds_builder::mods_repo::list(&source)? {
+                println!("{:<24} {:<8} {:<10} {}", m.id, m.version, m.tier, m.summary);
+            }
+        }
+        return Ok(0);
+    }
     if let Some(timing) = &args.timing { unsafe { std::env::set_var("MKDS_TIMING", timing); } }
     if args.clear_cache {
         let dir = args.cache_dir.clone().unwrap_or_else(build::default_cache_dir);
@@ -341,6 +362,7 @@ fn run() -> Result<i32, BuildError> {
                 offline: args.offline,
                 allow_incomplete: args.allow_incomplete,
                 keep_source: !args.no_source,
+                mods: args.mods.clone(),
                 with_acceptance: args.with_acceptance,
                 jobs: args.jobs,
                 with_interpreter: args.with_interpreter,

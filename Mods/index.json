@@ -1,0 +1,22 @@
+{
+  "format": 1,
+  "mods": [
+    {
+      "authors": [
+        "MKDSrust"
+      ],
+      "category": "Graphics",
+      "description": "Draws the 3D screen wider, so the view extends to the left and right at the same height (no stretching, no zoom). The game already computes the scenery beyond the DS's screen edges; the GPU renderer now keeps it.\n\nChoose the shape in the in-game menu (F10, Display tab) or with `Widescreen = 16:9` in settings.txt: Off, 16:10, 16:9 or 21:9. For a full-width TV picture, also turn on Single screen. The touch screen keeps its 4:3 picture, centred.\n\nKnown limits: the game hides some objects (karts, items, scenery props) when they leave its own 4:3 view, so they can appear late at the far edges. The HUD and menus stay 4:3 in the middle. Needs the GPU renderer.",
+      "features": [
+        "widescreen"
+      ],
+      "id": "widescreen",
+      "license": "GPL-3.0-or-later",
+      "name": "Widescreen",
+      "path": "Mods/widescreen",
+      "summary": "See more of the track: 16:10, 16:9 or 21:9 instead of the DS's 4:3, with the HUD kept in the middle.",
+      "tier": "official",
+      "version": "1.0.0"
+    }
+  ]
+}

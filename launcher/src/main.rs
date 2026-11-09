@@ -2,6 +2,7 @@
 mod browse_ui;
 mod instance;
 mod mods_ui;
+mod catalog_ui;
 mod portable;
 mod protocol;
 mod site;
@@ -30,6 +31,8 @@ struct Preferences {
     setup_done: bool,
     last_build: String,
     verbose: bool,
+    /// Mods to compile into the next build (ids from the mod repository).
+    mods: Vec<String>,
 }
 fn build_date(stored: &str) -> String {
     // Old launcher versions stored Debug(SystemTime). Preserve a readable migration.
@@ -54,6 +57,7 @@ struct Launcher {
     settings: Settings,
     controls: Controls,
     page: usize,
+    catalog: catalog_ui::Catalog,
     info: Option<RomInfo>,
     title: String,
     message: String,
@@ -212,6 +216,7 @@ impl Launcher {
             settings,
             controls,
             page: 0,
+            catalog: Default::default(),
             info: None,
             title: String::new(),
             message: errors.join("\n"),
@@ -377,6 +382,8 @@ impl Launcher {
         let system = self.prefs.system_toolchain;
         let output = build_folder(&self.prefs.output);
         let stamp = fingerprint();
+        let mods = self.prefs.mods.clone();
+        let mod_infos = self.selected_mod_infos();
         self.source_stamp = stamp.clone();
         self.log = format!(
             "Building into {}\nPrevious builds are preserved.\n",
@@ -406,6 +413,21 @@ impl Launcher {
                     return;
                 }
             };
+            // Mods published after this launcher was made: add their manifests to its project copy.
+            for m in &mod_infos {
+                let dir = source.join(&m.path);
+                if dir.join("mod.json").is_file() {
+                    continue;
+                }
+                let written = std::fs::create_dir_all(&dir)
+                    .map_err(|e| e.to_string())
+                    .and_then(|_| serde_json::to_vec_pretty(m).map_err(|e| e.to_string()))
+                    .and_then(|b| std::fs::write(dir.join("mod.json"), b).map_err(|e| e.to_string()));
+                if let Err(e) = written {
+                    let _ = tx.send(Event::Built(Err(format!("Cannot add mod {}: {e}", m.id)), stamp));
+                    return;
+                }
+            }
             let opts = build::RecompileOptions {
                 source,
                 output,
@@ -413,6 +435,7 @@ impl Launcher {
                 offline: false,
                 allow_incomplete: false,
                 keep_source: true,
+                mods: mods.clone(),
                 with_acceptance: false,
                 jobs: None,
                 cache_dir: Some(build::default_cache_dir()),
@@ -467,8 +490,10 @@ impl Launcher {
         let built = manifest
             .as_ref()
             .is_some_and(|m| m["executable"].as_str().is_some_and(|e| self.prefs.output.join(e).is_file()));
+        let mods_changed = built && self.built_mods().is_some_and(|b| b != self.prefs.mods);
         let outdated = built
-            && (self.prefs.fingerprint != self.source_stamp
+            && (mods_changed
+                || self.prefs.fingerprint != self.source_stamp
                 || self
                     .info
                     .as_ref()
@@ -532,7 +557,7 @@ impl Launcher {
             ui.set_min_width(ui.available_width());
             step(ui, "2", "Build", built && !outdated);
             ui.label(if outdated {
-                "Your game is built, but MKDSrust or your ROM changed since. Rebuild to update it."
+                "Your game is built, but MKDSrust, your ROM or your mod selection changed since. Rebuild to update it."
             } else if built {
                 "Your game is built and ready."
             } else {
@@ -1033,6 +1058,9 @@ impl Launcher {
                 }
             }
         }
+        if ui.button("Content packages (older .zip mods)").clicked() {
+            self.page = 7;
+        }
         if ui.button("Open saved build log").clicked() {
             let _ = std::process::Command::new("notepad.exe")
                 .arg(self.dir.join("launcher-build.log"))
@@ -1099,7 +1127,7 @@ impl Launcher {
             i.raw.dropped_files.iter().filter_map(|f| f.path.clone()).find(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")))
         });
         if let Some(path) = dropped {
-            self.page = 3;
+            self.page = 7;
             if self.busy {
                 self.message = "Busy: drop the mod again when the current task finishes.".into();
             } else {
@@ -1170,7 +1198,8 @@ impl Launcher {
             let frame = if self.page == 0 { egui::Frame::none().inner_margin(12.) } else { card() };
             frame.show(ui, |ui| { ui.set_min_width(ui.available_width()); match self.page {
                 0 => self.home(ui), 1 => self.settings_page(ui), 2 => self.controls_page(ui, ctx),
-                3 => self.mods_page(ui),
+                3 => self.catalog_page(ui),
+                7 => self.mods_page(ui),
                 4 => self.advanced(ui), 5 => self.about(ui), _ => self.setup(ui),
             } });       }); });
         if self.busy && ctx.input(|i| i.viewport().close_requested()) {
@@ -1181,6 +1210,10 @@ impl Launcher {
 }
 impl eframe::App for Launcher {
     fn update(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        self.poll_catalog();
+        if self.catalog_busy() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
         for event in ctx.input(|i| i.events.clone()) {
             if let egui::Event::Screenshot { image, .. } = event {
                 if let Some(frame) = self.smoke_frame {
@@ -1230,7 +1263,7 @@ impl eframe::App for Launcher {
             }
             self.mods.tab = browse_ui::Tab::Installed;
             if screen >= 11 {
-                self.page = 3;
+                self.page = 7;
                 self.mods.tab = if screen == 12 { browse_ui::Tab::Library } else { browse_ui::Tab::Browse };
                 self.smoke_detail(screen == 13);
             }
@@ -1331,6 +1364,7 @@ mod tests {
             settings: Settings::default(),
             controls: Controls::default(),
             page: 0,
+            catalog: Default::default(),
             info: None,
             title: String::new(),
             message: String::new(),

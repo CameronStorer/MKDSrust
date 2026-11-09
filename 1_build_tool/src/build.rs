@@ -91,6 +91,8 @@ pub struct RecompileOptions {
     /// Diagnostics only: compile the reference interpreter into the game (`--arm7-interpreted`). Shipped
     /// builds leave it out, so code without a lifted block is an error naming the pc, never interpreted.
     pub with_interpreter: bool,
+    /// Mods to compile in (ids from the checkout's `Mods/` folder, see [`mkds_builder::mods_repo`]).
+    pub mods: Vec<String>,
 }
 
 /// Every generated crate's `recomp` dependency without default features. Cargo unifies features across
@@ -755,6 +757,13 @@ pub fn recompile_with_toolchain(
         ));
     }
 
+    let mods = mkds_builder::mods_repo::resolve(&opts.source, &opts.mods)?;
+    if !mods.is_empty() {
+        log(format!(
+            "Mods: {}",
+            mods.iter().map(|m| format!("{} {}", m.name, m.version)).collect::<Vec<_>>().join(", ")
+        ));
+    }
     // 3. Game crate linking the generated table to the native host, then lock + compile.
     let native = opts.source.join("2_native_game/native");
     let native_lock = native.join("Cargo.lock");
@@ -796,6 +805,7 @@ pub fn recompile_with_toolchain(
         gdir.join("src/main.rs"),
         with_timing(
             GAME_MAIN
+                .replace("@MODS@", &mods.iter().map(|m| format!("{:?}.into()", m.id)).collect::<Vec<_>>().join(", "))
                 .replace("@ASSETS_SHA256@", assets_sha)
                 .replace("@ARM7@", arm7_entry)
                 .replace(
@@ -949,6 +959,7 @@ pub fn recompile_with_toolchain(
         "coverage_sha256": sha256_file(&bundle.join("coverage.csv"))?,
         "generated_source_sha256": generated_sha,
         "generated_source": if opts.keep_source { json!("source") } else { json!(null) },
+        "mods": mods.iter().map(|m| json!({ "id": m.id, "version": m.version })).collect::<Vec<_>>(),
         "assets": {
             "path": "assets",
             "format_version": mkds_builder::rip::FORMAT_VERSION,
@@ -1029,7 +1040,8 @@ fn run() -> Result<(), String> {
         }
     }
     let assets = assets.ok_or("usage: game --assets <folder> [--arm7-interpreted] [runtime options]")?;
-    let options = mkds_native::Options::from_args(rest)?;
+    let mut options = mkds_native::Options::from_args(rest)?;
+    options.mods = vec![@MODS@];
     let report = if arm7_interpreted {
         @INTERPRETED@
     } else {
@@ -1602,6 +1614,7 @@ exclude = [\"runtime\"]
 
     fn options(source: &Path, output: &Path) -> RecompileOptions {
         RecompileOptions {
+            mods: Vec::new(),
             source: source.to_path_buf(),
             output: output.to_path_buf(),
             allow_unverified: false,

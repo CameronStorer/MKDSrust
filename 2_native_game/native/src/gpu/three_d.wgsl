@@ -1,6 +1,6 @@
 struct Vertex { pos: vec4<f32>, color: vec4<f32>, uv: vec4<f32> }
 struct Triangle { edges: array<vec4<f32>, 3>, a: Vertex, b: Vertex, c: Vertex, flags: vec4<u32> }
-struct Frame { clear: vec4<f32>, scale: u32, pad0: u32, pad1: u32, pad2: u32 }
+struct Frame { clear: vec4<f32>, scale: u32, tiles_x: u32, pad1: u32, pad2: u32 }
 @group(0) @binding(0) var<storage, read> triangles: array<Triangle>;
 @group(0) @binding(1) var<storage, read> bins: array<u32>;
 @group(0) @binding(2) var texels: texture_2d_array<u32>;
@@ -31,7 +31,7 @@ fn replacement_axis(v: i32, wrapped: u32, sub: u32, size: u32, factor: u32, repe
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let pixel = (vec2<f32>(gid.xy) + 0.5) / f32(frame.scale);
-    let tile = (gid.y / frame.scale / 8u) * 32u + gid.x / frame.scale / 8u;
+    let tile = (gid.y / frame.scale / 8u) * frame.tiles_x + gid.x / frame.scale / 8u;
     var color = frame.clear;
     var depth = 3.402823e38;
     var opaque_id = 0u;

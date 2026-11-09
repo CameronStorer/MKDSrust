@@ -45,11 +45,15 @@ struct Triangle {
 struct Frame {
     clear: [f32; 4],
     scale: u32,
-    pad: [u32; 3],
+    /// Tiles per row: 32, plus 2 x margin / 8 for widescreen.
+    tiles_x: u32,
+    pad: [u32; 2],
 }
 
 pub struct Renderer3d {
     scale: u32,
+    /// Widescreen: extra columns (DS pixels, a multiple of 8) drawn on each side of the 256-pixel screen.
+    margin: u32,
     target: wgpu::Texture,
     pipeline: wgpu::ComputePipeline,
     vertices: wgpu::Buffer,
@@ -73,11 +77,17 @@ fn buffer(
 impl Renderer3d {
     pub const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
     pub fn new(gpu: &Gpu, scale: u32) -> Renderer3d {
+        Self::new_wide(gpu, scale, 0)
+    }
+    /// A renderer whose layer is `margin` DS pixels wider on each side (widescreen). The game's geometry already
+    /// extends past the screen edges, so the extra columns show more of the scene at the same vertical view.
+    pub fn new_wide(gpu: &Gpu, scale: u32, margin: u32) -> Renderer3d {
         assert!((1..=8).contains(&scale), "3D scale must be 1-8");
+        assert!(margin % 8 == 0 && margin <= 256, "widescreen margin must be a multiple of 8, at most 256");
         let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("3d layer"),
             size: wgpu::Extent3d {
-                width: 256 * scale,
+                width: (256 + 2 * margin) * scale,
                 height: 192 * scale,
                 depth_or_array_layers: 1,
             },
@@ -109,6 +119,7 @@ impl Renderer3d {
             });
         Renderer3d {
             scale,
+            margin,
             target,
             pipeline,
             vertices: buffer(
@@ -141,6 +152,9 @@ impl Renderer3d {
     pub fn scale(&self) -> u32 {
         self.scale
     }
+    pub fn margin(&self) -> u32 {
+        self.margin
+    }
     /// Renders `snap`'s 3D frame; the returned texture stays valid until the next call.
     pub fn render(&mut self, gpu: &Gpu, snap: &RenderSnapshot) -> &wgpu::Texture {
         self.render_frame(gpu, snap, None)
@@ -155,7 +169,9 @@ impl Renderer3d {
         self.cache.begin_frame(&tex, &pal);
         let mut textures = HashMap::new();
         let mut triangles = Vec::new();
-        let mut tiles: Vec<Vec<u32>> = (0..768).map(|_| Vec::new()).collect();
+        let tiles_x = (256 + 2 * self.margin as usize) / 8;
+        let width = (tiles_x * 8) as f64;
+        let mut tiles: Vec<Vec<u32>> = (0..tiles_x * 24).map(|_| Vec::new()).collect();
         let mut epoch = 0;
         let mut previous_mask = false;
         for p in &snap.polys {
@@ -167,7 +183,7 @@ impl Renderer3d {
                 epoch += 1;
             }
             previous_mask = mask;
-            let screen = project(p, snap.viewport);
+            let screen = project(p, snap.viewport, self.margin as f64);
             if screen.len() < 3 {
                 continue;
             }
@@ -206,7 +222,7 @@ impl Renderer3d {
                     .map(|v| v[0])
                     .fold(f64::NEG_INFINITY, f64::max)
                     .ceil()
-                    .min(255.0);
+                    .min(width - 1.0);
                 let min_y = v
                     .iter()
                     .map(|v| v[1])
@@ -259,18 +275,19 @@ impl Renderer3d {
                 });
                 for y in min_y as usize / 8..=max_y as usize / 8 {
                     for x in min_x as usize / 8..=max_x as usize / 8 {
-                        tiles[y * 32 + x].push(idx);
+                        tiles[y * tiles_x + x].push(idx);
                     }
                 }
             }
         }
         self.cache.upload(&gpu.device, &gpu.queue);
-        let mut bins = vec![0u32; 769];
+        let mut bins = vec![0u32; tiles.len() + 1];
         for (i, tile) in tiles.iter().enumerate() {
             bins[i] = bins.len() as u32;
             bins.extend(tile);
         }
-        bins[768] = bins.len() as u32;
+        let last = tiles.len();
+        bins[last] = bins.len() as u32;
         let upload = |dst: &mut wgpu::Buffer, data: &[u8], label| {
             if data.len() as u64 > dst.size() {
                 *dst = buffer(
@@ -303,7 +320,8 @@ impl Renderer3d {
                 (((cc >> 16) & 31) * 255 / 31) as f32 / 255.0,
             ],
             scale: self.scale,
-            pad: [0; 3],
+            tiles_x: tiles_x as u32,
+            pad: [0; 2],
         };
         gpu.queue
             .write_buffer(&self.uniform, 0, bytemuck::bytes_of(&frame));
@@ -342,7 +360,7 @@ impl Renderer3d {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &bind, &[]);
-            pass.dispatch_workgroups(32 * self.scale, 24 * self.scale, 1);
+            pass.dispatch_workgroups(tiles_x as u32 * self.scale, 24 * self.scale, 1);
         }
         gpu.queue.submit([encoder.finish()]);
         &self.target
@@ -351,7 +369,7 @@ impl Renderer3d {
 
 /// Deliberately the reference's combined near/w test, not a full GPU clip volume:
 /// it does not clip the far plane, and intersections use z+w even for w failures.
-fn project(p: &Polygon, viewport: [u8; 4]) -> Vec<[f64; 9]> {
+fn project(p: &Polygon, viewport: [u8; 4], margin: f64) -> Vec<[f64; 9]> {
     let verts: Vec<[f64; 9]> = p
         .verts
         .iter()
@@ -388,7 +406,7 @@ fn project(p: &Polygon, viewport: [u8; 4]) -> Vec<[f64; 9]> {
         .map(|v: [f64; 9]| {
             let iw = 1.0 / v[3];
             [
-                x1 + (v[0] / v[3] + 1.0) * 0.5 * (x2 - x1 + 1.0),
+                margin + x1 + (v[0] / v[3] + 1.0) * 0.5 * (x2 - x1 + 1.0),
                 191.0 - (y1 + (v[1] / v[3] + 1.0) * 0.5 * (y2 - y1 + 1.0)),
                 (v[2] / v[3] + 1.0) * 0.5,
                 iw,
@@ -565,6 +583,34 @@ mod tests {
                 assert_eq!(low[y * 256 + x], high[(y * 3 + 1) * 768 + x * 3 + 1]);
             }
         }
+    }
+
+    #[test]
+    fn widescreen_keeps_the_centre_and_extends_the_sides() {
+        let gpu = Gpu::headless().expect("GPU required for the widescreen regression");
+        let mut snap = snapshot();
+        // A triangle wider than the screen: its corners lie past both side edges.
+        let mut wide = triangle(0, 0x03e0, ATTR);
+        wide.verts[0].clip[0] = -6000;
+        wide.verts[1].clip[0] = 6000;
+        snap.polys = vec![triangle(1000, 0x7c1f, ATTR), wide];
+        let normal = gpu.read_rgba(Renderer3d::new(&gpu, 2).render(&gpu, &snap));
+        let (margin, scale) = (40usize, 2usize);
+        let mut renderer = Renderer3d::new_wide(&gpu, scale as u32, margin as u32);
+        let widened = gpu.read_rgba(renderer.render(&gpu, &snap));
+        let (w, nw) = ((256 + 2 * margin) * scale, 256 * scale);
+        assert_eq!(widened.len(), w * 192 * scale);
+        // Identical up to single pixels where an edge passes exactly through a pixel centre (the shifted x rounds
+        // that tie differently).
+        let differing = (0..192 * scale)
+            .flat_map(|y| (0..nw).map(move |x| (y, x)))
+            .filter(|&(y, x)| widened[y * w + margin * scale + x] != normal[y * nw + x])
+            .count();
+        assert!(differing * 2000 <= nw * 192 * scale, "{differing} centre pixels differ");
+        // The side columns show the part of the triangle the 4:3 screen cut off.
+        let row = 150 * scale;
+        assert_ne!(widened[row * w + 10] & 255, 0, "left side drawn");
+        assert_ne!(widened[row * w + w - 10] & 255, 0, "right side drawn");
     }
 
     #[test]
