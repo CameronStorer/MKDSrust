@@ -17,6 +17,11 @@ use crate::lift::{Func, Image};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write;
 
+#[path = "raise_emit_flags.rs"]
+pub(crate) mod flag_locals;
+
+pub fn flag_locals_enabled() -> bool { flag_locals::enabled() }
+
 /// Why a function stays T0.
 pub type Reason = &'static str;
 
@@ -52,6 +57,8 @@ struct Ctx<'a> {
     nospill: bool,
     /// Emitting a closed function's direct variant: exits return, nothing may spill.
     selfn: bool,
+    /// T3a: direct arithmetic flags live in Rust locals, with observable exit writes.
+    local_flags: bool,
     /// Original computed jumps, retained for the exact dispatcher fallback.
     tail_fallback: BTreeMap<(u32, u32), E>,
 }
@@ -80,6 +87,8 @@ pub struct DirectSig {
     pub params: u16,
     pub rets: u16,
     pub name: String,
+    /// Whether this variant still needs the CPU (default true unless proven otherwise).
+    pub cpu: bool,
 }
 
 /// What an emission found (no-spill mode): why the function is not closed (`None`: it may be), the
@@ -91,6 +100,11 @@ pub struct Facts {
     pub calls: Vec<u32>,
     pub live_in: u16,
     pub written: u16,
+    /// CPU use in the direct body, for the generator's signature fixed point.
+    pub cpu: bool,
+    pub cpu_before_flags: bool,
+    pub flag_calls_before: usize,
+    pub flag_calls_after: usize,
 }
 
 thread_local! {
@@ -1978,6 +1992,9 @@ fn infer_fields(blocks: &BTreeMap<u32, Block>, order: &[u32], preds: &BTreeMap<u
 fn typed_names(regs: &BTreeMap<u8, String>, module: &dyn Fn(&str) -> Option<String>) -> HashMap<u8, String> {
     const TAKEN: &[&str] = &["c", "m", "pc", "t", "x", "v", "th", "sc", "res", "ea", "ax", "v0", "v1", "l", "h", "target", "old", "iw", "sp", "lr", "R"];
     let mut used: BTreeSet<String> = TAKEN.iter().map(|s| s.to_string()).collect();
+    if flag_locals::enabled() && CURRENT.with(|c| c.borrow().1.is_some()) {
+        used.extend(["flag_n", "flag_z", "flag_c", "flag_v"].map(str::to_string));
+    }
     let mut out = HashMap::new();
     for (&r, st) in regs {
         let Some(base) = module(st) else { continue };
@@ -2324,7 +2341,7 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
             }
         }
         let live_in = lin[&f.entry];
-        LAST_FACTS.with(|x| *x.borrow_mut() = Some(Facts { escape, calls, live_in, written: rets }));
+        LAST_FACTS.with(|x| *x.borrow_mut() = Some(Facts { escape, calls, live_in, written: rets, cpu: true, ..Facts::default() }));
         if let Some(o) = &own {
             // the signature handed in must cover what this emission found (mkds_gen iterates to a fixed point)
             if o.params & live_in != live_in || o.rets & rets != rets {
@@ -2346,7 +2363,8 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
         Some(n) => format!("r{r} = `{n}` (a `{st}`)"),
         None => format!("r{r} points to a `{st}`"),
     }).collect();
-    let ctx = Ctx { blocks: &blocks, rpo, idom, merge, header, children, names, notes, switches: &switches, fields: typed.fields, budget_flags, native_timing: cost.is_none() && crate::lift::timing_native(), nospill, selfn: own.is_some(), tail_fallback };
+    let flag_plan = if own.is_some() && flag_locals::enabled() { flag_locals::for_function(&blocks, f.entry, &order, &live, &sf) } else { None };
+    let mut ctx = Ctx { local_flags: flag_plan.is_some(), blocks: &blocks, rpo, idom, merge, header, children, names, notes, switches: &switches, fields: typed.fields, budget_flags, native_timing: cost.is_none() && crate::lift::timing_native(), nospill, selfn: own.is_some(), tail_fallback };
     ir::set_reg_names(reg_names);
     let (own_args, own_ret) = match own_typed {
         Some(o) => (o.args, o.ret),
@@ -2355,7 +2373,19 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
     LAST_TYPES.with(|t| *t.borrow_mut() = Types { args: typed.args.clone(), calls: typed.calls.clone(), own_args, own_ret, callees: typed.callees.clone() });
     ir::take_field_uses();
     let mut body = String::new();
+    let local_flags = ctx.local_flags;
+    ctx.local_flags = false;
     do_tree(&ctx, f.entry, 2, &mut body);
+    let cpu_before_flags = flag_locals::uses_cpu(&body);
+    let flag_calls_before = flag_locals::call_count(&body);
+    ctx.local_flags = local_flags;
+    if local_flags {
+        body.clear();
+        let _ = ir::take_field_uses();
+        ir::set_local_flags(true);
+        do_tree(&ctx, f.entry, 2, &mut body);
+    }
+    ir::set_local_flags(false);
     ir::set_fields(Default::default());
 
     let mut s = String::new();
@@ -2370,7 +2400,8 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
         let mut d = s.clone();
         let _ = writeln!(d, "#[allow(non_snake_case, unused_variables, unused_assignments, unused_mut, unreachable_code, unused_parens, unused_braces, unused_macros, unused_labels, clippy::all)]");
         let ps: Vec<String> = params.iter().map(|&i| format!("mut {}: u32", ir::reg_name(i))).collect();
-        let _ = writeln!(d, "pub fn {}(c: &mut recomp::rt::Cpu, m: &mut dyn recomp::rt::Bus{}{}) -> {ret_ty} {{", o.name, if ps.is_empty() { "" } else { ", " }, ps.join(", "));
+        let cpu_param = if o.cpu { "c: &mut recomp::rt::Cpu, " } else { "" };
+        let _ = writeln!(d, "pub fn {}({cpu_param}m: &mut dyn recomp::rt::Bus{}{}) -> {ret_ty} {{", o.name, if ps.is_empty() { "" } else { ", " }, ps.join(", "));
         let _ = writeln!(d, "    #[allow(unused_imports)] use recomp::rt as R;\n    #[allow(unused_imports)] use recomp::arm::interwork as iw;\n    #[allow(unused_imports)] use recomp::rt::Mem as _;");
         let locals: Vec<u8> = all.iter().copied().filter(|i| o.params >> i & 1 == 0).collect();
         if !locals.is_empty() {
@@ -2386,8 +2417,18 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
             }
             let _ = writeln!(d, "    let ({}) = ({});", v.iter().map(|x| format!("mut {x}")).collect::<Vec<_>>().join(", "), v.iter().map(|_| "0u32").collect::<Vec<_>>().join(", "));
         }
+        let flag_init = flag_plan.map_or(String::new(), |(input, _)| flag_locals::init(input));
+        let flag_exit = flag_plan.map_or(String::new(), |(_, output)| flag_locals::sync(output, false));
+        if !flag_init.is_empty() { let _ = writeln!(d, "    {flag_init}"); }
+        let cpu = [&body, &flag_init, &flag_exit].iter().any(|s| flag_locals::uses_cpu(s));
+        LAST_FACTS.with(|x| { if let Some(f) = &mut *x.borrow_mut() {
+            f.cpu = cpu;
+            f.cpu_before_flags = cpu_before_flags;
+            f.flag_calls_before = flag_calls_before;
+            f.flag_calls_after = flag_locals::call_count(&body);
+        } });
         let back = if rets.is_empty() { "t".to_string() } else { format!("(t, {})", rets.iter().map(|&i| ir::reg_name(i)).collect::<Vec<_>>().join(", ")) };
-        let _ = writeln!(d, "    macro_rules! exit {{ ($e:expr) => {{{{ let t: u32 = $e; return {back}; }}}} }}");
+        let _ = writeln!(d, "    macro_rules! exit {{ ($e:expr) => {{{{ let t: u32 = $e; {flag_exit}return {back}; }}}} }}");
         for mac in ["spill", "reload", "leave", "poll"] {
             let _ = writeln!(d, "    macro_rules! {mac} {{ ($($x:tt)*) => {{ compile_error!(\"{mac} in a direct function\") }} }}");
         }
@@ -2401,11 +2442,12 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
         let _ = writeln!(s, "    #[allow(unused_imports)] use recomp::rt as R;");
         let _ = writeln!(s, "    if pc != {:#X} || !R::t1_enabled({:#X}) {{ return f_{id}(c, m, pc); }}", f.entry, f.entry);
         let args: String = params.iter().map(|&i| format!(", c.r[{i}]")).collect();
+        let cpu_arg = if o.cpu { "c, " } else { "" };
         if rets.is_empty() {
-            let _ = writeln!(s, "    let x = direct::{}(c, m{args});", o.name);
+            let _ = writeln!(s, "    let x = direct::{}({cpu_arg}m{args});", o.name);
         } else {
             let vs: Vec<String> = (0..rets.len()).map(|k| format!("v{k}")).collect();
-            let _ = writeln!(s, "    let (x, {}) = direct::{}(c, m{args});", vs.join(", "), o.name);
+            let _ = writeln!(s, "    let (x, {}) = direct::{}({cpu_arg}m{args});", vs.join(", "), o.name);
             let sets: String = rets.iter().zip(&vs).map(|(i, v)| format!("c.r[{i}] = {v}; ")).collect();
             let _ = writeln!(s, "    {}", sets.trim_end());
         }
@@ -2614,11 +2656,14 @@ fn stmt_code(c: &Ctx, x: u32, s: &S, depth: usize, out: &mut String) {
         S::Goto(E::Const(t)) if c.selfn && direct_for(*t).is_some() => {
             let d = direct_for(*t).unwrap();
             let args: String = mask_regs(d.params).map(|i| format!(", {}", ir::reg_name(i))).collect();
-            let call = format!("{}(c, m{args})", d.name);
+            let cpu_arg = if d.cpu { "c, " } else { "" };
+            let sync = if c.local_flags && d.cpu { flag_locals::sync(crate::raise::NZCV, false) } else { String::new() };
+            let reload = if c.local_flags && d.cpu { flag_locals::sync(crate::raise::NZCV, true) } else { String::new() };
+            let call = format!("{}({cpu_arg}m{args})", d.name);
             let rets: Vec<String> = mask_regs(d.rets).map(ir::reg_name).collect();
             let stmt = if rets.is_empty() { format!("let x = {call};") }
                 else { format!("let x: u32; (x, {}) = {call};", rets.join(", ")) };
-            line(out, &format!("{stmt} exit!(x);"));
+            line(out, &format!("{sync}{stmt} {reload}exit!(x);"));
         }
         S::Goto(e) => {
             let original = match e { E::Const(t) => c.tail_fallback.get(&(x, *t)).unwrap_or(e), _ => e };
@@ -2634,11 +2679,14 @@ fn stmt_code(c: &Ctx, x: u32, s: &S, depth: usize, out: &mut String) {
             let name = (c.names)(*t).map(|n| format!(" // {n}")).unwrap_or_default();
             let args: String = mask_regs(d.params).map(|i| format!(", {}", ir::reg_name(i))).collect();
             let path = if c.selfn { d.name.clone() } else { format!("direct::{}", d.name) };
-            let call = format!("{path}(c, m{args})");
+            let cpu_arg = if d.cpu { "c, " } else { "" };
+            let sync = if c.local_flags && d.cpu { flag_locals::sync(crate::raise::NZCV, false) } else { String::new() };
+            let reload = if c.local_flags && d.cpu { flag_locals::sync(crate::raise::NZCV, true) } else { String::new() };
+            let call = format!("{path}({cpu_arg}m{args})");
             let rets: Vec<String> = mask_regs(d.rets).map(ir::reg_name).collect();
             let stmt = if rets.is_empty() { format!("let x = {call};") } else { format!("let x: u32; (x, {}) = {call};", rets.join(", ")) };
             let bad = if c.selfn { format!("R::bad_return(x, {ret:#X})") } else { "exit!(x)".into() };
-            line(out, &format!("{stmt} if x != {ret:#X} {{ {bad}; }}{name}"))
+            line(out, &format!("{sync}{stmt} if x != {ret:#X} {{ {bad}; }}{reload}{name}"))
         }
         S::IfSome(e, _) if c.nospill && block_return(s).is_some() => {
             line(out, &format!("{} exit!(iw(v));{}", inline_block(e), block_note(e)))

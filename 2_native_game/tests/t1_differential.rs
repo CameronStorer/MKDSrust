@@ -257,7 +257,7 @@ fn constant_veneer_chain_calls_directly_and_matches_translation() {
     let funcs: Vec<_> = entries.iter().map(|&e| discover(&img, e, Some((e & !1, (e & !1) + if e & 1 != 0 { 4 } else { 8 })), 100).unwrap()).collect();
     // Deliberately return every register: this also checks the scratch register
     // loaded by each veneer survives the tail call.
-    let sigs: Vec<_> = (0..3).map(|i| DirectSig { params: 0x7fff, rets: 0x7fff, name: format!("d_v{i}") }).collect();
+    let sigs: Vec<_> = (0..3).map(|i| DirectSig { cpu: true, params: 0x7fff, rets: 0x7fff, name: format!("d_v{i}") }).collect();
     set_direct(entries.iter().zip(&sigs).map(|(&e, d)| (e, vec![("arm9_main".into(), d.clone())])).collect());
     let mut src = String::from("#![allow(unused)]\nmod direct { pub use super::*; }\n");
     for i in 0..3 {
@@ -322,7 +322,7 @@ fn veneer_proof_keeps_unproven_and_overlay_targets_on_dispatcher() {
     let img = Image::new(base, &image);
     let f = discover(&img, base, Some((base, base + 8)), 100).unwrap();
     set_direct([(base + 0x101, vec![("ov9_other".into(), DirectSig {
-        params: 1 << 14, rets: 1, name: "unavailable".into(),
+        cpu: true, params: 1 << 14, rets: 1, name: "unavailable".into(),
     })])].into_iter().collect());
     let code = emit_t1(&f, "overlay_veneer", Some(&img)).unwrap();
     let facts = take_facts().unwrap();
@@ -336,9 +336,31 @@ fn veneer_proof_keeps_unproven_and_overlay_targets_on_dispatcher() {
 /// arguments and results) behind its T1 wrapper, against the translation with a budget so large no slice
 /// ends: same exit pc, CPU state, memory writes and calls. Returns (source, raised, direct).
 fn build_nospill_checks(funcs: &[(String, u32, Func)], image: &[u8], base: u32, seeds: u32) -> (String, usize, usize) {
+    build_nospill_checks_flags(funcs, image, base, seeds, None)
+}
+
+fn build_nospill_checks_flags(funcs: &[(String, u32, Func)], image: &[u8], base: u32, seeds: u32, returns: Option<u8>) -> (String, usize, usize) {
     use recomp::raise_emit::{set_current, set_direct, take_direct, take_facts, DirectSig};
     let _lock = emit_lock();
     let _native = NativeTiming::on();
+    // Every emitter test holds EMIT; restore both globals before releasing it.
+    struct FlagMode(Option<std::ffi::OsString>);
+    impl Drop for FlagMode {
+        fn drop(&mut self) {
+            recomp::raise::set_flag_context(None);
+            unsafe { match &self.0 { Some(v) => std::env::set_var("MKDS_FLAG_LOCALS", v), None => std::env::remove_var("MKDS_FLAG_LOCALS") } }
+        }
+    }
+    let _mode = returns.map(|mask| {
+        let saved = FlagMode(std::env::var_os("MKDS_FLAG_LOCALS"));
+        unsafe { std::env::set_var("MKDS_FLAG_LOCALS", "1"); }
+        recomp::raise::set_flag_context(Some(recomp::raise::FlagContext {
+            ret: funcs.iter().map(|(_, e, _)| (e & !1, mask)).collect(),
+            ..Default::default()
+        }));
+        saved
+    });
+    let return_mask = returns.unwrap_or(15);
     assert!(recomp::raise_emit::nospill_enabled(), "MKDS_SPILL=keep is set");
     let img = Image::new(base, image);
     let none = |_: u32| None;
@@ -350,13 +372,23 @@ fn build_nospill_checks(funcs: &[(String, u32, Func)], image: &[u8], base: u32, 
         set_current("arm9_main", None);
         if emit_t1_full(f, name, Some(&img), &notes, None).is_ok() {
             if let Some(x) = take_facts() {
-                if x.escape.is_none() && x.calls.is_empty() {
-                    sigs.insert(*entry, DirectSig { params: x.live_in, rets: x.written, name: format!("d_{name}") });
+                if x.escape.is_none() && (x.calls.is_empty() || returns.is_some() && x.calls.iter().all(|t| funcs.iter().any(|(_, e, _)| e == t))) {
+                    sigs.insert(*entry, DirectSig { cpu: true, params: x.live_in, rets: x.written, name: format!("d_{name}") });
                 }
             }
         }
     }
     set_direct(sigs.iter().map(|(&e, d)| (e, vec![("arm9_main".to_string(), d.clone())])).collect());
+    if recomp::raise_emit::flag_locals_enabled() {
+        for (name, entry, f) in funcs {
+            let Some(d) = sigs.get_mut(entry) else { continue };
+            set_current("arm9_main", Some(d.clone()));
+            emit_t1_full(f, name, Some(&img), &notes, None).unwrap();
+            d.cpu = take_facts().unwrap().cpu;
+            let _ = take_direct();
+        }
+        set_direct(sigs.iter().map(|(&e, d)| (e, vec![("arm9_main".to_string(), d.clone())])).collect());
+    }
     let mut src = String::from("#![allow(non_upper_case_globals, unused)]\nstatic IMAGE: &[u8] = include_bytes!(\"image.bin\");\nmod direct { pub use super::*; }\n");
     // A direct call executes the guest leaf, whereas Ram::call deliberately
     // simulates an unknown callee with random clobbers. Give T0 the same real
@@ -419,6 +451,11 @@ fn check_{name}() {{
         if p == recomp::rt::BUDGET_EXHAUSTED || q == recomp::rt::BUDGET_EXHAUSTED {{ continue; }}
         assert_eq!(p, q, "{name} exit, seed {{seed}}");
         a.budget = 0; b.budget = 0;
+        // The test's whole-program context explicitly marks other return flags dead.
+        if {return_mask} & 1 == 0 {{ a.n = b.n; }}
+        if {return_mask} & 2 == 0 {{ a.z = b.z; }}
+        if {return_mask} & 4 == 0 {{ a.c = b.c; }}
+        if {return_mask} & 8 == 0 {{ a.v = b.v; }}
         assert_eq!(a.state(), b.state(), "{name} state, seed {{seed}}");
         assert_eq!(x.0.writes, y.0.writes, "{name} writes, seed {{seed}}");
         assert_eq!(x.0.events, y.0.events, "{name} calls, seed {{seed}}");
@@ -506,4 +543,78 @@ fn nospill_rom_functions_match_their_translation() {
     eprintln!("{raised} ROM functions raised without spills, {direct} of them closed leaves called through their direct variant");
     assert_eq!(raised, funcs.len());
     compile_and_run(&src, &image, "nospill_rom");
+}
+
+/// Carry chains, signed conditions, shifter carry, and long/half multiplies from
+/// random states and arithmetic edge values. Test both observable and dead returns.
+#[test]
+fn direct_flag_locals_preserve_arithmetic_and_drop_cpu_when_flags_do_not_escape() {
+    let base = 0x0200_0000u32;
+    let mut image = Vec::new();
+    let mut ranges = Vec::new();
+    let mut add = |name: &str, words: &[u32]| {
+        let entry = base + image.len() as u32;
+        image.extend(words.iter().flat_map(|w| w.to_le_bytes()));
+        ranges.push((name.to_string(), entry, base + image.len() as u32));
+    };
+    // adds; movlt; movge; adcs; sbcs; movs ror; adc; bx lr
+    add("arith_flags", &[0xE0900001, 0xB3A06001, 0xA3A06002, 0xE0B11002,
+        0xE0D22003, 0xE1B030E3, 0xE0A44005, 0xE12FFF1E]);
+    // Initial carry must come from the caller, including zero-minus-borrow.
+    add("incoming_carry", &[0xE0D00001, 0xE0B11002, 0xE12FFF1E]);
+    for signed in [false, true] {
+        for accumulate in [false, true] {
+            let mul = 0xE0910392 | ((signed as u32) << 22) | ((accumulate as u32) << 21);
+            add(&format!("long_{signed}_{accumulate}"), &[mul, 0x03A04001, 0x43A05001, 0xE12FFF1E]);
+        }
+    }
+    // SMULBB, SMULWT, SMLABB (the last keeps its sticky Q helper).
+    add("half_products", &[0xE1600281, 0xE12305E4, 0xE1069887, 0xE12FFF1E]);
+    // Conditional definitions at a join must keep incoming flags on the untaken path.
+    add("conditional_flags", &[0x00900001, 0xE0A22003, 0xE12FFF1E]);
+    let img = Image::new(base, &image);
+    let funcs: Vec<_> = ranges.into_iter().map(|(name, e, end)|
+        (name, e, discover(&img, e, Some((e, end)), 100).unwrap())).collect();
+    for mask in [15, 0] {
+        let (mut src, raised, direct) = build_nospill_checks_flags(&funcs, &image, base, 2048, Some(mask));
+        assert_eq!((raised, direct), (funcs.len(), funcs.len()));
+        assert!(src.contains("overflowing_add"));
+        assert!(src.contains("overflowing_sub"));
+        assert!(src.contains("__flag_product"));
+        assert!(src.contains("R::half_mul(c, recomp::arm::HalfMul::Smla"), "sticky Q stays observable");
+        if mask == 0 {
+            assert!(src.contains("pub fn d_arith_flags(m:"), "internal flags need no CPU");
+            assert!(src.contains("pub fn d_incoming_carry(c:"), "incoming carry keeps the CPU");
+        } else {
+            assert!(src.contains("c.n = flag_n;"), "observable return flags are materialized");
+        }
+        src = src.replace("if seed % 3 == 0 { a.r[0] = 0; a.r[1] = 1; }", r#"
+        if seed < 256 {
+            let edge = [0, 1, u32::MAX, 0x7fffffff, 0x80000000, 0xffff, 0xffff0000, 2];
+            for i in 0..13 { a.r[i] = edge[((seed as usize / 16) + i) % edge.len()]; }
+        }"#);
+        compile_and_run(&src, &image, &format!("direct_flags_{mask}"));
+    }
+}
+
+#[test]
+fn direct_flag_locals_synchronize_observable_calls_and_keep_locals_across_cpu_free_calls() {
+    let base = 0x0200_0000u32;
+    // push {lr}; adds; bl pure; adcs; bl flags; adcs; pop {lr}; bx lr.
+    // The first callee has no CPU argument and preserves local flags. The second
+    // reads the carry and returns flags the caller uses, requiring a boundary sync.
+    let image: Vec<u8> = [0xE92D4000u32, 0xE0900001, 0xEB000004, 0xE0B11002,
+        0xEB000004, 0xE0B22003, 0xE8BD4000, 0xE12FFF1E,
+        0xE0800001, 0xE12FFF1E, 0xE0D00001, 0xE12FFF1E]
+        .iter().flat_map(|w| w.to_le_bytes()).collect();
+    let img = Image::new(base, &image);
+    let funcs: Vec<_> = [("call_flags", 0, 32), ("pure", 32, 40), ("return_flags", 40, 48)]
+        .into_iter().map(|(name, start, end)| (name.to_string(), base + start,
+            discover(&img, base + start, Some((base + start, base + end)), 100).unwrap())).collect();
+    let (src, raised, direct) = build_nospill_checks_flags(&funcs, &image, base, 2048, Some(15));
+    assert_eq!((raised, direct), (3, 3));
+    assert!(src.contains("pub fn d_pure(m:"));
+    assert!(src.contains("d_pure(m,"));
+    assert!(src.contains("flag_c = c.c;"));
+    compile_and_run(&src, &image, "direct_flag_calls");
 }

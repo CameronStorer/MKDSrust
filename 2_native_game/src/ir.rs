@@ -12,6 +12,9 @@ use crate::arm::{pc_read, Decoded, HalfMul, Inst, Off, Op2};
 use crate::lift::Image;
 use std::fmt::Write;
 
+#[path = "raise_emit_flag_arithmetic.rs"]
+mod flag_arithmetic;
+
 /// Statement-local temporaries. Their names are part of the T0 text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Tmp {
@@ -588,6 +591,9 @@ fn prec(e: &E) -> u8 {
 }
 
 fn flag(f: Flag) -> &'static str {
+    if LOCAL_FLAGS.with(|l| l.get()) {
+        return match f { Flag::N => "flag_n", Flag::Z => "flag_z", Flag::C => "flag_c", Flag::V => "flag_v" };
+    }
     match f {
         Flag::N => "c.n",
         Flag::Z => "c.z",
@@ -598,6 +604,9 @@ fn flag(f: Flag) -> &'static str {
 
 /// The condition `cc` as a Rust expression over the flags.
 pub fn cond_expr(cc: u8) -> &'static str {
+    if LOCAL_FLAGS.with(|l| l.get()) {
+        return ["flag_z", "!flag_z", "flag_c", "!flag_c", "flag_n", "!flag_n", "flag_v", "!flag_v", "(flag_c && !flag_z)", "(!flag_c || flag_z)", "(flag_n == flag_v)", "(flag_n != flag_v)", "(!flag_z && flag_n == flag_v)", "(flag_z || flag_n != flag_v)", "true", "true"][cc as usize & 15];
+    }
     ["c.z", "!c.z", "c.c", "!c.c", "c.n", "!c.n", "c.v", "!c.v", "(c.c && !c.z)", "(!c.c || c.z)", "(c.n == c.v)", "(c.n != c.v)", "(!c.z && c.n == c.v)", "(c.z || c.n != c.v)", "true", "true"][cc as usize & 15]
 }
 
@@ -621,7 +630,13 @@ fn args(out: &mut String, a: &[E]) {
     }
 }
 
+/// Scoped by the direct emitter; never enabled while printing exact code.
+pub(crate) fn set_local_flags(on: bool) {
+    LOCAL_FLAGS.with(|l| l.set(on));
+}
+
 thread_local! {
+    static LOCAL_FLAGS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Print registers as the T1 local variables (`r0`.., `sp`, `lr`) instead of `c.r[i]`.
     static LOCALS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// Named struct fields by offset for the function being printed (T1 accessors), each with the
@@ -878,7 +893,7 @@ fn expr(out: &mut String, e: &E) {
         E::Rrx(a) => {
             out.push_str("((");
             sub(out, a, 9);
-            out.push_str(" >> 1) | ((c.c as u32) << 31))");
+            let _ = write!(out, " >> 1) | (({} as u32) << 31))", flag(Flag::C));
         }
         E::Bit(a, k) => {
             out.push('(');
@@ -975,6 +990,13 @@ fn expr(out: &mut String, e: &E) {
             out.push(')');
         }
         E::Call(h, a) => {
+            if LOCAL_FLAGS.with(|l| l.get()) && matches!(h, H::Subs | H::Adds | H::Adcs | H::Sbcs | H::MulLong | H::HalfMul) {
+                let args: Vec<String> = a.iter().map(|e| { let mut s = String::new(); expr(&mut s, e); s }).collect();
+                if let Some(text) = flag_arithmetic::helper(*h, &args) {
+                    out.push_str(&text);
+                    return;
+                }
+            }
             out.push_str(match h {
                 H::Subs => "R::subs(",
                 H::Adds => "R::adds(",
@@ -1032,6 +1054,12 @@ fn stmt(out: &mut String, s: &S) {
             out.push(';');
         }
         S::SetNz(e) => {
+            if LOCAL_FLAGS.with(|l| l.get()) {
+                let mut value = String::new();
+                expr(&mut value, e);
+                out.push_str(&flag_arithmetic::nz(&value));
+                return;
+            }
             out.push_str("R::set_nz(c, ");
             expr(out, e);
             out.push_str(");");
