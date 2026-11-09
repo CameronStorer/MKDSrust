@@ -238,9 +238,6 @@ impl Launcher {
         if !app.prefs.rom.as_os_str().is_empty() {
             app.inspect(app.prefs.rom.clone());
         }
-        if !app.prefs.setup_done {
-            app.page = 6;
-        }
         // mkdsrust:// links from the site's "Install with MKDSrust" button (per user, repaired if the exe moved)
         if app.smoke_frame.is_none() {
             if let Ok(exe) = std::env::current_exe() {
@@ -452,189 +449,165 @@ impl Launcher {
     }
     fn home(&mut self, ui: &mut egui::Ui) {
         path_warning(ui);
-        let width = ui.available_width();
-        let (hero, _) = ui.allocate_exact_size(egui::vec2(width, 220.), egui::Sense::hover());
-        let mut mesh = egui::Mesh::default();
-        for (pos, color) in [
-            (hero.left_top(), Color32::from_rgb(105, 48, 37)),
-            (hero.right_top(), Color32::from_rgb(23, 81, 81)),
-            (hero.right_bottom(), Color32::from_rgb(27, 49, 59)),
-            (hero.left_bottom(), Color32::from_rgb(49, 37, 40)),
-        ] {
-            mesh.colored_vertex(pos, color);
-        }
-        mesh.add_triangle(0, 1, 2);
-        mesh.add_triangle(0, 2, 3);
-        ui.painter().add(mesh);
-        for n in 0..8 {
-            let x = hero.right() - n as f32 * 48.;
-            ui.painter().line_segment(
-                [
-                    egui::pos2(x, hero.top()),
-                    egui::pos2(x - 110., hero.bottom()),
-                ],
-                egui::Stroke::new(1., Color32::from_white_alpha(14)),
-            );
-        }
-        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(hero.shrink(24.)), |ui| {
-            ui.label(
-                RichText::new("BUILT BY YOU. READY TO RACE.")
-                    .size(11.)
-                    .color(TEAL),
-            );
-            ui.add(egui::Image::new(&self.branding).fit_to_exact_size(egui::vec2(340., 85.)));
-            ui.label(
-                RichText::new("Your game, on your desktop.")
-                    .size(26.)
-                    .strong(),
-            );
-            ui.label("Bring your ROM. Build locally. Make it yours.");
-        });
-        ui.add_space(12.);
-        let built = std::fs::read(self.prefs.output.join("manifest.json"))
-            .ok()
-            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-            .is_some_and(|m| {
-                m["executable"]
-                    .as_str()
-                    .is_some_and(|e| self.prefs.output.join(e).is_file())
+        ui.horizontal(|ui| {
+            ui.add(egui::Image::new(&self.branding).fit_to_exact_size(egui::vec2(220., 55.)));
+            ui.vertical(|ui| {
+                ui.add_space(8.);
+                ui.label(RichText::new("Mario Kart DS, rebuilt natively from your own ROM.").size(17.).strong());
+                ui.label(
+                    RichText::new("Your ROM stays on your computer. Nothing from Nintendo is downloaded or shared.")
+                        .color(Color32::GRAY),
+                );
             });
+        });
+        ui.add_space(14.);
+        let manifest = std::fs::read(self.prefs.output.join("manifest.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
+        let built = manifest
+            .as_ref()
+            .is_some_and(|m| m["executable"].as_str().is_some_and(|e| self.prefs.output.join(e).is_file()));
         let outdated = built
             && (self.prefs.fingerprint != self.source_stamp
-                || self.info.as_ref().is_some_and(|i| {
-                    std::fs::read(self.prefs.output.join("manifest.json"))
-                        .ok()
-                        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-                        .is_none_or(|m| m["rom"]["sha256"] != i.sha256)
+                || self
+                    .info
+                    .as_ref()
+                    .is_some_and(|i| manifest.as_ref().is_none_or(|m| m["rom"]["sha256"] != i.sha256)));
+        let verified = self.info.as_ref().is_some_and(|i| i.reference_match);
+        let step = |ui: &mut egui::Ui, n: &str, title: &str, done: bool| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(n).size(13.).strong().color(if done {
+                    TEAL
+                } else {
+                    Color32::from_rgb(245, 194, 74)
                 }));
-        ui.label(
-            RichText::new(if outdated {
-                "OUTDATED - rebuild recommended"
-            } else if built {
-                "BUILT - ready to play"
-            } else {
-                "NOT BUILT - start Setup to prepare your game"
-            })
-            .color(Color32::from_rgb(95, 210, 205)),
-        );
-        let play_response = ui.add_enabled(
-            !self.busy,
-            egui::Button::new(RichText::new(if built { "▶  Play" } else { "▶  Set up" }).size(30.))
-                .fill(Color32::from_rgb(206, 66, 43))
-                .rounding(14.)
-                .min_size(egui::vec2(300., 88.)),
-        );
-        if play_response.hovered() {
-            ui.painter().rect_stroke(
-                play_response.rect.expand(3.),
-                16.,
-                egui::Stroke::new(3., TEAL),
-            );
-        }
-        if play_response.clicked() {
-            if built {
-                self.play();
-            } else {
-                self.page = 6;
-                self.wizard = 0;
-            }
-        }
-        ui.add_space(18.);
-        let tools = portable::ready(&self.dir) || self.prefs.system_toolchain;
-        let saves = mkds_builder::settings::save_folder();
-        let states = [
-            ("Game", if built { "Ready" } else { "Not built" }, built),
-            (
-                "Toolchain",
-                if tools { "Ready" } else { "Needs setup" },
-                tools,
-            ),
-            (
-                "Saves",
-                if saves.as_ref().is_some_and(|p| p.is_dir()) {
-                    "Available"
-                } else {
-                    "No saves yet"
-                },
-                true,
-            ),
-            (
-                "Mode",
-                if self.prefs.accuracy {
-                    "Accuracy"
-                } else {
-                    "Native"
-                },
-                true,
-            ),
-        ];
-        ui.columns(4, |columns| {
-            for (i, (name, value, ready)) in states.iter().enumerate() {
-                card().inner_margin(14.).show(&mut columns[i], |ui| {
-                    ui.set_min_width(ui.available_width());
-                    ui.horizontal(|ui| {
-                        glyph(ui, i, TEAL);
-                        ui.label(*name);
-                    });
-                    ui.horizontal(|ui| {
-                        let (r, _) =
-                            ui.allocate_exact_size(egui::vec2(8., 8.), egui::Sense::hover());
-                        ui.painter().circle_filled(
-                            r.center(),
-                            3.,
-                            if *ready {
-                                TEAL
-                            } else {
-                                Color32::from_rgb(242, 189, 83)
-                            },
-                        );
-                        ui.strong(*value);
-                    });
-                });
-            }
-        });
-        ui.add_space(12.);
+                ui.label(RichText::new(title).size(16.).strong());
+                if done {
+                    ui.label(RichText::new("✓").color(TEAL));
+                }
+            });
+        };
+
+        // 1. ROM
         card().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            ui.label(RichText::new("RECENT ACTIVITY").size(11.).color(TEAL));
-            ui.label(if self.title.is_empty() {
-                "Your locally built game"
-            } else {
-                &self.title
-            });
-            ui.label(format!(
-                "Last built: {}",
-                if self.prefs.last_build.is_empty() {
-                    "No builds yet".to_string()
-                } else {
-                    build_date(&self.prefs.last_build)
+            step(ui, "1", "Your ROM", verified);
+            match &self.info {
+                Some(info) => {
+                    ui.label(format!("{}  ·  {}  ·  revision {}", self.title, info.game_code, info.revision));
+                    let text = if verified {
+                        "Verified: Mario Kart DS (USA), revision 0.".to_string()
+                    } else {
+                        format!("Not supported: {}", info.compatibility)
+                    };
+                    ui.label(RichText::new(text).color(if verified { TEAL } else { Color32::from_rgb(242, 120, 83) }));
                 }
-            ));
-            ui.label(self.prefs.output.display().to_string());
-            if ui.button("Set up or rebuild game").clicked() {
-                self.page = 6;
-                self.wizard = 1;
+                None if self.prefs.rom.as_os_str().is_empty() => {
+                    ui.label("Choose your own Mario Kart DS (USA) cartridge dump (.nds).");
+                }
+                None if self.busy => {
+                    ui.label(RichText::new("Checking…").color(Color32::GRAY));
+                }
+                None => {
+                    ui.label(
+                        RichText::new("This ROM could not be opened. It may have moved: choose it again.")
+                            .color(Color32::from_rgb(242, 120, 83)),
+                    );
+                }
+            }
+            if !self.prefs.rom.as_os_str().is_empty() {
+                ui.small(self.prefs.rom.display().to_string());
+            }
+            let label = if self.info.is_some() { "Choose a different ROM…" } else { "Choose ROM…" };
+            if ui.add_enabled(!self.busy, egui::Button::new(label)).clicked() {
+                if let Some(p) = rfd::FileDialog::new().add_filter("Nintendo DS ROM", &["nds"]).pick_file() {
+                    self.inspect(p);
+                }
             }
         });
-        ui.horizontal_wrapped(|ui| {
-            for (label, path) in [
-                ("Game folder", self.prefs.output.clone()),
-                ("Saves", saves.unwrap_or_else(|| self.dir.join("saves"))),
-            ] {
-                if ui
-                    .add_enabled(!path.as_os_str().is_empty(), egui::Button::new(label))
-                    .clicked()
-                {
-                    if let Err(e) = std::fs::create_dir_all(&path).and_then(|_| {
-                        std::process::Command::new("explorer.exe")
-                            .arg(path)
-                            .spawn()
-                            .map(|_| ())
-                    }) {
+        ui.add_space(10.);
+
+        // 2. Build
+        card().show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            step(ui, "2", "Build", built && !outdated);
+            ui.label(if outdated {
+                "Your game is built, but MKDSrust or your ROM changed since. Rebuild to update it."
+            } else if built {
+                "Your game is built and ready."
+            } else {
+                "Translates the game into Rust and compiles it on this computer. The first build downloads a private Rust toolchain (several hundred MB) and takes several minutes; later builds are faster."
+            });
+            ui.horizontal(|ui| {
+                let label = if built { "Rebuild" } else { "Build game" };
+                if ui.add_enabled(verified && !self.busy, egui::Button::new(label)).clicked() {
+                    self.start_build();
+                }
+                if ui.add_enabled(!self.busy, egui::Button::new("Output folder…")).clicked() {
+                    if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                        self.prefs.output = p;
+                        self.save();
+                    }
+                }
+            });
+            ui.small(self.prefs.output.display().to_string());
+            if built && !self.prefs.last_build.is_empty() {
+                ui.small(format!("Last built {}", build_date(&self.prefs.last_build)));
+            }
+            egui::CollapsingHeader::new("Build log")
+                .default_open(self.busy)
+                .show(ui, |ui| self.log_panel(ui));
+        });
+        ui.add_space(10.);
+
+        // 3. Play
+        card().show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            step(ui, "3", "Play", false);
+            let play = ui.add_enabled(
+                built && !self.busy,
+                egui::Button::new(RichText::new("▶  Play").size(26.))
+                    .fill(Color32::from_rgb(206, 66, 43))
+                    .rounding(12.)
+                    .min_size(egui::vec2(260., 70.)),
+            );
+            if play.clicked() {
+                self.play();
+            }
+            ui.small("In game, press F10 for settings: screen layout, renderer, controls and audio. The game folder is portable: saves and settings live in its data folder.");
+        });
+        ui.add_space(10.);
+
+        // Source code
+        card().show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.label(RichText::new("Source code").size(16.).strong());
+            ui.label("The readable Rust generated from your ROM: every game function, organised by area (karts, items, menus…), with the names our research found.");
+            ui.label(
+                RichText::new("It is derived from your game: keep it for your own use and don't share it.")
+                    .color(Color32::GRAY),
+            );
+            let source = self.prefs.output.join("source");
+            let have = built && source.is_dir();
+            let open = |path: PathBuf| std::process::Command::new("explorer.exe").arg(path).spawn().map(|_| ());
+            ui.horizontal_wrapped(|ui| {
+                if ui.add_enabled(have, egui::Button::new("View source")).clicked() {
+                    if let Err(e) = open(source.clone()) {
                         self.message = e.to_string();
                     }
                 }
-            }
+                if ui.add_enabled(have, egui::Button::new("How to read it")).clicked() {
+                    let _ = std::process::Command::new("notepad.exe").arg(source.join("README.txt")).spawn();
+                }
+                if ui.add_enabled(built, egui::Button::new("Game folder")).clicked() {
+                    if let Err(e) = open(self.prefs.output.clone()) {
+                        self.message = e.to_string();
+                    }
+                }
+            });
+        });
+        ui.add_space(8.);
+        ui.horizontal_wrapped(|ui| {
             ui.hyperlink_to("Documentation", "https://docs.mkdsrust.com");
             ui.hyperlink_to("GitHub", "https://github.com/CameronStorer/MKDSrust");
         });
@@ -1045,9 +1018,8 @@ impl Launcher {
         {
             self.install_toolchain();
         }
-        if ui.button("Rebuild game").clicked() {
-            self.page = 6;
-            self.wizard = 3;
+        if ui.add_enabled(!self.busy && self.info.as_ref().is_some_and(|i| i.reference_match), egui::Button::new("Rebuild game")).clicked() {
+            self.start_build();
         }
         for (label, path) in [
             ("Open data folder", self.dir.clone()),
@@ -1155,10 +1127,10 @@ impl Launcher {
                 );
                 ui.add_space(30.);
                 for (i, title) in [
-                    "Home", "Settings", "Controls", "Mods", "Advanced", "About", "Setup",
+                    (0, "Home"), (3, "Mods"), (1, "Settings"), (2, "Controls"), (4, "Advanced"), (5, "About"),
                 ]
                 .iter()
-                .enumerate()
+                .copied()
                 {
                     if ui
                         .horizontal(|ui| {
@@ -1169,7 +1141,7 @@ impl Launcher {
                                 ui.painter().rect_filled(r, 2., TEAL);
                             }
                             glyph(ui, i, if active { TEAL } else { Color32::GRAY });
-                            ui.selectable_value(&mut self.page, i, *title).clicked()
+                            ui.selectable_value(&mut self.page, i, title).clicked()
                         })
                         .inner
                     {
