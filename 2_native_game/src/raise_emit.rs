@@ -153,6 +153,22 @@ pub fn set_direct(map: HashMap<u32, Vec<(String, DirectSig)>>) {
     DIRECT.with(|d| *d.borrow_mut() = map);
 }
 
+static QUIET: std::sync::RwLock<Option<HashMap<u32, Vec<String>>>> = std::sync::RwLock::new(None);
+
+/// Entries (exact, with the Thumb bit) the default native call graph calls directly but this one dispatches:
+/// calls to them are emitted as `call_quiet` (see `Bus::call_quiet`). Empty unless an opt-in native set is on.
+pub fn set_quiet(map: HashMap<u32, Vec<String>>) {
+    *QUIET.write().unwrap() = Some(map);
+}
+
+fn quiet_for(target: u32) -> bool {
+    let guard = QUIET.read().unwrap();
+    let Some(map) = guard.as_ref() else { return false };
+    let Some(rows) = map.get(&target) else { return false };
+    let seg = CURRENT.with(|c| c.borrow().0.clone());
+    rows.iter().any(|s| *s == seg) || rows.iter().any(|s| !s.starts_with("ov9_"))
+}
+
 /// Sets the segment of the next function emitted, and its signature if it is closed.
 pub fn set_current(segment: &str, own: Option<DirectSig>) {
     CURRENT.with(|c| *c.borrow_mut() = (segment.to_string(), own));
@@ -2838,7 +2854,8 @@ fn stmt_code(c: &Ctx, x: u32, s: &S, depth: usize, out: &mut String) {
                 E::Const(t) => (c.names)(*t).map(|n| format!(" // {n}")).unwrap_or_default(),
                 _ => String::new(),
             };
-            line(out, &format!("spill!(); let x = m.call(c, {}, {ret:#X}); if x != {ret:#X} {{ leave!(x); }} reload!();{name}", ir::expr_locals(target)))
+            let call = if c.nospill && matches!(target, E::Const(t) if quiet_for(*t)) { "call_quiet" } else { "call" };
+            line(out, &format!("spill!(); let x = m.{call}(c, {}, {ret:#X}); if x != {ret:#X} {{ leave!(x); }} reload!();{name}", ir::expr_locals(target)))
         }
         S::IfSome(e, body) => {
             let exit = match body.as_slice() {

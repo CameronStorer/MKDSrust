@@ -134,6 +134,12 @@ pub trait Bus: Mem {
     /// reached (`ret` normally; anything else means the callee left by another way, e.g. a
     /// switch helper that rewrote lr, and the caller must continue from there).
     fn call(&mut self, c: &mut Cpu, target: u32, ret: u32) -> u32;
+    /// [`Bus::call`] to a function the default `--timing native` call graph calls directly (so it is no
+    /// dispatch point there): an empty slice budget must not end the slice at this call. Only differs in a
+    /// fiber runtime.
+    fn call_quiet(&mut self, c: &mut Cpu, target: u32, ret: u32) -> u32 {
+        self.call(c, target, ret)
+    }
     /// BIOS call `n` (the SWI number: ARM bits 23..16, Thumb bits 7..0).
     fn swi(&mut self, c: &mut Cpu, n: u32);
     /// MRC: coprocessor register to ARM register.

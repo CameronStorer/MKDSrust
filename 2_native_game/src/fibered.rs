@@ -122,7 +122,7 @@ fn new_fiber(thread: u32) -> Fiber {
                 In::Resume(s, pc, start) => (s, pc, start),
                 In::Go(_) => unreachable!("a fiber starts with Resume"),
             };
-            let mut g = Guest { s, y: y as *const _, thread, loops: Vec::new(), fresh: false };
+            let mut g = Guest { s, y: y as *const _, thread, loops: Vec::new(), fresh: false, quiet: false };
             let pc = if start { g.end_slice_resumed(pc) } else { pc };
             g.run(pc, None);
             unreachable!("the root loop never returns")
@@ -140,6 +140,8 @@ struct Guest {
     loops: Vec<(u32, u32)>,
     /// A slice just started: the next dispatch uses the residency-checking resolver.
     fresh: bool,
+    /// The next dispatch is a quiet call (`Bus::call_quiet`): an empty budget does not end the slice there.
+    quiet: bool,
 }
 
 impl Guest {
@@ -264,10 +266,11 @@ impl Guest {
                 break pc;
             }
             let fresh = self.fresh;
+            let quiet = std::mem::take(&mut self.quiet);
             let s = self.s();
             let d = s.dispatcher;
-            if !fresh && (s.cpu.budget == 0 || s.machine.hw.code_epoch != s.code_epoch || d.get(pc).is_none()) {
-                let why = if s.cpu.budget == 0 { "budget" } else if s.machine.hw.code_epoch != s.code_epoch { "code written" } else { "miss" };
+            if !fresh && ((s.cpu.budget == 0 && !quiet) || s.machine.hw.code_epoch != s.code_epoch || d.get(pc).is_none()) {
+                let why = if s.cpu.budget == 0 && !quiet { "budget" } else if s.machine.hw.code_epoch != s.code_epoch { "code written" } else { "miss" };
                 pc = self.end_slice(pc, why);
                 continue;
             }
@@ -351,6 +354,10 @@ impl Mem for GuestBus {
 }
 
 impl Bus for GuestBus {
+    fn call_quiet(&mut self, c: &mut Cpu, target: u32, ret: u32) -> u32 {
+        self.g().quiet = true;
+        self.call(c, target, ret)
+    }
     fn call(&mut self, c: &mut Cpu, target: u32, ret: u32) -> u32 {
         let sp = c.r[13];
         // a host after-hook (mod script events): run the function, then the hook on a normal return
