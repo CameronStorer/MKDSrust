@@ -103,6 +103,11 @@ impl Dispatcher {
         map
     }
 
+    /// The lifted functions this dispatcher was made from.
+    pub fn table(&self) -> &'static [Lifted] {
+        self.table
+    }
+
     /// The translation of the function at `entry` (bit 0 = Thumb) in `segment`, ignoring natives.
     pub fn translation(&self, segment: &str, entry: u32) -> Option<LiftedFn> {
         self.table.iter().find(|l| l.segment == segment && l.entry == entry).map(|l| l.f)

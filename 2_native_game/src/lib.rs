@@ -5,6 +5,7 @@ pub mod save;
 pub mod arm7;
 pub mod bios;
 pub mod boot;
+pub mod capture;
 pub mod card;
 pub mod dispatch;
 pub mod ds_mem;
