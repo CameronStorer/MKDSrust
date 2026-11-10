@@ -164,6 +164,10 @@ pub fn set_typed_info(map: HashMap<String, TypedInfo>) {
     TYPED_INFO.with(|t| *t.borrow_mut() = map);
 }
 
+pub fn add_typed_info(map: HashMap<String, TypedInfo>) {
+    TYPED_INFO.with(|t| t.borrow_mut().extend(map));
+}
+
 fn typed_info(name: &str) -> TypedInfo {
     TYPED_INFO.with(|t| t.borrow().get(name).copied().unwrap_or_default())
 }
@@ -2759,7 +2763,8 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
             f.cpu_before_flags = cpu_before_flags;
             f.flag_calls_before = flag_calls_before;
             f.flag_calls_after = flag_locals::call_count(&body);
-            f.lr_leaf = lr_leaf(&body);
+            // the poll macro spills and reloads `lr` with the rest of the register file
+            f.lr_leaf = lr_leaf(&body) && !(has_poll && poll_direct_enabled());
             f.fx_params = fx_params;
         } });
         let vals: Vec<String> = rets.iter().zip(&ret_kinds).map(|(&i, k)| k.wrap(&ir::reg_name(i))).collect();
