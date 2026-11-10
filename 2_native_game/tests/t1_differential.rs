@@ -644,6 +644,10 @@ fn build_nospill_checks(funcs: &[(String, u32, Func)], image: &[u8], base: u32, 
 }
 
 fn build_nospill_checks_flags(funcs: &[(String, u32, Func)], image: &[u8], base: u32, seeds: u32, returns: Option<u8>) -> (String, usize, usize) {
+    build_nospill_checks_context(funcs, image, base, seeds, returns, None)
+}
+
+fn build_nospill_checks_context(funcs: &[(String, u32, Func)], image: &[u8], base: u32, seeds: u32, returns: Option<u8>, context: Option<recomp::raise::FlagContext>) -> (String, usize, usize) {
     use recomp::raise_emit::{set_current, set_direct, take_direct, take_facts, DirectSig};
     let _lock = emit_lock();
     let _native = NativeTiming::on();
@@ -658,13 +662,12 @@ fn build_nospill_checks_flags(funcs: &[(String, u32, Func)], image: &[u8], base:
     let _mode = returns.map(|mask| {
         let saved = FlagMode(std::env::var_os("MKDS_FLAG_LOCALS"));
         unsafe { std::env::set_var("MKDS_FLAG_LOCALS", "1"); }
-        recomp::raise::set_flag_context(Some(recomp::raise::FlagContext {
+        recomp::raise::set_flag_context(Some(context.clone().unwrap_or_else(|| recomp::raise::FlagContext {
             ret: funcs.iter().map(|(_, e, _)| (e & !1, mask)).collect(),
             ..Default::default()
-        }));
+        })));
         saved
     });
-    let return_mask = returns.unwrap_or(15);
     assert!(recomp::raise_emit::nospill_enabled(), "MKDS_SPILL=keep is set");
     let img = Image::new(base, image);
     let none = |_: u32| None;
@@ -735,6 +738,9 @@ impl recomp::rt::Bus for CheckBus {{
         raised += 1;
         src.push_str(&emit_full(f, name, Some(&img), None, true));
         src.push_str(&t1);
+        let return_mask = context.as_ref().map_or(returns.unwrap_or(15), |ctx|
+            ctx.ret.get(&(entry & !1)).copied().unwrap_or(15)
+                | if ctx.taken.contains(&(entry & !1)) { ctx.any_ret } else { 0 });
         checks.push_str(&format!(
             r#"
 #[inline(never)]
@@ -945,4 +951,106 @@ fn boundary_rejects_register_dump_through_block_store() {
     };
     assert_ne!(preserved(base, base + 8), 0x2FF0, "register dump must not be certified");
     assert_eq!(preserved(base + 8, base + 20), 0x2FF0, "sp-based save/restore stays certified");
+}
+
+#[test]
+fn direct_flag_locals_keep_flags_read_by_an_open_caller() {
+    use recomp::raise::{self, FlagContext};
+    let base = 0x0200_0000u32;
+    // push {lr}; bl leaf; movcs/movcc r2; a one-iteration loop; pop {lr}; bx lr.
+    // The loop excludes the caller from the closed/direct set. It observes the
+    // leaf's carry immediately after the call, before overwriting its own flags.
+    let mut image: Vec<u8> = [0xE92D4000u32, 0xEB000009, 0x23A02001, 0x33A02000,
+        0xE3A03001, 0xE2533001, 0x1AFFFFFD, 0xE8BD4000, 0xE12FFF1E]
+        .iter().flat_map(|w| w.to_le_bytes()).collect();
+    image.resize(0x30, 0);
+    image.extend([0xE0900001u32, 0xE12FFF1E].iter().flat_map(|w| w.to_le_bytes()));
+    let img = Image::new(base, &image);
+    let funcs: Vec<_> = [("open_flag_caller", 0, 36), ("flag_leaf", 0x30, 0x38)]
+        .into_iter().map(|(name, start, end)| (name.to_string(), base + start,
+            discover(&img, base + start, Some((base + start, base + end)), 100).unwrap())).collect();
+    let mut ctx = FlagContext {
+        entry: funcs.iter().flat_map(|(_, _, f)| f.blocks.iter().map(|&b| (b, 0))).collect(),
+        ret: funcs.iter().map(|(_, e, _)| (*e, 0)).collect(),
+        ..Default::default()
+    };
+    {
+        let _lock = emit_lock();
+        raise::set_flag_context(Some(ctx.clone()));
+        let (_, calls, _, _) = raise::flag_facts(&funcs[0].2, Some(&img));
+        raise::set_flag_context(None);
+        let carry = calls.iter().find(|c| c.0 == Some(base + 0x30)).unwrap().1;
+        assert_eq!(carry, raise::C);
+        ctx.ret.insert(base + 0x30, carry);
+    }
+    let (src, raised, direct) = build_nospill_checks_context(&funcs, &image, base, 2048, Some(0), Some(ctx));
+    assert_eq!((raised, direct), (2, 1));
+    assert!(src.contains("pub fn d_flag_leaf(c:"));
+    assert!(src.contains("c.c = flag_c;"));
+    assert!(src.contains("direct::d_flag_leaf(c, m"));
+    assert!(!src.contains("pub fn d_open_flag_caller("));
+    compile_and_run(&src, &image, "direct_flags_open_caller");
+}
+
+#[test]
+fn direct_flag_locals_keep_cpu_flag_emission_for_computed_targets() {
+    use recomp::raise::FlagContext;
+    let base = 0x0200_0000u32;
+    // adds; adc (carry is locally live); bx lr. No caller-observed
+    // return flags are known, but the stored pointer keeps this target guarded.
+    let image: Vec<u8> = [0xE0900001u32, 0xE0A22003, 0xE12FFF1E]
+        .iter().flat_map(|w| w.to_le_bytes()).collect();
+    let img = Image::new(base, &image);
+    let funcs = vec![("computed_flags".to_string(), base,
+        discover(&img, base, Some((base, base + 12)), 100).unwrap())];
+    let ctx = FlagContext {
+        ret: [(base, 0)].into_iter().collect(),
+        taken: [base].into_iter().collect(),
+        any_ret: 0,
+        ..Default::default()
+    };
+    let (src, raised, direct) = build_nospill_checks_context(&funcs, &image, base, 2048, Some(0), Some(ctx));
+    assert_eq!((raised, direct), (1, 1));
+    assert!(src.contains("pub fn d_computed_flags(c:"));
+    assert!(src.contains("R::adds(c,"));
+    assert!(!src.contains("let mut flag_c"));
+    compile_and_run(&src, &image, "direct_flags_computed_target");
+}
+
+#[test]
+fn native_fall_through_is_not_closed() {
+    use recomp::raise_emit::{set_current, take_direct, take_facts};
+    let _lock = emit_lock();
+    let _native = NativeTiming::on();
+    let base = 0x0200_0000;
+    // A flag write at the boundary, without any explicit return statement.
+    let image: Vec<u8> = [0xE0900001u32].iter().flat_map(|w| w.to_le_bytes()).collect();
+    let img = Image::new(base, &image);
+    let f = discover(&img, base, Some((base, base + 4)), 100).unwrap();
+    set_current("arm9_main", None);
+    let _ = take_direct();
+    let code = emit_t1(&f, "fall_off", Some(&img)).unwrap();
+    assert_eq!(take_facts().unwrap().escape, Some("falls through"));
+    assert!(take_direct().is_none());
+    assert!(code.contains("exit!(0x2000004)"));
+}
+
+#[test]
+fn flag_locals_default_to_native_with_an_explicit_opt_out() {
+    let _lock = emit_lock();
+    struct Restore(Option<std::ffi::OsString>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            unsafe { match &self.0 { Some(v) => std::env::set_var("MKDS_FLAG_LOCALS", v), None => std::env::remove_var("MKDS_FLAG_LOCALS") } }
+        }
+    }
+    let _restore = Restore(std::env::var_os("MKDS_FLAG_LOCALS"));
+    let _native = NativeTiming::on();
+    unsafe { std::env::remove_var("MKDS_FLAG_LOCALS"); }
+    assert!(recomp::raise_emit::flag_locals_enabled());
+    unsafe { std::env::set_var("MKDS_FLAG_LOCALS", "0"); }
+    assert!(!recomp::raise_emit::flag_locals_enabled());
+    unsafe { std::env::set_var("MKDS_FLAG_LOCALS", "1"); }
+    recomp::lift::set_timing_native(false, &[]);
+    assert!(!recomp::raise_emit::flag_locals_enabled(), "exact timing stays unchanged");
 }
