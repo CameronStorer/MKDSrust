@@ -570,7 +570,7 @@ fn field_name(entry: u32, off: u32) -> Option<ir::FieldRef> {
         return None;
     }
     let (name, ty) = l.fields.get(&(st.clone(), *o))?;
-    Some(ir::FieldRef { strukt: st.clone(), module: l.modules.get(st)?.clone(), name: name.clone(), off: *o, primary: primary_access(ty) })
+    Some(ir::FieldRef { strukt: st.clone(), module: l.modules.get(st)?.clone(), name: name.clone(), off: *o, primary: primary_access(ty), fx: is_fx32(ty) })
 }
 
 /// Fields without a scalar type take the access the code uses most as their plain accessor
@@ -600,22 +600,45 @@ fn untyped_field_widths(funcs: &mut [Lifted]) {
                 continue;
             }
             if let Some(&p) = pick.get(&(r.strukt.clone(), r.off)) {
-                let old = format!("{}::{}(", r.module, r.accessor(*a));
+                let old_acc = r.accessor(*a);
+                let old = format!("{}::{}(", r.module, old_acc);
                 r.primary = Some(p);
                 renames.insert(old, format!("{}::{}(", r.module, r.accessor(*a)));
+                // the typed-pointer method form (`kart.old\u{1}kart\u{2}(m`) carries its struct's module as a tag
+                renames.insert(format!(".{old_acc}\u{1}{}\u{2}(", r.module), format!(".{}\u{1}{}\u{2}(", r.accessor(*a), r.module));
             }
         }
         // longest first, so `x_u32(` is not hit by a shorter name's pattern
         let mut v: Vec<_> = renames.into_iter().filter(|(a, b)| a != b).collect();
         v.sort_by_key(|(a, _)| std::cmp::Reverse(a.len()));
+        // method patterns start with `.` (after the pointer variable): the struct tag makes them exact
+        let rep = |t: &str, a: &str, b: &str| if a.starts_with('.') { t.replace(a, b) } else { replace_word(t, a, b) };
         if let Ok(t) = &mut f.t1 {
             for (a, b) in &v {
-                *t = replace_word(t, a, b);
+                *t = rep(t, a, b);
             }
         }
         if let Some(t) = &mut f.direct {
             for (a, b) in &v {
-                *t = replace_word(t, a, b);
+                *t = rep(t, a, b);
+            }
+        }
+    }
+    // drop the struct tags of the method form
+    for f in funcs.iter_mut() {
+        if let Some(t) = &mut f.direct {
+            if t.contains('\u{1}') {
+                let mut out = String::with_capacity(t.len());
+                let mut skip = false;
+                for ch in t.chars() {
+                    match ch {
+                        '\u{1}' => skip = true,
+                        '\u{2}' => skip = false,
+                        _ if !skip => out.push(ch),
+                        _ => {}
+                    }
+                }
+                *t = out;
             }
         }
     }
@@ -654,11 +677,16 @@ fn field_in(st: &str, off: u32) -> Option<ir::FieldRef> {
     let mut st = st.to_string();
     for _ in 0..8 {
         if let Some((name, ty)) = l.fields.get(&(st.clone(), off)) {
-            return Some(ir::FieldRef { strukt: st.clone(), module: l.modules.get(&st)?.clone(), name: name.clone(), off, primary: primary_access(ty) });
+            return Some(ir::FieldRef { strukt: st.clone(), module: l.modules.get(&st)?.clone(), name: name.clone(), off, primary: primary_access(ty), fx: is_fx32(ty) });
         }
         st = l.parent.get(&st)?.clone();
     }
     None
+}
+
+/// Whether a field type is the 4-byte fixed point `fx32`.
+fn is_fx32(ty: &str) -> bool {
+    ty.trim().trim_matches('"').trim().eq_ignore_ascii_case("fx32")
 }
 
 /// The access a field type implies: scalars of 1, 2 or 4 bytes (`fx12`/`fx32` are 4-byte fixed
@@ -709,6 +737,31 @@ fn rust_ident(s: &str) -> String {
     if KW.contains(&s.as_str()) { format!("{s}_") } else { s }
 }
 
+/// Zero-cost typed views of the layout: `Ptr<Kart>` is a `u32` address that knows its struct (its field
+/// methods are the same memory accesses as the free accessors), `Fx32` a fixed-point value.
+const TYPED_VIEWS: &str = r#"
+/// A pointer to a `T` in simulated memory: the address as a `u32`, and nothing else.
+#[repr(transparent)]
+pub struct Ptr<T>(pub u32, core::marker::PhantomData<fn() -> T>);
+impl<T> Clone for Ptr<T> { #[inline(always)] fn clone(&self) -> Self { *self } }
+impl<T> Copy for Ptr<T> {}
+impl<T> PartialEq for Ptr<T> { #[inline(always)] fn eq(&self, o: &Self) -> bool { self.0 == o.0 } }
+impl<T> core::fmt::Debug for Ptr<T> { fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result { write!(f, "Ptr({:#X})", self.0) } }
+impl<T> Ptr<T> {
+    #[inline(always)] pub const fn new(addr: u32) -> Self { Ptr(addr, core::marker::PhantomData) }
+}
+
+/// A 20.12 fixed-point number (`fx32`): the raw 32-bit value, read as signed.
+#[repr(transparent)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct Fx32(pub i32);
+impl Fx32 {
+    pub const ONE: Fx32 = Fx32(0x1000);
+    #[inline(always)] pub const fn from_bits(b: u32) -> Self { Fx32(b as i32) }
+    #[inline(always)] pub const fn bits(self) -> u32 { self.0 as u32 }
+}
+"#;
+
 /// The `layout` crate: every research struct as a module with its field offsets (`pub const`) and
 /// the accessors the raised code calls, each the exact helper call it replaces.
 fn layout_crate(used: &BTreeSet<(ir::FieldRef, ir::Access)>) -> String {
@@ -718,15 +771,17 @@ fn layout_crate(used: &BTreeSet<(ir::FieldRef, ir::Access)>) -> String {
          //! the memory access it names. Generated; the names come from the dictionary.\n\
          #![allow(non_snake_case, dead_code, clippy::all)]\n",
     );
+    s.push_str(TYPED_VIEWS);
     let Some(l) = LAYOUT.get() else { return s };
     let mut by_struct: BTreeMap<&str, Vec<(u32, &str, &str)>> = BTreeMap::new();
     for ((st, off), (n, ty)) in &l.fields {
         by_struct.entry(st).or_default().push((*off, n, ty));
     }
+    let seen_structs: BTreeSet<&str> = by_struct.keys().copied().collect();
     for (st, mut fields) in by_struct {
         fields.sort();
         let module = &l.modules[st];
-        let _ = writeln!(s, "\n/// `{st}`.\npub mod {module} {{\n    #[allow(unused_imports)] use recomp::rt as R;\n    #[allow(unused_imports)] use recomp::rt::Mem;");
+        let _ = writeln!(s, "\n/// `{st}`.\npub mod {module} {{\n    #[allow(unused_imports)] use recomp::rt as R;\n    #[allow(unused_imports)] use recomp::rt::Mem;\n    /// Marker type of `Ptr<{st}>`.\n    pub struct T;");
         for (off, n, ty) in &fields {
             let ty = if ty.is_empty() { String::new() } else { format!(": `{}`", ty.replace(['\n', '\r', '`'], " ")) };
             let _ = writeln!(s, "    /// `{n}`{ty}\n    pub const {}: u32 = {off:#X};", n.to_ascii_uppercase());
@@ -740,7 +795,27 @@ fn layout_crate(used: &BTreeSet<(ir::FieldRef, ir::Access)>) -> String {
                 let _ = writeln!(s, "    #[inline(always)] pub fn {}<M: Mem + ?Sized>(m: &mut M, p: u32) -> u32 {{ R::{}(m, {at}) }}", f.accessor(*a), a.helper());
             }
         }
+        // the same accesses as methods of `Ptr<..>`: `kart.bounce_height(m)`
+        let mut methods = String::new();
+        for (f, a) in used.iter().filter(|(f, _)| f.strukt == st) {
+            let n = f.accessor(*a);
+            if n == "new" { continue }
+            if a.is_store() {
+                let _ = writeln!(methods, "        #[inline(always)] pub fn {n}<M: Mem + ?Sized>(self, m: &mut M, v: u32) {{ {n}(m, self.0, v) }}");
+            } else {
+                let _ = writeln!(methods, "        #[inline(always)] pub fn {n}<M: Mem + ?Sized>(self, m: &mut M) -> u32 {{ {n}(m, self.0) }}");
+            }
+        }
+        if !methods.is_empty() {
+            let _ = write!(s, "    impl super::Ptr<T> {{\n{methods}    }}\n");
+        }
         s.push_str("}\n");
+    }
+    // root aliases of the marker types: `Ptr<Kart>` for `Ptr<kart::T>`
+    for st in &seen_structs {
+        if let Some(a) = raise_emit::marker_alias(st) {
+            let _ = writeln!(s, "pub use {}::T as {a};", l.modules[*st]);
+        }
     }
     s
 }
@@ -1590,6 +1665,28 @@ fn run() -> Result<ExitCode, String> {
             }
             raise_emit::set_direct(table);
             eprintln!("mkds_gen: flag-locals: {} direct functions; still using c: {} -> {}; R::*(c, ...) arithmetic sites: {} -> {}", sigs.len(), before.0, after.0, before.1, after.1);
+        }
+        if raise_emit::typed_sig_enabled() {
+            // MKDS_TYPED_SIG=1: which direct functions return to their unchanged `lr` (so it stays implicit),
+            // and which parameters are `fx32` values; a printing change only
+            raise_emit::set_typed_info(HashMap::new());
+            let mut info: HashMap<String, raise_emit::TypedInfo> = HashMap::new();
+            for (&i, d) in &sigs {
+                let (seg, f, id, src) = &jobs[i];
+                let img = image(src);
+                raise_emit::set_current(seg, Some(d.clone()));
+                with_notes9(seg, f.entry, |n| raise_emit::emit_t1_annotated(f, id, Some(&img), n))
+                    .map_err(|e| format!("typed signatures: {seg}/{id}: {e}"))?;
+                let x = raise_emit::take_facts().expect("direct function facts");
+                let _ = raise_emit::take_direct();
+                let _ = raise_emit::take_types();
+                let _ = raise_emit::take_dump();
+                let _ = ir::take_field_uses();
+                info.insert(d.name.clone(), raise_emit::TypedInfo { lr_implicit: x.lr_leaf && d.params >> 14 & 1 != 0, fx: x.fx_params });
+            }
+            let (lr, fx) = (info.values().filter(|i| i.lr_implicit).count(), info.values().filter(|i| i.fx != 0).count());
+            eprintln!("mkds_gen: typed signatures: {} direct functions, {lr} with an implicit lr, {fx} with fx32 parameters", sigs.len());
+            raise_emit::set_typed_info(info);
         }
         let sites: usize = (0..jobs.len())
             .filter_map(|i| facts[i].as_ref().map(|x| (i, x)))

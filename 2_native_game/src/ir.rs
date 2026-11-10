@@ -649,6 +649,19 @@ thread_local! {
     static BASES: std::cell::RefCell<std::collections::HashMap<u8, (u8, u32)>> = std::cell::RefCell::new(Default::default());
     /// The accessors printed since the last [`take_field_uses`].
     static FIELD_USES: std::cell::RefCell<Vec<(FieldRef, Access)>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// Typed signatures (`MKDS_TYPED_SIG=1`): registers that hold, unchanged, a `Ptr<Struct>` parameter:
+    /// register -> (the `Ptr` variable's name, the struct). Accesses through them print as methods.
+    static PTR_REGS: std::cell::RefCell<std::collections::HashMap<u8, (String, String)>> = std::cell::RefCell::new(Default::default());
+}
+
+/// Sets the registers that hold an unchanged typed pointer parameter (see `PTR_REGS`); empty: none.
+pub fn set_ptr_regs(m: std::collections::HashMap<u8, (String, String)>) {
+    PTR_REGS.with(|r| *r.borrow_mut() = m);
+}
+
+/// The typed-pointer variable that register `i` is, if it is one of `strukt`.
+pub fn ptr_var(i: u8, strukt: &str) -> Option<String> {
+    PTR_REGS.with(|r| r.borrow().get(&i).filter(|(_, st)| st == strukt).map(|(n, _)| n.clone()))
 }
 
 /// A named struct field: T1 prints `base + off` memory accesses as accessors
@@ -664,6 +677,8 @@ pub struct FieldRef {
     pub off: u32,
     /// The access its type implies (the accessor without a width suffix), if the type is a scalar.
     pub primary: Option<Access>,
+    /// The field is a 4-byte fixed-point `fx32` (typed signatures).
+    pub fx: bool,
 }
 
 /// A memory access kind, by the runtime helper that does it.
@@ -763,6 +778,15 @@ fn field_access(out: &mut String, addr: &E, a: Access) -> bool {
         _ => return false,
     };
     let Some((f, bias)) = FIELDS.with(|m| m.borrow().get(&(r, off)).cloned()) else { return false };
+    // a typed pointer parameter, unchanged: `kart.racer_index(m)` (the same access as `kart::racer_index(m, kart)`)
+    if bias == 0 && matches!(base, E::Reg(_)) && f.accessor(a) != "new" {
+        if let Some(v) = ptr_var(r, &f.strukt) {
+            // the \u{1}module\u{2} tag lets the generator rename the method with its struct's accessor names
+            let _ = write!(out, "{v}.{}\u{1}{}\u{2}(m", f.accessor(a), f.module);
+            FIELD_USES.with(|u| u.borrow_mut().push((f, a)));
+            return true;
+        }
+    }
     let _ = write!(out, "{}::{}(m, ", f.module, f.accessor(a));
     // an interior pointer made from a register that still holds the struct's address prints as that
     // register (`kart` rather than `r0.wrapping_sub(0x200)` after `r0 = kart + 0x200`)
