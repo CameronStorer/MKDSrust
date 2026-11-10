@@ -546,3 +546,16 @@ WmChannelMeasurementResult,,,,,,from the struct review of untyped arguments (202
 WmChannelTransferResult,,,,,,from the struct review of untyped arguments (2026-11-03): Adds the reported count to the indexed channel counter on success and recovers the session on error.
 WmDataSet,,,,,,from the struct review of untyped arguments (2026-11-03): Both halfwords are tested against the requested station bit before locating shared data at +4.
 WmScanParamsEx,,,,,,from the struct review of untyped arguments (2026-11-03): WM_StartScanEx validates a nonnull scan buffer and a buffer size no larger than 0x400.
+EffectPoseObject,,,,,,from the struct review of untyped arguments (2026-11-03): Shifts a vector from the pointer at +0xd0 into +0xb8..0xc0 and copies a 3x3 matrix at +0x94 then concatenates.
+EffectSpriteObject,,,,,,from the struct review of untyped arguments (2026-11-03): effect_init_pose_vectors passes the sprite object of its pose controller.
+FourWordRecord,,,,,,from the struct review of untyped arguments (2026-11-03): Callers pass an embedded record at object+0x24 or a stack buffer and the function fills four words from its arguments.
+ItemGroupEntry,,,,,,from the struct review of untyped arguments (2026-11-03): Caller indexes a 0x44-byte record array from a shared-memory global pointer and the function removes one member when the count at +0x14 is positive.
+MenuByteGrid,,,,,,from the struct review of untyped arguments (2026-11-03): Callers pass screen grid fields and +0x6 is the stride.
+MenuHitEntry,,,,,,from the struct review of untyped arguments (2026-11-03): Hit-test and input callers pass entries loaded from a list table.
+MenuScreenSlot,,,,,,from the struct review of untyped arguments (2026-11-03): Caller passes a base-plus-index element and only +0x1c is stored.
+NetCallbackEvent,,,,,,from the struct review of untyped arguments (2026-11-03): Callback tests +4 against two event codes and otherwise reports a connection error; never called directly.
+ObjRenderTransform,,,,,,from the struct review of untyped arguments (2026-11-03): Callers pass map_obj+0x114 and map_obj+0xdc so it is an embedded render component.
+ObjTimerState,,,,,,from the struct review of untyped arguments (2026-11-03): Callers pass item_record+0x58 and the same offset from another object so it is an embedded component.
+PiranhaTargetSlot,,,,,,from the struct review of untyped arguments (2026-11-03): Caller passes piranha+0xb8+target*0x24 so it is a 0x24-byte slot in the plant's array.
+RsaPublicKeyRecord,,,,,,from the struct review of untyped arguments (2026-11-03): Callers pass a key block at session+0x454 or the trusted certificate found by the certificate lookup; function verifies an RSA signature.
+SceneLaunchConfig,,,,,,from the struct review of untyped arguments (2026-11-03): Many scene launchers pass a stack or computed config block into the main loop.
