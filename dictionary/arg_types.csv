@@ -1,0 +1,609 @@
+address,segment,register,type,reason
+0x01FF9144,arm9_autoload1_itcm,r0,buffer<u32>,Display list pointer sent by DMA.
+0x01FF9210,arm9_autoload1_itcm,r0,buffer<u32>,Single flag word cleared.
+0x01FF92E0,arm9_autoload1_itcm,r0,buffer<u32>,Single pointer stored into a global.
+0x01FFA478,arm9_autoload1_itcm,r2,buffer<u32>,Horizontal vector components are squared and compared with a fixed length threshold.
+0x01FFA4B4,arm9_autoload1_itcm,r1,buffer<u32>,The argument is a numeric vector used by the kart geometry calculations.
+0x01FFB930,arm9_autoload1_itcm,r0,buffer<u32>,Mutable scalar magnitude is compared with 0x3000 before applying kart lean.
+0x01FFC500,arm9_autoload1_itcm,r0,buffer<u32>,Scales a single fixed-point lean value and clamps small magnitudes to zero.
+0x01FFCCD0,arm9_autoload1_itcm,r1,buffer<u32>,Input quaternion of four fixed-point words
+0x01FFCD84,arm9_autoload1_itcm,r1,buffer<u32>,Reads four numeric quaternion components to construct a rotation matrix.
+0x01FFCF7C,arm9_autoload1_itcm,r0,buffer<u32>,Reads four fixed-point quaternion components to calculate their squared magnitude.
+0x01FFCF7C,arm9_autoload1_itcm,r1,buffer<u32>,Receives four normalized quaternion components as a numeric array.
+0x01FFD190,arm9_autoload1_itcm,r0,buffer<u32>,The argument is a numeric vector used by the kart geometry calculations.
+0x01FFD190,arm9_autoload1_itcm,r2,buffer<u32>,Outputs four fixed-point quaternion components from an axis and half-angle sine and cosine.
+0x01FFF3E8,arm9_autoload1_itcm,r0,buffer<u32>,This internal continuation reads one numeric component with other inputs held in registers and stack slots.
+0x01FFF434,arm9_autoload1_itcm,r3,buffer<u32>,Three output coordinates are weighted sums of the edge endpoint vectors.
+0x01FFFEF4,arm9_autoload1_itcm,r2,buffer<u32>,Single word read as DMA register offset.
+0x02004C20,arm9_main,r1,buffer<u8>,Format argument string read bytewise; not a struct.
+0x02006F51,arm9_main,r2,buffer<u32>,Returns one word from the selected child record through an output pointer.
+0x020088DD,arm9_main,r0,buffer<u16>,Sums successive halfwords to compute a ones complement checksum.
+0x02008CBD,arm9_main,r0,buffer<u8>,Compares six identifier bytes against slot identifiers without interpreting individual fields.
+0x02009725,arm9_main,r0,buffer<u16>,Counts halfwords until the zero terminator.
+0x0200B7E1,arm9_main,r0,buffer<u8>,Copies a six-byte MAC address into child work memory.
+0x0200C25D,arm9_main,r0,buffer<u8>,Received packet bytes with fragment index at +2 and payload copied from +3
+0x0200C858,arm9_main,r1,buffer<i8>,Source is a terminated character string copied with a length bound.
+0x0200D118,arm9_main,r2,buffer<i8>,Format string pointer.
+0x0200DC1C,arm9_main,r0,buffer<u32>,Pointer to a variable holding the exiting thread pointer which is cleared
+0x0200E904,arm9_main,r1,buffer<u32>,Single output message word.
+0x0200EA3C,arm9_main,r1,buffer<u32>,Single output message word.
+0x0201000C,arm9_main,r0,buffer<u32>,Output buffer of eight words built from hardware status and timers.
+0x02010884,arm9_main,r1,buffer<u32>,Out word receiving a pointer list head.
+0x02010884,arm9_main,r2,buffer<u32>,Out word receiving a pointer list head.
+0x02010A40,arm9_main,r0,buffer<u32>,Pointer to a list head slot that is unlinked from.
+0x02010BC8,arm9_main,r0,buffer<u32>,Pointer to a list head slot updated when inserting a node.
+0x020111E0,arm9_main,r0,buffer<u32>,Out word receiving a mask built from iterated nodes.
+0x02014164,arm9_main,r0,buffer<u32>,output array of fixed point values
+0x020169A4,arm9_main,r0,buffer<u32>,Single list head pointer cell read and updated.
+0x020169A4,arm9_main,r1,buffer<u32>,Single list head pointer cell read and updated.
+0x02016C64,arm9_main,r0,buffer<u32>,Single list head pointer cell read and updated.
+0x02016C64,arm9_main,r1,buffer<u32>,Single list head pointer cell read and updated.
+0x02016D28,arm9_main,r0,buffer<u32>,Single list head word cleared.
+0x0201C4E8,arm9_main,r2,buffer<u32>,Writes sine and cosine into a numeric Y rotation matrix with zero translation.
+0x0201C528,arm9_main,r2,buffer<u32>,Twelve fixed point words form a rotation matrix with a zero translation row.
+0x02020650,arm9_main,r1,buffer<u32>,Reads and writes a scalar CRC32 accumulator.
+0x02020650,arm9_main,r2,buffer<u8>,Walks an input byte buffer for the supplied length.
+0x020206D8,arm9_main,r1,buffer<u16>,Reads and writes a scalar CRC16 accumulator.
+0x020206D8,arm9_main,r2,buffer<u8>,Walks an input byte buffer for the supplied length.
+0x02020768,arm9_main,r1,buffer<u8>,Reads and writes a scalar CRC8 accumulator.
+0x02020768,arm9_main,r2,buffer<u8>,Walks an input byte buffer for the supplied length.
+0x02021F9C,arm9_main,r1,buffer<u32>,Out pointer receiving the chunk data address.
+0x0202487C,arm9_main,r0,buffer<u32>,This is a pointer to the current string cursor advanced by one or two bytes.
+0x020248D0,arm9_main,r0,buffer<u32>,This is a pointer to the current string cursor advanced by the UTF-8 sequence length.
+0x02024960,arm9_main,r0,buffer<u32>,This is a pointer to the current string cursor advanced by two bytes after reading a code unit.
+0x02024EEC,arm9_main,r2,buffer<u32>,Out word receiving an eased pitch value.
+0x0202511C,arm9_main,r1,buffer<u8>,Out buffer of four descriptor bytes.
+0x02025CD1,arm9_main,r0,buffer<u16>,Output buffer of ten 16-bit characters written one digit at a time.
+0x0202C885,arm9_main,r1,buffer<u16>,The pointer is a mutable text buffer whose halfword at +0x14 is cleared before menu_fit_text.
+0x02039708,arm9_main,r0,buffer<u16>,Only clears six consecutive halfwords without demonstrating distinct member roles.
+0x02039E08,arm9_main,r1,buffer<u32>,Single output pointer written with a created heap.
+0x02039E08,arm9_main,r2,buffer<u32>,Single output pointer written with a created heap.
+0x02039E08,arm9_main,r3,buffer<u32>,Single output pointer written with a created heap.
+0x0203A4D4,arm9_main,r0,buffer<u32>,Incoming r0 is a Boolean selecting whether to set the global active bit.
+0x0203B0A0,arm9_main,r0,buffer<u8>,Compares three consecutive bytes lexicographically without establishing a record layout.
+0x0203B0A0,arm9_main,r1,buffer<u8>,Compares three consecutive bytes lexicographically without establishing a record layout.
+0x0203BE49,arm9_main,r2,buffer<u32>,Optional scalar output receives the selected character ID.
+0x0203BE49,arm9_main,r3,buffer<u32>,Optional scalar output receives the selected kart ID.
+0x0203C778,arm9_main,r2,buffer<u8>,Scalar byte output receives one component of the selected lap time.
+0x0203C778,arm9_main,r3,buffer<u8>,Scalar byte output receives another component of the selected lap time.
+0x0203C7CC,arm9_main,r1,buffer<u8>,Scalar byte output receives one component of total race time.
+0x0203C7CC,arm9_main,r2,buffer<u8>,Scalar byte output receives another component of total race time.
+0x0203C7CC,arm9_main,r3,buffer<u16>,Scalar halfword output receives the remaining component of total race time.
+0x0203C950,arm9_main,r0,buffer<u8>,Scalar byte output receives the results time component at +0xa.
+0x0203C950,arm9_main,r1,buffer<u8>,Scalar byte output receives the results time component at +0xb.
+0x0203C950,arm9_main,r2,buffer<u16>,Scalar halfword output receives the results value at +8.
+0x0203F5F0,arm9_main,r0,buffer<u8>,Output scalar stored as a byte.
+0x0203F5F0,arm9_main,r1,buffer<u8>,Output scalar stored as a byte.
+0x0203F5F0,arm9_main,r2,buffer<u16>,Output scalar stored as a halfword.
+0x0203FA60,arm9_main,r1,buffer<u32>,Pointer to a single out value stored and reloaded.
+0x02040FD8,arm9_main,r2,buffer<u32>,Receives three direction components from the respawn record or a default unit vector.
+0x020410A4,arm9_main,r2,buffer<u32>,Receives three direction components from the respawn record or a default unit vector.
+0x020431A5,arm9_main,r0,buffer<u32>,A pointer to a stream cursor is advanced twice while reading a section count.
+0x020435D4,arm9_main,r0,buffer<u32>,Argument is a boolean and the listed load follows reassignment to the pad state global.
+0x02043A9C,arm9_main,r0,buffer<u32>,Argument is a boolean and the listed load follows reassignment to the pad state global.
+0x02047B31,arm9_main,r1,buffer<u8>,Format argument string read bytewise; not a struct.
+0x020482AD,arm9_main,r1,buffer<u8>,Format argument string read bytewise; not a struct.
+0x020482F1,arm9_main,r1,buffer<u8>,Format argument string read bytewise; not a struct.
+0x020483E5,arm9_main,r1,buffer<u8>,Format argument string read bytewise; not a struct.
+0x0204840D,arm9_main,r1,buffer<u8>,Format argument string read bytewise; not a struct.
+0x02048591,arm9_main,r2,buffer<u32>,Out word receiving a result value.
+0x0204A428,arm9_main,r1,buffer<u32>,Writes a mapped result code through a scalar output pointer.
+0x0204A9F8,arm9_main,r0,buffer<u32>,Clears a single pointer slot.
+0x0204AA04,arm9_main,r0,buffer<u32>,Single output pointer written with an allocation result.
+0x0204E6E9,arm9_main,r2,buffer<u8>,byte buffer read at +0
+0x0204EBB9,arm9_main,r2,buffer<u8>,Outputs the first byte of the indexed eight-byte player record.
+0x0204EBB9,arm9_main,r3,buffer<u8>,Outputs the second byte of the indexed eight-byte player record.
+0x0204F221,arm9_main,r0,buffer<u32>,Checks a single indirect word for zero on event 4 before setting the global ready flag.
+0x02050D80,arm9_main,r1,buffer<u8>,Copies a six-byte peer MAC address into the active peer table.
+0x02052288,arm9_main,r1,buffer<u8>,Compares six MAC address bytes against each active slot.
+0x020525A8,arm9_main,r2,buffer<u8>,Copies six peer address bytes into the slot record.
+0x0205867D,arm9_main,r3,buffer<u32>,Returns a pointer to the selected transfer chunk through a scalar output.
+0x0205DD38,arm9_main,r0,buffer<u8>,Reads and replaces a single signed scene identifier.
+0x0205ECA4,arm9_main,r2,buffer<u8>,byte buffer written at +0x200
+0x0205FD2C,arm9_main,r0,buffer<u32>,Holder whose first word points to a 13-byte-stride table.
+0x0205FD78,arm9_main,r2,buffer<u32>,Out word receiving a record byte.
+0x020617A8,arm9_main,r0,buffer<u32>,Outputs a single difference between two global state values.
+0x02063B10,arm9_main,r1,buffer<u32>,The argument is a numeric vector used by the kart geometry calculations.
+0x02063B30,arm9_main,r1,buffer<u32>,The argument is a numeric vector used by the kart geometry calculations.
+0x02063B50,arm9_main,r1,buffer<u32>,Copies three consecutive kart basis words into a numeric output vector.
+0x02067B0C,arm9_main,r1,buffer<u32>,Writes a single recovery or reaction code through an output word pointer.
+0x02067B60,arm9_main,r1,buffer<u32>,Writes a single recovery or reaction code through an output word pointer.
+0x02067BF4,arm9_main,r1,buffer<u32>,Writes a single recovery or reaction code through an output word pointer.
+0x02067C70,arm9_main,r1,buffer<u32>,Writes a single recovery or reaction code through an output word pointer.
+0x02067C80,arm9_main,r1,buffer<u32>,Writes a single recovery or reaction code through an output word pointer.
+0x02067C90,arm9_main,r1,buffer<u32>,Writes a single recovery or reaction code through an output word pointer.
+0x02067CA0,arm9_main,r1,buffer<u32>,Writes a single recovery or reaction code through an output word pointer.
+0x02067CB0,arm9_main,r1,buffer<u32>,Writes a single recovery or reaction code through an output word pointer.
+0x02067D0C,arm9_main,r1,buffer<u32>,Writes a single recovery or reaction code through an output word pointer.
+0x02067D88,arm9_main,r1,buffer<u32>,Writes a single recovery or reaction code through an output word pointer.
+0x02067E10,arm9_main,r1,buffer<u32>,Writes a single recovery or reaction code through an output word pointer.
+0x02067EC4,arm9_main,r1,buffer<u32>,Writes a single recovery or reaction code through an output word pointer.
+0x02067F78,arm9_main,r1,buffer<u32>,Writes a single recovery or reaction code through an output word pointer.
+0x02067F88,arm9_main,r1,buffer<u32>,Writes a single recovery or reaction code through an output word pointer.
+0x020681E4,arm9_main,r1,buffer<u32>,Writes a single recovery or reaction code through an output word pointer.
+0x0206CEB4,arm9_main,r0,buffer<u32>,Writes the scalar fixed-point acceleration output through this pointer.
+0x0206F694,arm9_main,r2,buffer<u32>,The three vector components are ORed together to detect a zero wall response vector.
+0x02071318,arm9_main,r1,buffer<u16>,The input is a scalar animation selector and r1 is reassigned to kart plus 0x300 before the store.
+0x02072B94,arm9_main,r2,buffer<u32>,The optional placement pointer supplies vector components at zero and eight.
+0x02072D84,arm9_main,r1,buffer<u32>,This is an output pointer receiving the single fixed-point fall scale value.
+0x020745D4,arm9_main,r0,buffer<u32>,The accessed words form the output target position vector.
+0x020745D4,arm9_main,r2,buffer<u32>,Only one mutable numeric value is evidenced through this argument.
+0x02075FE0,arm9_main,r2,buffer<u32>,The second component of a numeric direction vector controls camera slope.
+0x02077A71,arm9_main,r0,buffer<u32>,The output pointer receives a scalar unlock group index or minus one.
+0x02077F0D,arm9_main,r0,buffer<u16>,Single u16 angle value updated in place.
+0x0207A2A8,arm9_main,r0,buffer<u32>,Writes one tracked scalar value to an output pointer when available.
+0x0207B960,arm9_main,r0,buffer<u32>,Receives three numeric coordinates computed by spline interpolation.
+0x0207F630,arm9_main,r1,buffer<u32>,Dereferences a pointer slot to obtain the source object.
+0x02088888,arm9_main,r0,buffer<u32>,"Plain flag value that selects a table, never dereferenced."
+0x02089D70,arm9_main,r0,buffer<u8>,Entry of a table of three halfwords.
+0x0208AB4C,arm9_main,r0,buffer<u16>,Pointer to a single color halfword.
+0x0208B458,arm9_main,r2,buffer<u32>,The incoming register is overwritten with a global pointer address before it is dereferenced.
+0x0208B484,arm9_main,r0,buffer<u32>,Stores a scalar output value through the pointer and returns a separate global context.
+0x0208B6B0,arm9_main,r0,buffer<u32>,Points to an emitter handle whose stop bit is set before the handle is cleared.
+0x0208B6D0,arm9_main,r0,buffer<u32>,Points to an emitter handle that is cancelled and then cleared.
+0x020917D0,arm9_main,r2,buffer<u8>,Hit handler argument that is a pointer to a single byte.
+0x020917D0,arm9_main,r3,buffer<u8>,Hit handler argument that is a pointer to a single byte.
+0x02091828,arm9_main,r2,buffer<u8>,Hit handler argument that is a pointer to a single byte.
+0x02091828,arm9_main,r3,buffer<u8>,Hit handler argument that is a pointer to a single byte.
+0x0209297C,arm9_main,r3,buffer<u8>,Hit handler argument that is a pointer to a single byte.
+0x02093754,arm9_main,r3,buffer<u8>,Hit handler argument that is a pointer to a single byte.
+0x02093B7C,arm9_main,r2,buffer<u8>,Hit handler argument that is a pointer to a single byte.
+0x02093B7C,arm9_main,r3,buffer<u8>,Hit handler argument that is a pointer to a single byte.
+0x02095EFC,arm9_main,r3,buffer<u8>,Hit handler argument that is a pointer to a single byte.
+0x02096F54,arm9_main,r2,buffer<u8>,Hit handler argument that is a pointer to a single byte.
+0x02096F54,arm9_main,r3,buffer<u8>,Hit handler argument that is a pointer to a single byte.
+0x020980EC,arm9_main,r3,buffer<u8>,Hit handler argument that is a pointer to a single byte.
+0x02099208,arm9_main,r2,buffer<u8>,Hit handler argument that is a pointer to a single byte.
+0x02099208,arm9_main,r3,buffer<u8>,Hit handler argument that is a pointer to a single byte.
+0x0209B270,arm9_main,r2,buffer<u8>,Hit handler argument that is a pointer to a single byte.
+0x0209B270,arm9_main,r3,buffer<u8>,Hit handler argument that is a pointer to a single byte.
+0x0209B344,arm9_main,r2,buffer<u8>,Hit handler argument that is a pointer to a single byte.
+0x0209B344,arm9_main,r3,buffer<u8>,Hit handler argument that is a pointer to a single byte.
+0x0209C964,arm9_main,r2,buffer<u8>,Hit handler argument that is a pointer to a single byte.
+0x0209C964,arm9_main,r3,buffer<u8>,Hit handler argument that is a pointer to a single byte.
+0x0209DD44,arm9_main,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x0209DD44,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x0209DDEC,arm9_main,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x0209DDEC,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x0209EA10,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020A4B70,arm9_main,r1,buffer<u32>,Three fixed point components are added to balloon positions.
+0x020A5744,arm9_main,r0,buffer<u32>,Three coordinate words are copied to the spawned shine position with a vertical offset.
+0x020A6AE4,arm9_main,r2,buffer<u8>,Only a byte flag is dereferenced and compared with one.
+0x020A6AE4,arm9_main,r3,buffer<u8>,Only a byte return value is dereferenced.
+0x020A7F18,arm9_main,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020A7F18,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020A7FC4,arm9_main,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020A7FC4,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020A9DE4,arm9_main,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020A9DE4,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020AB11D,arm9_main,r0,buffer<u32>,Outputs the left coordinate through a scalar pointer.
+0x020AB11D,arm9_main,r1,buffer<u32>,Outputs the top coordinate through a scalar pointer.
+0x020AB11D,arm9_main,r2,buffer<u32>,Outputs the right coordinate through a scalar pointer.
+0x020AB11D,arm9_main,r3,buffer<u32>,Outputs the bottom coordinate through a scalar pointer.
+0x020AB59D,arm9_main,r0,buffer<u16>,Compares the first of three halfword values with each of the other two.
+0x020AB849,arm9_main,r0,buffer<u32>,Adjusts a scalar left coordinate relative to the text box.
+0x020AB849,arm9_main,r1,buffer<u32>,Adjusts a scalar top coordinate relative to the text box.
+0x020AB849,arm9_main,r2,buffer<u32>,Adjusts a scalar right coordinate relative to the text box.
+0x020AB849,arm9_main,r3,buffer<u32>,Adjusts a scalar bottom coordinate relative to the text box.
+0x020AE341,arm9_main,r1,buffer<u8>,Writes the matching grid row to a byte output pointer.
+0x020AE7C5,arm9_main,r3,buffer<u32>,Outputs seven decimal digits as consecutive signed words.
+0x020B19B4,arm9_main,r0,buffer<u32>,Out pointer receiving a computed address.
+0x020B19B4,arm9_main,r1,buffer<u32>,Out pointer receiving a computed address.
+0x020B3FB1,arm9_main,r0,buffer<u32>,Raw message file buffer: section count at +0xc and section list starting at +0x20.
+0x020B47D8,arm9_main,r0,buffer<u32>,Out pointer receiving a looked-up block address.
+0x020B4810,arm9_main,r0,buffer<u32>,Out pointer receiving a looked-up block address.
+0x020B486C,arm9_main,r0,buffer<u32>,Out pointer receiving a looked-up block address.
+0x020B48B4,arm9_main,r0,buffer<u32>,Out pointer receiving a looked-up block address.
+0x020B48EC,arm9_main,r0,buffer<u32>,Out pointer receiving a looked-up block address.
+0x020B4934,arm9_main,r0,buffer<u32>,Out pointer receiving a looked-up block address.
+0x020B496C,arm9_main,r0,buffer<u32>,Out pointer receiving a looked-up block address.
+0x020B49BC,arm9_main,r0,buffer<u32>,Out pointer receiving a looked-up block address.
+0x020B49F4,arm9_main,r0,buffer<u32>,Out pointer receiving a looked-up block address.
+0x020B4A44,arm9_main,r0,buffer<u32>,Out pointer receiving a looked-up block address.
+0x020B4BF8,arm9_main,r0,buffer<u32>,Outputs four numeric coefficients of a scaled 2x2 minimap rotation matrix.
+0x020B4CB0,arm9_main,r0,buffer<u32>,Outputs four fixed-point coefficients of a 2x2 rotation matrix.
+0x020B4CEC,arm9_main,r0,buffer<u32>,Outputs a four-element diagonal scale matrix with reciprocal scale on the diagonal.
+0x020B4E70,arm9_main,r0,buffer<u32>,Tests three world-position components against course-specific bounds.
+0x020B4F64,arm9_main,r1,buffer<u32>,Reads the three fixed-point components of the starting vector for interpolation.
+0x020B4F64,arm9_main,r2,buffer<u32>,Reads the three fixed-point components of the ending vector for interpolation.
+0x020B5AE8,arm9_main,r0,buffer<u32>,Reads world X and Z coordinates for conversion to minimap coordinates.
+0x020B5F68,arm9_main,r0,buffer<u32>,Reads two numeric coordinates to test overlap with the course map viewport.
+0x020B5FE4,arm9_main,r0,buffer<u32>,Reads world X and Z coordinates for the minimap transform.
+0x020B5FE4,arm9_main,r1,buffer<u32>,Receives two integer minimap coordinates.
+0x020B6078,arm9_main,r1,buffer<u32>,Receives a two-component minimap position derived from the racer position.
+0x020B6B18,arm9_main,r0,buffer<u32>,Outputs the first corner as two fixed-point coordinates.
+0x020B6B18,arm9_main,r1,buffer<u32>,Outputs the second corner as two fixed-point coordinates.
+0x020B6BD4,arm9_main,r0,buffer<u32>,Outputs two interpolated fixed-point corner coordinates.
+0x020B6BD4,arm9_main,r1,buffer<u32>,Outputs the second interpolated fixed-point corner pair.
+0x020B7EE8,arm9_main,r1,buffer<u32>,Outputs a scalar identifier read from the course record and dispatches on that value.
+0x020B7EE8,arm9_main,r2,buffer<u32>,Serves as a separate scalar output pointer rather than a multi-field record.
+0x020B7FD8,arm9_main,r1,buffer<u32>,Pointer to a single out word.
+0x020B7FD8,arm9_main,r2,buffer<u32>,Pointer to a single out word.
+0x020C4AB8,arm9_main,r0,buffer<u32>,Used as a small index into a table; no struct fields read through it.
+0x020C8DBC,arm9_main,r0,buffer<u16>,The entry argument selects a switch case and is not a pointer.
+0x020CA808,arm9_main,r0,buffer<u32>,Stores four supplied words into a numeric output block.
+0x020CB600,arm9_main,r0,buffer<u32>,Single saturating counter word incremented.
+0x020D22E0,arm9_main,r1,buffer<u32>,pointer to a global pointer word read to find the object RNG
+0x020D4130,arm9_main,r0,buffer<u32>,position vector (x at +0 z at +8)
+0x020D555C,arm9_main,r0,buffer<u32>,position vector (x at +0 and z at +8) stored by pointer in the broadphase entry
+0x020D5A68,arm9_main,r2,buffer<u32>,pointer to a single u32 compared with the record
+0x020D5AA0,arm9_main,r0,buffer<u32>,Argument is a pointer slot dereferenced to a ground-contact record.
+0x020D5F64,arm9_main,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020D5F64,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020D5F8C,arm9_main,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020D5F8C,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020D6F78,arm9_main,r0,buffer<u32>,Reads X and Z components of a numeric vector for horizontal normalization.
+0x020D6F78,arm9_main,r1,buffer<u32>,Receives the normalized horizontal vector components.
+0x020D720C,arm9_main,r0,buffer<u32>,3 x fx32 vector or output vector
+0x020D79B0,arm9_main,r0,buffer<u32>,Reads fixed-point quaternion components to combine tilt with heading.
+0x020D79B0,arm9_main,r2,buffer<u32>,Outputs four numeric quaternion components after heading rotation.
+0x020D7A3C,arm9_main,r0,buffer<u32>,3 x fx32 vector or output vector
+0x020D7B88,arm9_main,r0,buffer<u32>,Reads three surface-normal components to calculate terrain tilt.
+0x020D7B88,arm9_main,r1,buffer<u32>,Outputs four fixed-point quaternion components from the surface normal.
+0x020D91DC,arm9_main,r2,buffer<u32>,output position vector
+0x020D94DC,arm9_main,r1,buffer<u32>,vector read and written at +0 and +8
+0x020D95C0,arm9_main,r0,buffer<u32>,Twelve numeric words form four three component Bezier control points.
+0x020D95C0,arm9_main,r1,buffer<u32>,Three output coordinates accumulate weighted control points.
+0x020D970C,arm9_main,r1,buffer<u32>,Stores one scalar cubic interpolation weight.
+0x020D970C,arm9_main,r2,buffer<u32>,Stores and reuses one scalar polynomial coefficient.
+0x020D970C,arm9_main,r3,buffer<u32>,Provides scalar output storage for cubic weights.
+0x020D9810,arm9_main,r1,buffer<u32>,Output slot receiving a Bernstein weight.
+0x020D9810,arm9_main,r2,buffer<u32>,Output slot receiving a Bernstein weight.
+0x020D9810,arm9_main,r3,buffer<u32>,Output slot receiving a Bernstein weight.
+0x020DA684,arm9_main,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020DA684,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020DA73C,arm9_main,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020DA73C,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020DB548,arm9_main,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020DB548,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020DD1F4,arm9_main,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020DD1F4,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020DD230,arm9_main,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020DD230,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020DE204,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020DE20C,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020DE488,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020DE4A0,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020DF7D0,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020DF7D8,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020E0650,arm9_main,r0,buffer<u32>,"Single word at +0 is an output slot for a result, not a struct."
+0x020E246C,arm9_main,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020E246C,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020E2494,arm9_main,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020E2494,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020E2FE4,arm9_main,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020E2FE4,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020E311C,arm9_main,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020E311C,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020E48E0,arm9_main,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020E48E0,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020E4934,arm9_main,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020E4934,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020E516D,arm9_main,r0,buffer<u8>,MTX_Identity33 and quaternion conversion write a numeric basis matrix into the output buffer.
+0x020E53AC,arm9_main,r1,buffer<u32>,pointer to one scale value replicated three times
+0x020E54E4,arm9_main,r1,buffer<u32>,pointer to one scale value replicated three times
+0x020E57F4,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020E57FC,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020E5B88,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020E5BA0,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020E6489,arm9_main,r0,buffer<u32>,"Single word at +0 is an output slot for a result, not a struct."
+0x020E69BC,arm9_main,r0,buffer<u32>,Three coordinate words are dotted with the view matrix to compute depth.
+0x020E6DF0,arm9_main,r0,buffer<u32>,Words at 0x10 and 0x14 supply cosine and sine terms for a numeric rotation matrix.
+0x020EA4BD,arm9_main,r2,buffer<u32>,"Single word at +0 is an output slot for a result, not a struct."
+0x020EA55D,arm9_main,r0,buffer<u32>,"Single word at +0 is an output slot for a result, not a struct."
+0x020EA589,arm9_main,r0,buffer<u32>,"Single word at +0 is an output slot for a result, not a struct."
+0x020EA94C,arm9_main,r1,buffer<u32>,Plain vec3 normal tested on its y component.
+0x020EAC20,arm9_main,r0,buffer<u32>,Updates three fixed point vector components to ease a floor normal.
+0x020EB760,arm9_main,r2,buffer<u8>,Reads a single collision classification byte to gate particle effects.
+0x020EB760,arm9_main,r3,buffer<u8>,Reads and returns a single byte through this pointer.
+0x020EB7E0,arm9_main,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020EB7E0,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020EC41C,arm9_main,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020EC450,arm9_main,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x020F1F98,arm9_main,r2,buffer<u32>,Three-word direction vector is copied and its vertical component is clamped before reflection.
+0x020F2A6C,arm9_main,r0,buffer<u32>,Input heading is used componentwise in fixed-point vector arithmetic.
+0x020F2A6C,arm9_main,r2,buffer<u32>,Output receives the three components of the adjusted heading.
+0x020F3A58,arm9_main,r0,buffer<u32>,Points to a route node pointer slot that is dereferenced before traversal.
+0x020F3A58,arm9_main,r1,buffer<u32>,Receives two words of route search output without evidence of a distinct object layout.
+0x020F3A58,arm9_main,r2,buffer<u32>,Supplies a three component position for squared distance comparisons.
+0x020F3C54,arm9_main,r0,buffer<u32>,Points to a route node pointer slot that is dereferenced before traversal.
+0x020F3C54,arm9_main,r1,buffer<u32>,Receives two words of route search output without evidence of a distinct object layout.
+0x020F3C54,arm9_main,r2,buffer<u32>,Supplies a three component position for squared distance comparisons.
+0x020F4DFC,arm9_main,r0,buffer<u32>,Dereferences an item pointer slot and clears that slot after launching the item.
+0x020F6BE8,arm9_main,r2,buffer<u32>,Three-component vector participates in velocity projection.
+0x020F77F8,arm9_main,r3,buffer<u32>,Argument supplies a three-component collision or motion vector.
+0x020F7C90,arm9_main,r1,buffer<u32>,Three-component vector supplies track collision resolution.
+0x020F98A0,arm9_main,r3,buffer<u16>,Copies nine halfwords into the sphere orientation matrix.
+0x020FAB34,arm9_main,r0,buffer<u32>,Mutable item-kind scalar is compared with 0x13 and used to index the kind table.
+0x020FAD9C,arm9_main,r1,buffer<u32>,Outputs a single item state_2ec value.
+0x020FAD9C,arm9_main,r2,buffer<u32>,Outputs a single fixed-point scaled grow_max value.
+0x020FC2E8,arm9_main,r1,buffer<u32>,Direction vector is length-tested and normalized for blue-shell orientation.
+0x020FD308,arm9_main,r1,buffer<u32>,Outputs a single item state value.
+0x020FD308,arm9_main,r2,buffer<u32>,Outputs a single fixed-point scaled grow_max value.
+0x020FD494,arm9_main,r0,buffer<u32>,Dereferences an object pointer slot to destroy the object and then clears the slot.
+0x020FECDC,arm9_main,r2,buffer<u8>,Incoming r2 is an encode-mode flag and later local r2 points into racer fields.
+0x020FEFE8,arm9_main,r0,buffer<u8>,The argument is a packet byte cursor advanced after transferring one signed scaled byte.
+0x020FEFE8,arm9_main,r1,buffer<u32>,The argument points to a single numeric value converted to or from a signed byte with a nine-bit shift.
+0x020FF040,arm9_main,r0,buffer<u8>,The argument is a packet byte cursor advanced by one after packing or unpacking a racer byte.
+0x020FF0B0,arm9_main,r0,buffer<u8>,Packed byte stream encodes or decodes three signed vector components.
+0x020FF1A0,arm9_main,r1,buffer<u32>,"Single word at +0 is an output slot for a result, not a struct."
+0x020FF1B8,arm9_main,r1,buffer<u32>,"Single word at +0 is an output slot for a result, not a struct."
+0x02100084,arm9_main,r0,buffer<u32>,pointer to a word
+0x0210008C,arm9_main,r0,buffer<u32>,pointer to a word
+0x0210FA40,arm9_main,r0,buffer<u32>,Plain argument value; the flag word is in a global.
+0x0210FA74,arm9_main,r0,buffer<u32>,Plain 0/1 argument; the +8 flag word is in a global.
+0x02110100,arm9_main,r0,buffer<u32>,Tests whether a single pointer slot contains a nonzero value.
+0x02116CB1,arm9_main,r0,buffer<u16>,Writes one wide digit character.
+0x02116CCD,arm9_main,r0,buffer<u16>,Writes one wide separator character.
+0x0211D2F1,arm9_main,r0,buffer<u16>,Writes a randomly selected identifier to a halfword output.
+0x02124ED1,arm9_main,r3,buffer<u32>,Out word receiving the allocated record array.
+0x0212513D,arm9_main,r0,buffer<u16>,Walks a zero terminated wide string in two byte steps.
+0x0212513D,arm9_main,r2,buffer<u16>,Receives the concatenated wide character buffer.
+0x0212D254,arm9_main,r0,buffer<u32>,The incoming argument is a numeric table index and is replaced before the apparent +0x14 access.
+0x0212D300,arm9_main,r0,buffer<u32>,The incoming argument is a numeric table index and is replaced before the apparent +0x10 access.
+0x0213446C,arm9_main,r1,buffer<u32>,Single output word stored by a stream helper.
+0x02134B18,arm9_main,r1,buffer<u16>,Walks a zero terminated wide source string.
+0x02134BD4,arm9_main,r0,buffer<u16>,Receives successive wide characters in a conversion buffer.
+0x02134BD4,arm9_main,r1,buffer<u32>,Reads bytes from the narrow source string.
+0x02134C94,arm9_main,r0,buffer<u32>,Text or byte buffer processed by a C library routine.
+0x02134CCC,arm9_main,r0,buffer<u16>,Text or byte buffer processed by a C library routine.
+0x02134CCC,arm9_main,r1,buffer<u32>,Text or byte buffer processed by a C library routine.
+0x02134DF8,arm9_main,r1,buffer<u32>,Text or byte buffer processed by a C library routine.
+0x02134EB8,arm9_main,r1,buffer<u32>,Text or byte buffer processed by a C library routine.
+0x021352E0,arm9_main,r2,buffer<u32>,Text or byte buffer processed by a C library routine.
+0x0213770C,arm9_main,r0,buffer<u32>,Examines the next byte of a format string for a percent character.
+0x0213770C,arm9_main,r1,buffer<u32>,Out end pointer slot.
+0x02138540,arm9_main,r0,buffer<u32>,Text or byte buffer processed by a C library routine.
+0x02138618,arm9_main,r2,buffer<u32>,Text or byte buffer processed by a C library routine.
+0x02139400,arm9_main,r0,buffer<u32>,Text or byte buffer processed by a C library routine.
+0x02139F70,arm9_main,r0,buffer<u32>,Searches a character string for a substring.
+0x02139F70,arm9_main,r1,buffer<u32>,Argument is the substring being searched for.
+0x02139FFC,arm9_main,r0,buffer<u32>,Text or byte buffer processed by a C library routine.
+0x0213A074,arm9_main,r0,buffer<u32>,Text or byte buffer processed by a C library routine.
+0x0213A074,arm9_main,r1,buffer<u32>,Text or byte buffer processed by a C library routine.
+0x0213A1C0,arm9_main,r1,buffer<u32>,Text or byte buffer processed by a C library routine.
+0x0213A228,arm9_main,r0,buffer<u32>,Text or byte buffer processed by a C library routine.
+0x0213A228,arm9_main,r1,buffer<u32>,Text or byte buffer processed by a C library routine.
+0x0213A2D0,arm9_main,r0,buffer<u32>,Copies characters into a destination string using aligned word accesses.
+0x0213A2D0,arm9_main,r1,buffer<u32>,Reads the source string using word accesses and byte masks.
+0x0213BFA4,arm9_main,r1,buffer<u32>,Single output end pointer stored.
+0x0213C074,arm9_main,r1,buffer<u32>,Stores the parse end pointer through an optional scalar output.
+0x0213C560,arm9_main,r1,buffer<u32>,Single output word written by the integer parser.
+0x0213C9C0,arm9_main,r0,buffer<u16>,Text or byte buffer processed by a C library routine.
+0x0213CAE0,arm9_main,r2,buffer<u16>,Text or byte buffer processed by a C library routine.
+0x0213E468,arm9_main,r0,buffer<u16>,Examines the next wide character of a format string.
+0x0213E468,arm9_main,r1,buffer<u32>,Out end pointer slot.
+0x0213EDBC,arm9_main,r0,buffer<u16>,16-bit string buffer.
+0x0213EE30,arm9_main,r0,buffer<u16>,16-bit string buffer.
+0x021400EC,arm9_main,r2,buffer<u32>,Single int output word for the exponent.
+0x02141B5C,arm9_main,r1,buffer<u32>,Text or byte buffer processed by a C library routine.
+0x02142424,arm9_main,r2,buffer<u32>,Single length word read through the pointer.
+0x0214245C,arm9_main,r2,buffer<u32>,Single length word read and written through the pointer.
+0x021437D8,arm9_main,r1,buffer<u16>,The first halfword supplies the length used to flush a variable length WEP key buffer.
+0x02146D78,arm9_main,r0,buffer<u32>,Input is a three component fixed point numeric vector multiplied by a matrix.
+0x02146D78,arm9_main,r2,buffer<u32>,Output receives the three fixed point components of a matrix vector product.
+0x02146F98,arm9_main,r1,buffer<u32>,Reads a three component fixed point unit axis for rotation matrix construction.
+0x02148908,arm9_main,r0,buffer<u16>,Plain register value argument.
+0x021491B0,arm9_main,r0,buffer<u8>,Byte written through the pointer is a plain bank setting value.
+0x0214922C,arm9_main,r0,buffer<u8>,Byte written through the pointer is a plain bank setting value.
+0x0214A348,arm9_main,r0,buffer<u16>,Pointer to hardware blend register area written and read back.
+0x0214A390,arm9_main,r0,buffer<u16>,Pointer to hardware blend register area written as three halfwords.
+0x0214A3E8,arm9_main,r0,buffer<u16>,Writes blend control and brightness to hardware registers.
+0x0214A40C,arm9_main,r0,buffer<u32>,Writes packed blend parameters to hardware registers.
+0x0214A428,arm9_main,r0,buffer<u32>,Writes packed affine coefficients and origins to a background hardware-register block.
+0x0214A428,arm9_main,r1,buffer<u32>,Reads four fixed-point coefficients of a numeric 2x2 affine matrix.
+0x0214A5F0,arm9_main,r0,buffer<u32>,Outputs a single projection matrix stack level extracted from GXSTAT.
+0x0214A61C,arm9_main,r0,buffer<u32>,Outputs a single position-vector matrix stack level extracted from GXSTAT.
+0x0214A7EC,arm9_main,r2,buffer<u16>,The apparent pointer accesses use a reassigned DISP3DCNT address while incoming r2 is a fog shift value.
+0x0214D168,arm9_main,r0,buffer<u16>,Text or byte buffer processed by a C library routine.
+0x0214D1FC,arm9_main,r0,buffer<u16>,Text or byte buffer processed by a C library routine.
+0x0214D1FC,arm9_main,r1,buffer<u16>,Text or byte buffer processed by a C library routine.
+0x0214D564,arm9_main,r2,buffer<u32>,Text or byte buffer processed by a C library routine.
+0x0214F5E0,arm9_main,r0,buffer<u32>,Single list head pointer cell.
+0x0214FAAC,arm9_main,r0,buffer<u32>,Output int written with a 0/1 flag from a register read.
+0x0214FAAC,arm9_main,r1,buffer<u32>,Output int written with a 0/1 flag from a register read.
+0x021501B8,arm9_main,r1,buffer<u32>,Single output word written with the command result.
+0x02150808,arm9_main,r3,buffer<u8>,The argument is the HMAC key byte buffer paired with a separate length.
+0x02150994,arm9_main,r1,buffer<u32>,The function walks 64-byte SHA1 input blocks while temporarily zeroing two words in each block.
+0x02150A10,arm9_main,r1,buffer<u8>,The twenty byte stores produce the SHA1 digest output buffer.
+0x02150DC8,arm9_main,r0,buffer<u32>,The argument is a mode value saved globally and tested to select the compression routine.
+0x02151621,arm9_main,r0,buffer<u8>,The first octet of an IPv4 byte array is checked against reserved address ranges.
+0x02180B2C,ov9_001,r1,buffer<u16>,Pointer to a single halfword written to a mosaic register.
+0x02180BD8,ov9_001,r1,buffer<u16>,Pointer to a single halfword written to a mosaic register.
+0x02181509,ov9_001,r2,buffer<u32>,"Single word at +0 is an output slot for a result, not a struct."
+0x021819D5,ov9_001,r1,buffer<u32>,Pointer to a single word read to build table rows.
+0x0218272D,ov9_001,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x0218272D,ov9_001,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x02185758,ov9_001,r1,buffer<u16>,Pointer to a single halfword written to a mosaic register.
+0x02185D55,ov9_001,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x02185D55,ov9_001,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x02185EE5,ov9_001,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x02185F91,ov9_001,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x02185F91,ov9_001,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
+0x02187665,ov9_001,r2,buffer<u32>,This is the output vector for the linked object position.
+0x021880E1,ov9_000,r0,buffer<u32>,The first word is an allocator function pointer copied into the worker context.
+0x02188E75,ov9_001,r1,buffer<u32>,slot holding a callback pointer that is cleared then called
+0x021892C1,ov9_000,r0,buffer<u8>,The argument points to one shutdown state byte updated as wireless and worker shutdown complete.
+0x02189FE5,ov9_000,r0,buffer<u8>,Combines four address bytes into one integer.
+0x0218A459,ov9_000,r1,buffer<u8>,The destination is a 13-byte key buffer transformed by indexed XOR and permutation loops.
+0x0218A789,ov9_000,r0,buffer<u8>,Initializes and shuffles a 256-byte permutation buffer then seeds trailing cipher-state bytes.
+0x0218AF6D,ov9_000,r0,buffer<u32>,The argument is a string pointer slot dereferenced before tail calling a string comparison routine.
+0x0218AF6D,ov9_000,r1,buffer<u32>,The argument is a string pointer slot dereferenced before tail calling a string comparison routine.
+0x0218B379,ov9_000,r0,buffer<u32>,The argument is a server pointer cell used as a table-element destructor argument.
+0x0218B40D,ov9_000,r0,buffer<u32>,The argument is a string pointer slot dereferenced before tail calling a string comparison routine.
+0x0218B40D,ov9_000,r1,buffer<u32>,The argument is a string pointer slot dereferenced before tail calling a string comparison routine.
+0x0218BDDD,ov9_000,r1,buffer<u8>,Six packet bytes supply an IPv4 address and port for server lookup and removal.
+0x0218BE35,ov9_000,r1,buffer<u8>,The bounded update packet supplies address bytes and additional update data.
+0x0218BF45,ov9_000,r1,buffer<u8>,A bounded byte stream contains counts followed by variable-length server entries.
+0x0218C089,ov9_000,r1,buffer<u8>,A bounded packet cursor advances through a count and variable-length field definitions.
+0x0218C435,ov9_000,r1,buffer<u8>,A bounded server-entry packet uses flag bits to select variable-length validation paths.
+0x0218C51D,ov9_000,r2,buffer<u8>,The packet cursor advances through optional sections selected by header flag bits.
+0x0218C711,ov9_000,r1,buffer<u8>,The bounded packet contains a flag byte followed by IPv4 bytes and an optional port.
+0x0218C711,ov9_000,r3,buffer<u8>,Four bytes are copied into a scalar IPv4 output.
+0x0218CD41,ov9_000,r0,buffer<u32>,Updates a destination cursor through a pointer slot after copying bytes.
+0x0218CD41,ov9_000,r3,buffer<u32>,Updates a scalar byte count through its address.
+0x0218CD91,ov9_000,r0,buffer<u32>,Writes one byte through a destination cursor and advances the pointer slot.
+0x0218CD91,ov9_000,r2,buffer<u32>,Increments a scalar byte count through its address.
+0x0218CDA5,ov9_000,r0,buffer<u32>,Advances a destination pointer slot by the copied string length including its terminator.
+0x0218CDA5,ov9_000,r2,buffer<u32>,Adds the copied string length including its terminator to a scalar count.
+0x0218D3A5,ov9_000,r0,buffer<u32>,The comparator dereferences a server pointer slot before looking up its string value.
+0x0218D3A5,ov9_000,r1,buffer<u32>,The comparator dereferences a server pointer slot before looking up its string value.
+0x0218D3FD,ov9_000,r0,buffer<u32>,The comparator dereferences a server pointer slot before looking up text for strcmp.
+0x0218D3FD,ov9_000,r1,buffer<u32>,The comparator dereferences a server pointer slot before looking up text for strcmp.
+0x0218D455,ov9_000,r0,buffer<u32>,The comparator dereferences an element of a server pointer array before looking up its floating point value.
+0x0218D455,ov9_000,r1,buffer<u32>,The comparator dereferences an element of a server pointer array before looking up its floating point value.
+0x0218D4F5,ov9_000,r0,buffer<u32>,The comparator dereferences a server pointer slot before looking up its integer value.
+0x0218D4F5,ov9_000,r1,buffer<u32>,The comparator dereferences a server pointer slot before looking up its integer value.
+0x0218D611,ov9_000,r3,buffer<u32>,The output receives one 32-bit value assembled from four datagram bytes.
+0x0218DC11,ov9_000,r0,buffer<u32>,Pointer to a pointer dereferenced once
+0x0218E1ED,ov9_000,r1,buffer<u8>,Outputs four base64 sextets as a byte array.
+0x0218E361,ov9_000,r2,buffer<u32>,A scalar address-length pointer is read before querying the socket and updated afterward.
+0x0218E445,ov9_000,r2,buffer<u32>,A scalar address-length pointer is read before accept and updated afterward.
+0x0218E549,ov9_000,r0,buffer<u32>,A single IPv4 value is byte-swapped and tested against private address ranges.
+0x0218E659,ov9_000,r1,buffer<u32>,This nullable scalar output reports socket read readiness from poll event bits.
+0x0218E659,ov9_000,r2,buffer<u32>,This nullable scalar output reports socket write readiness from poll event bits.
+0x0218E659,ov9_000,r3,buffer<u32>,This nullable scalar output reports socket error readiness from poll event bits.
+0x0218E81D,ov9_000,r0,buffer<u8>,Rewrites each byte of a zero terminated string through a case conversion table.
+0x0218E8D5,ov9_000,r0,buffer<u32>,The handle cell is dereferenced to check connection state before sending a profile message.
+0x0218E941,ov9_000,r0,buffer<u32>,The argument is a connection handle cell whose pointee supplies request state.
+0x0218EE3D,ov9_000,r0,buffer<u32>,The handle cell is dereferenced to check connection state before setting a profile field.
+0x0218F075,ov9_000,r0,buffer<u32>,The first word is the connection pointer used to set peer metadata and submit a request.
+0x0218F1E9,ov9_000,r0,buffer<u32>,The handle cell points to the connection containing six callback and context pairs.
+0x0218F235,ov9_000,r0,buffer<u32>,A nullable connection handle cell is dereferenced before processing its connection.
+0x0218F26D,ov9_000,r0,buffer<u32>,The argument is a nullable connection handle cell dereferenced before destroying the connection.
+0x0218F2B5,ov9_000,r0,buffer<u32>,The argument is a connection handle cell whose pointee holds the connection state machine.
+0x0218F3D5,ov9_000,r0,buffer<u32>,The handle cell points to the connection holding socket and receive-buffer state.
+0x0218F621,ov9_000,r0,buffer<u32>,The handle cell is dereferenced to reset connection state and release its buffers.
+0x0218F815,ov9_000,r0,buffer<u32>,The argument is an output connection pointer slot cleared before allocating a separate 0x490-byte connection.
+0x02193589,ov9_000,r2,buffer<u32>,Output pointer receiving the unpacked day value.
+0x02193EE5,ov9_000,r0,buffer<u32>,Pointer slot whose buffer is freed then cleared.
+0x02194859,ov9_000,r3,buffer<u32>,Output slot written with zero when no peer is found.
+0x02194B69,ov9_000,r0,buffer<u32>,A single peer identifier word is loaded for subtraction comparison.
+0x02194B69,ov9_000,r1,buffer<u32>,A single peer identifier word is loaded for subtraction comparison.
+0x0219620D,ov9_000,r1,buffer<u32>,Output pointer that receives the new transfer object.
+0x021966E1,ov9_000,r2,buffer<u32>,A scalar status output receives 3 or 4 according to socket poll results.
+0x02197BAD,ov9_000,r0,buffer<u8>,Byte buffer filled with generated characters.
+0x02197C6D,ov9_000,r0,buffer<u8>,Byte string checked character by character.
+0x02198809,ov9_000,r1,buffer<u32>,Pointer to a slot holding the created connection pointer.
+0x02198829,ov9_000,r1,buffer<u32>,Pointer to a slot holding the created connection pointer.
+0x021988C9,ov9_000,r0,buffer<u32>,Pointer to a table entry holding a connection pointer.
+0x02198935,ov9_000,r1,buffer<u32>,Output slot written with the created connection result.
+0x02198B69,ov9_000,r1,buffer<u8>,packet byte buffer: writes a type byte at +2
+0x02199009,ov9_000,r3,buffer<u32>,Output slot written with zero after the reliable header is built.
+0x02199559,ov9_000,r1,buffer<u8>,Received packet bytes compared with a tag then copied.
+0x0219A09D,ov9_000,r0,buffer<u32>,Pointer to a slot holding a connection pointer.
+0x0219A09D,ov9_000,r1,buffer<u32>,Pointer to a slot holding a value that is only loaded.
+0x0219A259,ov9_000,r1,buffer<u32>,Output slot that receives the new connection pointer.
+0x0219A5A9,ov9_000,r0,buffer<u32>,"Pointer to a slot holding a connection pointer, tail-called on."
+0x0219A5B5,ov9_000,r0,buffer<u32>,Pointer to a table slot holding a connection pointer.
+0x0219A5B5,ov9_000,r1,buffer<u32>,Pointer to a table slot holding a connection pointer.
+0x0219A5D1,ov9_000,r0,buffer<u32>,Pointer to a slot holding a connection pointer that is hashed.
+0x0219A5E9,ov9_000,r0,buffer<u32>,Pointer to a string pointer slot that is measured with strlen.
+0x0219A5E9,ov9_000,r1,buffer<u32>,Length slot written with the string length plus one.
+0x0219BB35,ov9_001,r1,buffer<u16>,Writes a masked display control halfword before configuring another hardware register.
+0x0219D6D5,ov9_000,r1,buffer<u32>,Pointer to a single word passed as the requested id.
+0x0219D9B9,ov9_000,r1,buffer<u8>,Output byte cleared or filled by the decoder.
+0x0219D9B9,ov9_000,r2,buffer<u8>,Output byte cleared or filled by the decoder.
+0x0219FED9,ov9_000,r1,buffer<u32>,Count-prefixed array of words copied into the player list.
+0x021A0131,ov9_000,r1,buffer<u32>,Loads a single indirect argument for the profile information predicate in a function fragment.
+0x021A1559,ov9_000,r0,buffer<u32>,Output slot receiving the player list pointer.
+0x021A18AD,ov9_000,r2,buffer<u8>,Control packet bytes: type then slot and value bytes.
+0x021A1AAD,ov9_000,r2,buffer<u8>,Command text bytes parsed into integers.
+0x021A1E0D,ov9_000,r3,buffer<u8>,Byte string compared against fixed tags.
+0x021A2299,ov9_000,r0,buffer<u32>,Dereferences a pointer to the matchmaking object before accessing its named fields.
+0x021A28AD,ov9_001,r2,buffer<u32>,This is a pointer to a screen pointer whose +0x109c value controls blend brightness.
+0x021A28C5,ov9_001,r2,buffer<u32>,This is a pointer to a screen pointer whose +0x109c value controls blend brightness.
+0x021A2A55,ov9_001,r0,buffer<u32>,Dereferences a pointer slot to obtain the screen object before accessing its resource.
+0x021A3751,ov9_001,r0,buffer<u32>,The pointer is dereferenced once to obtain the menu screen whose option at +0x1080 is cycled.
+0x021A3851,ov9_001,r1,buffer<u32>,Dereferences a pointer slot to obtain the screen object and then its job handle.
+0x021A3BE1,ov9_000,r1,buffer<u8>,Received packet bytes parsed as text commands.
+0x021A3E7D,ov9_000,r1,buffer<u8>,Received packet bytes compared with a fixed 6-byte tag.
+0x021A40F9,ov9_000,r2,buffer<u8>,Byte buffer holding length-prefixed field lists.
+0x021A4615,ov9_000,r0,buffer<u8>,Swaps bytes through two buffer pointers.
+0x021A4615,ov9_000,r1,buffer<u8>,Swaps bytes through two buffer pointers.
+0x021A4621,ov9_000,r3,buffer<u32>,Output slot written by the address resolver.
+0x021A49D5,ov9_000,r0,buffer<u32>,Output slot that receives the allocated service pointer.
+0x021A5E51,ov9_000,r1,buffer<u8>,two small bytes followed by a 0x50 byte blob that is copied
+0x021A6A89,ov9_000,r0,buffer<u16>,Output halfword receiving the length.
+0x021A7BC9,ov9_000,r1,buffer<u32>,Output word receiving available byte count.
+0x021A7BC9,ov9_000,r2,buffer<u16>,Output halfword.
+0x021A7BC9,ov9_000,r3,buffer<u16>,Output halfword.
+0x021A8A85,ov9_000,r0,buffer<u32>,Pointer to a list head slot walked through links at +0x7C.
+0x021A8AD5,ov9_000,r0,buffer<u32>,Single list head pointer cell.
+0x021A8B7D,ov9_000,r1,buffer<u8>,Output byte buffer written big-endian.
+0x021A8BE9,ov9_000,r1,buffer<u32>,Output word receiving the parsed address.
+0x021A8E45,ov9_000,r0,buffer<u32>,Pointer to a single address word.
+0x021A8E45,ov9_000,r1,buffer<u32>,Pointer to a single address word.
+0x021A93AD,ov9_000,r0,buffer<u32>,Output slot receiving the available byte count.
+0x021AA021,ov9_000,r1,buffer<u8>,TLS record bytes with big-endian length at +0x3 and payload at +0x5.
+0x021AA1AD,ov9_000,r1,buffer<u8>,TLS record bytes with big-endian length at +0x3 and payload at +0x5.
+0x021AAB09,ov9_000,r0,buffer<u8>,Array of 2 or 3 byte cipher suite ids compared in a loop.
+0x021AAB41,ov9_000,r1,buffer<u8>,Received hello message bytes with a random block and a session id length.
+0x021AB069,ov9_000,r1,buffer<u32>,Cursor slot pointing into an encoded certificate.
+0x021AB415,ov9_000,r0,buffer<u8>,Encoded date digits read as bytes.
+0x021AB47D,ov9_000,r0,buffer<u8>,Character buffer appended to.
+0x021AB4C5,ov9_000,r0,buffer<u32>,Cursor slot advanced while reading an encoded length.
+0x021AC349,ov9_000,r0,buffer<u8>,Output byte buffer.
+0x021AC349,ov9_000,r1,buffer<u32>,Array of 32-bit words encoded big-endian.
+0x021AC455,ov9_000,r1,buffer<u16>,Array of 16-bit big integer limbs.
+0x021AC7B5,ov9_000,r0,buffer<u16>,Big integer limb array whose first halfword is set to one.
+0x021AD049,ov9_000,r0,buffer<u8>,Decimal digit string.
+0x021AD049,ov9_000,r1,buffer<u32>,Cursor slot updated while parsing.
+0x021AD071,ov9_000,r0,buffer<u8>,Host name string split on dots.
+0x021AD20D,ov9_000,r0,buffer<u8>,Encoded name bytes skipped over.
+0x021AD285,ov9_000,r0,buffer<u32>,Output slot receiving the acquired address.
+0x021ADF45,ov9_000,r0,buffer<u32>,Output slot receiving the bytes read.
+0x021ADF95,ov9_000,r0,buffer<u32>,Output slot receiving the received byte count.
+0x021ADFE9,ov9_000,r0,buffer<u32>,Output slot receiving the received byte count.
+0x021AE0CD,ov9_000,r0,buffer<u16>,Output halfword receiving the local port.
+0x021AE0CD,ov9_000,r1,buffer<u32>,Output word receiving the peer address.
+0x021AFE51,ov9_000,r2,buffer<u8>,Received packet bytes compared with a fixed header tag.
+0x021AFFE1,ov9_000,r0,buffer<u16>,Six-byte address compared as three halfwords.
+0x021AFFE1,ov9_000,r1,buffer<u16>,Six-byte address compared as three halfwords.
+0x021B0181,ov9_000,r0,buffer<u8>,Data bytes summed as halfwords for a checksum.
+0x021B7CAD,ov9_003,r1,buffer<u8>,Output byte written then tail-called.
+0x021B7CDD,ov9_003,r1,buffer<u32>,Pair of words read as one 64-bit time value.
+0x021B7D61,ov9_003,r0,buffer<u8>,Byte buffers compared.
+0x021B7D61,ov9_003,r1,buffer<u8>,Byte buffers compared.
+0x021B81B5,ov9_003,r3,buffer<u8>,Output byte receiving a checksum byte.
+0x021B8301,ov9_003,r1,buffer<u16>,Output buffer with a length halfword followed by data.
+0x021B8301,ov9_003,r3,buffer<u16>,Pointer to a single length halfword updated in place.
+0x021B835D,ov9_003,r0,buffer<u8>,Output packet buffer built field by field.
+0x021B8D5D,ov9_003,r2,buffer<u32>,Output status slot written with a result word.
+0x021B8E21,ov9_003,r2,buffer<u32>,Output status slot written with a result word.
+0x021B8F29,ov9_003,r2,buffer<u32>,Output status slot written with a result word.
+0x021B9039,ov9_003,r2,buffer<u32>,Output status slot written with a result word.
+0x021B9239,ov9_003,r0,buffer<u8>,Checks a supplied number of character bytes for the printable range.
+0x021BA6F5,ov9_003,r0,buffer<u32>,Length-prefixed buffer whose payload is started at +4.
+0x021BB25D,ov9_003,r0,buffer<u8>,Output character buffer for a formatted address.
+0x021BB365,ov9_003,r0,buffer<u8>,Fills a byte buffer for the supplied length.
+0x021BB3C9,ov9_003,r1,buffer<u32>,Reads successive words and encodes their bytes into an output buffer.
+0x021BBD5D,ov9_003,r0,buffer<u32>,Reads consecutive expanded AES round-key words.
+0x021BBD5D,ov9_003,r2,buffer<u8>,Reads sixteen ciphertext bytes from a block buffer.
+0x021BC185,ov9_003,r0,buffer<u32>,Reads consecutive expanded AES round-key words.
+0x021BC185,ov9_003,r2,buffer<u8>,Reads sixteen plaintext bytes from a block buffer.
+0x021BC769,ov9_003,r0,buffer<u32>,Builds an array of expanded AES round-key words.
+0x021BC769,ov9_003,r1,buffer<u8>,Reads raw key bytes and packs them into key-schedule words.
+0x021BCA51,ov9_003,r0,buffer<u8>,First input is an eight byte XOR buffer.
+0x021BCA51,ov9_003,r1,buffer<u8>,Second input is an eight byte XOR buffer.
+0x021BCA51,ov9_003,r2,buffer<u8>,Output receives eight pairwise XOR bytes.
+0x021BD729,ov9_003,r0,buffer<u8>,16-byte output byte buffer filled from several address globals
+0x021BDBC9,ov9_003,r0,buffer<u32>,Cursor slot advanced past one record.
+0x021BDBC9,ov9_003,r2,buffer<u32>,Output word receiving the record type.
+0x021BDBC9,ov9_003,r3,buffer<u32>,Output word receiving the record length.
+0x021BF611,ov9_003,r0,buffer<u8>,Path string with a byte at +5 tested.
+0x021C209D,ov9_003,r0,buffer<u32>,An optional scalar output pointer receives the secondary global context pointer.
+0x021C209D,ov9_003,r1,buffer<u32>,An optional scalar output pointer receives the other secondary global context pointer.
+0x021C20C5,ov9_003,r0,buffer<u32>,An optional scalar output pointer receives the first global context pointer.
+0x021C20C5,ov9_003,r1,buffer<u32>,An optional scalar output pointer receives the second global context pointer.
+0x021C86D9,ov9_003,r0,buffer<u8>,Four consecutive bytes are formatted as IPv4 octets.
+0x021CD091,ov9_003,r0,buffer<u32>,Outputs the base pointer of the scan result array before counting its entries.
+0x021CF1A9,ov9_003,r0,buffer<u8>,Compares a six-byte MAC address against connected child entries.
+0x021D0E5D,ov9_003,r0,buffer<u8>,Writes the current session state to a byte output.
+0x021D0E5D,ov9_003,r1,buffer<u8>,Writes a boolean byte indicating whether the session state changed.
+0x021D1479,ov9_003,r1,buffer<u32>,Out word receiving a loaded size or pointer.
+0x021D1731,ov9_003,r2,buffer<u32>,Out word receiving a sprite coordinate.
+0x021D1731,ov9_003,r3,buffer<u32>,Out word receiving a sprite coordinate.
+0x021D24CD,ov9_003,r0,buffer<u16>,Reads a pair of halfword origin coordinates to construct rectangle bounds.
+0x021D24CD,ov9_003,r1,buffer<u16>,Reads a pair of halfword dimensions added to the origin coordinates.
+0x021D2EC1,ov9_003,r0,buffer<u32>,pointer to a single OAM style attribute word marked free

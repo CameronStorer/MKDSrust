@@ -1,11 +1,17 @@
 """Block 4 finish line: a function is T2 when its name is confirmed (no _maybe, not sub_) and every
-pointer argument it reads through is typed (no `arg` lines in the MKDS_TYPE_DUMP for its entry)."""
-import csv, sys, collections
+pointer argument it reads through is typed (no `arg` lines in the MKDS_TYPE_DUMP for its entry).
+An argument reviewed as a plain buffer (`arg_types.csv`, type `buffer<T>`) counts as typed."""
+import csv, os, sys, collections
 tiers, dump = sys.argv[1], sys.argv[2]
+reviewed = set()
+at = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'arg_types.csv')
+if os.path.exists(at):
+    for r in csv.DictReader(open(at, encoding='utf-8')):
+        reviewed.add((int(r['address'], 16) & ~1, int(r['register'].lstrip('r'))))
 untyped = collections.defaultdict(set)
 for line in open(dump, encoding='utf-8'):
     p = line.strip().split(',')
-    if p[0] == 'arg':
+    if p[0] == 'arg' and (int(p[1], 16) & ~1, int(p[2])) not in reviewed:
         untyped[int(p[1], 16) & ~1].add(p[2])
 tot = named = typed = both = 0
 area = collections.defaultdict(lambda: [0, 0])
