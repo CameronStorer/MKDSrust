@@ -14,3 +14,9 @@ they contain no game code or extracted assets.
 
 Research methods, maintenance scripts and technical notes live in the
 [documentation repository](https://github.com/CameronStorer/MKDSrust-Docs).
+
+## Credits
+Many function names, and later struct and signature facts, come from the
+[tylzars/mkds](https://github.com/tylzars/mkds) matching decompilation (MIT, Tyler Zars and RonyxDumb), used with
+the creator's permission. Only names, types and layouts are used; no code from it is included. Rows taken from it say
+so in their notes.
