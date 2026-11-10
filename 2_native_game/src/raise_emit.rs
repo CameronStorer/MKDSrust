@@ -130,6 +130,116 @@ pub struct Facts {
     pub flag_calls_after: usize,
     pub preserved: u16,
     pub boundary_params: u16,
+    /// Typed signatures: a leaf that returns to its unchanged `lr` on every exit (so `lr` can stay implicit).
+    pub lr_leaf: bool,
+    /// Typed signatures: parameter registers stored unchanged into an `fx32` field.
+    pub fx_params: u16,
+}
+
+/// Typed signatures (`MKDS_TYPED_SIG=1`, native builds): a printing change only. Parameters and results
+/// print as `Ptr<Struct>` / `Fx32` where the type rounds or the field types say so, with the same bits.
+pub fn typed_sig_enabled() -> bool {
+    nospill_enabled() && std::env::var("MKDS_TYPED_SIG").as_deref() == Ok("1")
+}
+
+/// What the generator found about a direct function, for printing its signature and its calls.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TypedInfo {
+    /// `lr` is not a parameter and no pc is returned: the function is a leaf returning to its `lr`.
+    pub lr_implicit: bool,
+    /// Parameter registers (bit n = rn) that print as `Fx32`.
+    pub fx: u16,
+}
+
+/// Sets the typed-signature facts of the direct functions, by their `direct` crate name.
+pub fn set_typed_info(map: HashMap<String, TypedInfo>) {
+    TYPED_INFO.with(|t| *t.borrow_mut() = map);
+}
+
+fn typed_info(name: &str) -> TypedInfo {
+    TYPED_INFO.with(|t| t.borrow().get(name).copied().unwrap_or_default())
+}
+
+/// The `layout` crate's root alias of a struct's marker type (`Kart` for `kart::T`), if it gets one.
+pub fn marker_alias(st: &str) -> Option<String> {
+    let ok = st.starts_with(|c: char| c.is_ascii_uppercase()) && st.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !["Ptr", "Fx32", "T", "Self"].contains(&st);
+    ok.then(|| st.to_string())
+}
+
+/// `Ptr<Kart>` for a struct with module `kart`.
+fn ptr_type(st: &str, module: &str) -> String {
+    format!("Ptr<{}>", marker_alias(st).unwrap_or_else(|| format!("{module}::T")))
+}
+
+/// The type a direct function's parameter register prints as.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Kind {
+    U32,
+    Fx32,
+    /// (struct, `Ptr<..>` type)
+    Ptr(String, String),
+}
+
+fn param_kind(entry: u32, r: u8, info: TypedInfo, notes: &Notes) -> Kind {
+    if let Some(st) = (notes.param_of)(entry, r) {
+        if let Some(m) = (notes.module_of)(&st) {
+            let ty = ptr_type(&st, &m);
+            return Kind::Ptr(st, ty);
+        }
+    }
+    if info.fx >> r & 1 != 0 { Kind::Fx32 } else { Kind::U32 }
+}
+
+fn ret_kind(entry: u32, r: u8, notes: &Notes) -> Kind {
+    if r == 0 {
+        if let Some(st) = (notes.ret_of)(entry) {
+            if let Some(m) = (notes.module_of)(&st) {
+                let ty = ptr_type(&st, &m);
+                return Kind::Ptr(st, ty);
+            }
+        }
+    }
+    Kind::U32
+}
+
+impl Kind {
+    fn ty(&self) -> String {
+        match self {
+            Kind::U32 => "u32".into(),
+            Kind::Fx32 => "Fx32".into(),
+            Kind::Ptr(_, t) => t.clone(),
+        }
+    }
+    /// `raw` (a u32) as this kind.
+    fn wrap(&self, raw: &str) -> String {
+        match self {
+            Kind::U32 => raw.to_string(),
+            Kind::Fx32 => format!("Fx32::from_bits({raw})"),
+            Kind::Ptr(..) => format!("Ptr::new({raw})"),
+        }
+    }
+    /// A value of this kind as a u32.
+    fn unwrap(&self, v: &str) -> String {
+        match self {
+            Kind::U32 => v.to_string(),
+            Kind::Fx32 => format!("{v}.bits()"),
+            Kind::Ptr(..) => format!("{v}.0"),
+        }
+    }
+}
+
+/// Whether `word` occurs in `text` as a whole identifier.
+fn has_word(text: &str, word: &str) -> bool {
+    let b = text.as_bytes();
+    let id = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    text.match_indices(word).any(|(i, _)| (i == 0 || !id(b[i - 1])) && b.get(i + word.len()).is_none_or(|&c| !id(c)))
+}
+
+/// A leaf that returns to its unchanged `lr` on every exit.
+fn lr_leaf(body: &str) -> bool {
+    let exits = body.matches("exit!(").count();
+    exits > 0 && exits == body.matches("exit!(iw(lr))").count() && !has_word(&body.replace("exit!(iw(lr))", ""), "lr")
 }
 
 thread_local! {
@@ -139,6 +249,7 @@ thread_local! {
     /// The segment of the function being emitted, and its own signature when it is closed (its direct
     /// variant is emitted, and its T1 entry becomes a wrapper).
     static CURRENT: std::cell::RefCell<(String, Option<DirectSig>)> = std::cell::RefCell::new((String::new(), None));
+    static TYPED_INFO: std::cell::RefCell<HashMap<String, TypedInfo>> = std::cell::RefCell::new(HashMap::new());
     static LAST_FACTS: std::cell::RefCell<Option<Facts>> = const { std::cell::RefCell::new(None) };
     static LAST_DIRECT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
@@ -2368,6 +2479,7 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
     // Block 5.5: no-spill emission (ARM9, `--timing native`)
     let nospill = cost.is_none() && crate::lift::timing_native() && nospill_enabled();
     let own = if nospill { CURRENT.with(|c| c.borrow().1.clone()) } else { None };
+    let mut body_written = 0u16;
     if nospill {
         let thumb = f.entry & 1;
         let internal = |t: u32| blocks.contains_key(&((t & !1) | thumb));
@@ -2405,6 +2517,7 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
             }
         }
         written = w2.into_iter().filter(|&i| i < 15).collect();
+        body_written = to_mask(&written);
         all = u2.union(&written).copied().filter(|&i| i < 15).collect();
         let mut rets = to_mask(&written);
         let mut preserved = 0;
@@ -2495,6 +2608,32 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
         Some(n) => format!("r{r} = `{n}` (a `{st}`)"),
         None => format!("r{r} points to a `{st}`"),
     }).collect();
+    // typed signatures (`MKDS_TYPED_SIG=1`): the parameters' kinds, and the pointer parameters that stay as they
+    // are for the whole function (their accesses print as methods: `kart.bounce_height(m)`)
+    let mut reg_names = reg_names;
+    let typed_sig = own.is_some() && typed_sig_enabled();
+    let sig_info = own.as_ref().map(|o| typed_info(&o.name)).unwrap_or_default();
+    let fx_params = own.as_ref().filter(|_| typed_sig).map_or(0, |o| fx_param_scan(&blocks, &typed.fields, o.params, body_written));
+    let sig_info = TypedInfo { fx: sig_info.fx | fx_params, ..sig_info };
+    // (register, the signature's parameter name, the body's name for the raw value, kind)
+    let mut sig_params: Vec<(u8, String, String, Kind)> = Vec::new();
+    let mut ptr_regs: HashMap<u8, (String, String)> = HashMap::new();
+    if let (true, Some(o)) = (typed_sig, &own) {
+        for r in mask_regs(o.params).filter(|&r| !(sig_info.lr_implicit && r == 14)) {
+            let kind = param_kind(f.entry, r, sig_info, notes);
+            let handle = reg_names.get(&r).cloned().unwrap_or_else(|| ir::reg_name(r));
+            let mut raw = handle.clone();
+            if let Kind::Ptr(st, _) = &kind {
+                if body_written >> r & 1 == 0 {
+                    raw = format!("{handle}_raw");
+                    reg_names.insert(r, raw.clone());
+                    ptr_regs.insert(r, (handle.clone(), st.clone()));
+                }
+            }
+            sig_params.push((r, handle, raw, kind));
+        }
+    }
+    ir::set_ptr_regs(ptr_regs);
     let flag_plan = if own.is_some() && flag_locals::enabled() { flag_locals::for_function(&blocks, f.entry, &order, &live, &sf) } else { None };
     let mut ctx = Ctx { local_flags: flag_plan.is_some(), blocks: &blocks, rpo, idom, merge, header, children, names, notes, switches: &switches, fields: typed.fields, budget_flags, native_timing: cost.is_none() && crate::lift::timing_native(), nospill, selfn: own.is_some(), tail_fallback };
     ir::set_reg_names(reg_names);
@@ -2528,14 +2667,30 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
         // Block 5.5: the direct variant (for the `direct` crate) and a T1 entry that wraps it
         let params: Vec<u8> = mask_regs(o.params).collect();
         let rets: Vec<u8> = mask_regs(o.rets).collect();
-        let ret_ty = if rets.is_empty() { "u32".to_string() } else { format!("(u32, {})", vec!["u32"; rets.len()].join(", ")) };
+        let ret_kinds: Vec<Kind> = rets.iter().map(|&r| if typed_sig { ret_kind(f.entry, r, notes) } else { Kind::U32 }).collect();
+        let lr_imp = typed_sig && sig_info.lr_implicit;
+        let ret_tys: Vec<String> = ret_kinds.iter().map(Kind::ty).collect();
+        let ret_ty = match (lr_imp, ret_tys.len()) {
+            (false, 0) => "u32".to_string(),
+            (false, _) => format!("(u32, {})", ret_tys.join(", ")),
+            (true, 0) => "()".to_string(),
+            (true, 1) => ret_tys[0].clone(),
+            (true, _) => format!("({})", ret_tys.join(", ")),
+        };
         let mut d = s.clone();
         let _ = writeln!(d, "#[allow(non_snake_case, unused_variables, unused_assignments, unused_mut, unreachable_code, unused_parens, unused_braces, unused_macros, unused_labels, clippy::all)]");
-        let ps: Vec<String> = params.iter().map(|&i| format!("mut {}: u32", ir::reg_name(i))).collect();
+        let ps: Vec<String> = if typed_sig {
+            sig_params.iter().map(|(_, handle, _, k)| if *k == Kind::U32 { format!("mut {handle}: u32") } else { format!("{handle}: {}", k.ty()) }).collect()
+        } else {
+            params.iter().map(|&i| format!("mut {}: u32", ir::reg_name(i))).collect()
+        };
         let cpu_param = if o.cpu { "c: &mut recomp::rt::Cpu, " } else { "" };
         let _ = writeln!(d, "pub fn {}({cpu_param}m: &mut dyn recomp::rt::Bus{}{}) -> {ret_ty} {{", o.name, if ps.is_empty() { "" } else { ", " }, ps.join(", "));
         let _ = writeln!(d, "    #[allow(unused_imports)] use recomp::rt as R;\n    #[allow(unused_imports)] use recomp::arm::interwork as iw;\n    #[allow(unused_imports)] use recomp::rt::Mem as _;");
-        let locals: Vec<u8> = all.iter().copied().filter(|i| o.params >> i & 1 == 0).collect();
+        for (_, handle, raw, k) in sig_params.iter().filter(|p| p.3 != Kind::U32) {
+            let _ = writeln!(d, "    let mut {raw} = {};", k.unwrap(handle));
+        }
+        let locals: Vec<u8> = all.iter().copied().filter(|i| o.params >> i & 1 == 0 && !(lr_imp && *i == 14)).collect();
         if !locals.is_empty() {
             let _ = writeln!(d, "    let ({}) = ({});", locals.iter().map(|&i| format!("mut {}", ir::reg_name(i))).collect::<Vec<_>>().join(", "), locals.iter().map(|_| "0u32").collect::<Vec<_>>().join(", "));
         }
@@ -2558,9 +2713,20 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
             f.cpu_before_flags = cpu_before_flags;
             f.flag_calls_before = flag_calls_before;
             f.flag_calls_after = flag_locals::call_count(&body);
+            f.lr_leaf = lr_leaf(&body);
+            f.fx_params = fx_params;
         } });
-        let back = if rets.is_empty() { "t".to_string() } else { format!("(t, {})", rets.iter().map(|&i| ir::reg_name(i)).collect::<Vec<_>>().join(", ")) };
-        let _ = writeln!(d, "    macro_rules! exit {{ ($e:expr) => {{{{ let t: u32 = $e; {flag_exit}return {back}; }}}} }}");
+        let vals: Vec<String> = rets.iter().zip(&ret_kinds).map(|(&i, k)| k.wrap(&ir::reg_name(i))).collect();
+        let back = match (lr_imp, vals.len()) {
+            (false, 0) => "t".to_string(),
+            (false, _) => format!("(t, {})", vals.join(", ")),
+            (true, 0) => "()".to_string(),
+            (true, 1) => vals[0].clone(),
+            (true, _) => format!("({})", vals.join(", ")),
+        };
+        // an implicit `lr` is never read: every exit of the function returns to it (see `lr_leaf`)
+        let let_t = if lr_imp { "" } else { "let t: u32 = $e; " };
+        let _ = writeln!(d, "    macro_rules! exit {{ ($e:expr) => {{{{ {let_t}{flag_exit}return {back}; }}}} }}");
         for mac in ["spill", "reload", "leave", "poll"] {
             let _ = writeln!(d, "    macro_rules! {mac} {{ ($($x:tt)*) => {{ compile_error!(\"{mac} in a direct function\") }} }}");
         }
@@ -2573,8 +2739,27 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
         let _ = writeln!(s, "pub fn f_{id}_t1(c: &mut recomp::rt::Cpu, m: &mut dyn recomp::rt::Bus, pc: u32) -> u32 {{");
         let _ = writeln!(s, "    #[allow(unused_imports)] use recomp::rt as R;");
         let _ = writeln!(s, "    if pc != {:#X} || !R::t1_enabled({:#X}) {{ return f_{id}(c, m, pc); }}", f.entry, f.entry);
-        let args: String = params.iter().map(|&i| format!(", c.r[{i}]")).collect();
         let cpu_arg = if o.cpu { "c, " } else { "" };
+        if typed_sig {
+            let args: String = sig_params.iter().map(|(r, _, _, k)| format!(", {}", k.wrap(&format!("c.r[{r}]")))).collect();
+            let vs: Vec<String> = (0..rets.len()).map(|k| format!("v{k}")).collect();
+            let call = format!("direct::{}({cpu_arg}m{args})", o.name);
+            if lr_imp {
+                let _ = writeln!(s, "    use recomp::arm::interwork as iw;\n    let x = iw(c.r[14]);");
+                match rets.len() {
+                    0 => { let _ = writeln!(s, "    {call};"); }
+                    1 => { let _ = writeln!(s, "    let v0 = {call};"); }
+                    _ => { let _ = writeln!(s, "    let ({}) = {call};", vs.join(", ")); }
+                }
+            } else if rets.is_empty() {
+                let _ = writeln!(s, "    let x = {call};");
+            } else {
+                let _ = writeln!(s, "    let (x, {}) = {call};", vs.join(", "));
+            }
+            let sets: String = rets.iter().zip(&vs).zip(&ret_kinds).map(|((i, v), k)| format!("c.r[{i}] = {}; ", k.unwrap(v))).collect();
+            if !sets.is_empty() { let _ = writeln!(s, "    {}", sets.trim_end()); }
+        } else {
+        let args: String = params.iter().map(|&i| format!(", c.r[{i}]")).collect();
         if rets.is_empty() {
             let _ = writeln!(s, "    let x = direct::{}({cpu_arg}m{args});", o.name);
         } else {
@@ -2582,6 +2767,7 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
             let _ = writeln!(s, "    let (x, {}) = direct::{}({cpu_arg}m{args});", vs.join(", "), o.name);
             let sets: String = rets.iter().zip(&vs).map(|(i, v)| format!("c.r[{i}] = {v}; ")).collect();
             let _ = writeln!(s, "    {}", sets.trim_end());
+        }
         }
         let _ = writeln!(s, "    f_{id}(c, m, x)\n}}");
         ir::set_reg_names(Default::default());
@@ -2787,14 +2973,15 @@ fn stmt_code(c: &Ctx, x: u32, s: &S, depth: usize, out: &mut String) {
         }
         S::Goto(E::Const(t)) if c.selfn && direct_for(*t).is_some() => {
             let d = direct_for(*t).unwrap();
-            let args: String = mask_regs(d.params).map(|i| format!(", {}", ir::reg_name(i))).collect();
+            let args: String = if typed_sig_enabled() { typed_args(c, *t, &d) } else { mask_regs(d.params).map(|i| format!(", {}", ir::reg_name(i))).collect() };
             let cpu_arg = if d.cpu { "c, " } else { "" };
             let sync = if c.local_flags && d.cpu { flag_locals::sync(crate::raise::NZCV, false) } else { String::new() };
             let reload = if c.local_flags && d.cpu { flag_locals::sync(crate::raise::NZCV, true) } else { String::new() };
             let call = format!("{}({cpu_arg}m{args})", d.name);
-            let rets: Vec<String> = mask_regs(d.rets).map(ir::reg_name).collect();
-            let stmt = if rets.is_empty() { format!("let x = {call};") }
-                else { format!("let x: u32; (x, {}) = {call};", rets.join(", ")) };
+            let stmt = if typed_sig_enabled() { typed_call_stmt(c, *t, &d, &call, true) } else {
+                let rets: Vec<String> = mask_regs(d.rets).map(ir::reg_name).collect();
+                if rets.is_empty() { format!("let x = {call};") } else { format!("let x: u32; (x, {}) = {call};", rets.join(", ")) }
+            };
             line(out, &format!("{sync}{stmt} {reload}exit!(x);"));
         }
         S::Goto(E::Const(t)) if c.selfn && boundary_for(*t).is_some() => {
@@ -2814,12 +3001,22 @@ fn stmt_code(c: &Ctx, x: u32, s: &S, depth: usize, out: &mut String) {
             // Block 5.5: a closed callee, called directly (nothing to spill)
             let d = direct_for(*t).unwrap();
             let name = (c.names)(*t).map(|n| format!(" // {n}")).unwrap_or_default();
-            let args: String = mask_regs(d.params).map(|i| format!(", {}", ir::reg_name(i))).collect();
+            let args: String = if typed_sig_enabled() { typed_args(c, *t, &d) } else { mask_regs(d.params).map(|i| format!(", {}", ir::reg_name(i))).collect() };
             let path = if c.selfn { d.name.clone() } else { format!("direct::{}", d.name) };
             let cpu_arg = if d.cpu { "c, " } else { "" };
             let sync = if c.local_flags && d.cpu { flag_locals::sync(crate::raise::NZCV, false) } else { String::new() };
             let reload = if c.local_flags && d.cpu { flag_locals::sync(crate::raise::NZCV, true) } else { String::new() };
             let call = format!("{path}({cpu_arg}m{args})");
+            if typed_sig_enabled() {
+                // typed call; a leaf with an implicit `lr` returns no pc (it returns to `ret`, which `lr` was set to)
+                let stmt = typed_call_stmt(c, *t, &d, &call, false);
+                let check = if typed_info(&d.name).lr_implicit { String::new() } else {
+                    let bad = if c.selfn { format!("R::bad_return(x, {ret:#X})") } else { "exit!(x)".into() };
+                    format!(" if x != {ret:#X} {{ {bad}; }}")
+                };
+                line(out, &format!("{sync}{stmt}{check}{reload}{name}"));
+                return;
+            }
             let rets: Vec<String> = mask_regs(d.rets).map(ir::reg_name).collect();
             let stmt = if rets.is_empty() { format!("let x = {call};") } else { format!("let x: u32; (x, {}) = {call};", rets.join(", ")) };
             let bad = if c.selfn { format!("R::bad_return(x, {ret:#X})") } else { "exit!(x)".into() };
@@ -2875,6 +3072,70 @@ fn stmt_code(c: &Ctx, x: u32, s: &S, depth: usize, out: &mut String) {
     }
 }
 
+/// The arguments of a typed call (`, kart, Fx32::from_bits(r2)`): a typed pointer parameter passes as it is,
+/// everything else is wrapped in its kind.
+fn typed_args(c: &Ctx, target: u32, d: &DirectSig) -> String {
+    let info = typed_info(&d.name);
+    mask_regs(d.params).filter(|&i| !(info.lr_implicit && i == 14)).map(|i| {
+        let raw = ir::reg_name(i);
+        match param_kind(target, i, info, c.notes) {
+            Kind::Ptr(st, _) if ir::ptr_var(i, &st).is_some() => format!(", {}", ir::ptr_var(i, &st).unwrap()),
+            k => format!(", {}", k.wrap(&raw)),
+        }
+    }).collect()
+}
+
+/// The statement of a typed call: binds the pc to `x` unless `lr` is implicit (a tail call then returns to the
+/// caller's own `lr`), and the results to their registers.
+fn typed_call_stmt(c: &Ctx, target: u32, d: &DirectSig, call: &str, tail: bool) -> String {
+    let info = typed_info(&d.name);
+    let regs: Vec<u8> = mask_regs(d.rets).collect();
+    let kinds: Vec<Kind> = regs.iter().map(|&r| ret_kind(target, r, c.notes)).collect();
+    let names: Vec<String> = regs.iter().map(|&r| ir::reg_name(r)).collect();
+    let plain = kinds.iter().all(|k| *k == Kind::U32);
+    let tmps: Vec<String> = (0..regs.len()).map(|k| format!("ret{k}")).collect();
+    let moves: String = regs.iter().enumerate().map(|(k, _)| format!(" {} = {};", names[k], kinds[k].unwrap(&tmps[k]))).collect();
+    let lr = if info.lr_implicit {
+        match (regs.len(), plain) {
+            (0, _) => format!("{call};"),
+            (1, true) => format!("{} = {call};", names[0]),
+            (_, true) => format!("({}) = {call};", names.join(", ")),
+            (1, false) => format!("let ret0 = {call};{moves}"),
+            (_, false) => format!("let ({}) = {call};{moves}", tmps.join(", ")),
+        }
+    } else if regs.is_empty() {
+        format!("let x = {call};")
+    } else if plain {
+        format!("let x: u32; (x, {}) = {call};", names.join(", "))
+    } else {
+        format!("let (x, {}) = {call};{moves}", tmps.join(", "))
+    };
+    if info.lr_implicit && tail { format!("{lr} let x = iw(lr);") } else { lr }
+}
+
+/// Parameter registers that are stored, unchanged and unwritten, into an `fx32` field: they print as `Fx32`.
+fn fx_param_scan(blocks: &BTreeMap<u32, Block>, fields: &FieldMap, params: u16, written: u16) -> u16 {
+    let mut out = 0u16;
+    for b in blocks.values() {
+        for ins in &b.insts {
+            for (si, s) in ins.stmts.iter().enumerate() {
+                let S::Store { w: Width::B32, addr, val: E::Reg(p) } = s else { continue };
+                if *p >= 15 || params >> p & 1 == 0 || written >> p & 1 != 0 { continue }
+                let addr = match addr { E::Bin(ir::Bin::And, a, m) if **m == E::Not(Box::new(E::Lit(3))) => &**a, a => a };
+                let (r, off) = match addr {
+                    E::Bin(ir::Bin::Add, b, k) => match (&**b, &**k) { (E::Reg(r), E::Const(v)) => (*r, *v), _ => continue },
+                    E::Reg(r) => (*r, 0),
+                    _ => continue,
+                };
+                if fields.get(&(b.start, ins.addr, si)).and_then(|m| m.get(&(r, off))).is_some_and(|(f, _)| f.fx) {
+                    out |= 1 << p;
+                }
+            }
+        }
+    }
+    out
+}
+
 fn boundary_call(target: u32, ret: &str, d: &BoundarySig, local_flags: bool) -> String {
     // The callee takes the CPU and may read or write flags there (hand-written SDK asm): keep the
     // flag locals coherent with `c` across the call, like any other call that still takes a CPU.
@@ -2885,4 +3146,37 @@ fn boundary_call(target: u32, ret: &str, d: &BoundarySig, local_flags: bool) -> 
         .map(|r| format!("{} = c.r[{r}]; ", ir::reg_name(r))).collect();
     // `c.r[13]` is not a result of a direct function: put back the value it had before the spill
     format!("let sp0 = c.r[13]; {spill}{fsync}let x = m.call(c, {target:#X}, {ret}); c.r[13] = sp0; {reload}{freload}// checked dispatcher boundary")
+}
+
+#[cfg(test)]
+mod typed_sig_tests {
+    use super::*;
+
+    #[test]
+    fn lr_stays_implicit_only_for_leaves_returning_to_it() {
+        assert!(lr_leaf("if r0 == 0 { exit!(iw(lr)); }\nexit!(iw(lr));"));
+        assert!(!lr_leaf("lr = 5; exit!(iw(lr));"), "lr is written");
+        assert!(!lr_leaf("exit!(iw(r3));"), "returns elsewhere");
+        assert!(!lr_leaf("exit!(iw(lr)); exit!(x);"), "one exit is not a return to lr");
+        assert!(!lr_leaf("r0 = r1;"), "no exit at all");
+        assert!(lr_leaf("let lrx = 1; exit!(iw(lr));"), "a longer identifier is not lr");
+    }
+
+    #[test]
+    fn marker_aliases_avoid_reserved_names() {
+        assert_eq!(marker_alias("Kart").as_deref(), Some("Kart"));
+        assert_eq!(marker_alias("Ptr"), None);
+        assert_eq!(marker_alias("kart"), None);
+        assert_eq!(marker_alias("A B"), None);
+    }
+
+    #[test]
+    fn kinds_wrap_and_unwrap_the_same_bits() {
+        let p = Kind::Ptr("Kart".into(), "Ptr<Kart>".into());
+        assert_eq!(p.wrap("r0"), "Ptr::new(r0)");
+        assert_eq!(p.unwrap("v"), "v.0");
+        assert_eq!(Kind::Fx32.wrap("r1"), "Fx32::from_bits(r1)");
+        assert_eq!(Kind::Fx32.unwrap("v"), "v.bits()");
+        assert_eq!(Kind::U32.wrap("r2"), "r2");
+    }
 }
