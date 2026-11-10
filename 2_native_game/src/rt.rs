@@ -130,6 +130,9 @@ pub trait Mem {
 /// Everything lifted code needs from the machine around it: memory plus calls, BIOS calls (SWI)
 /// and coprocessor access. The DS service layer (L3/L5) implements it; tests use `mem::Ram`.
 pub trait Bus: Mem {
+    /// A direct poll may keep a Rust call stack only when slice_end always resumes
+    /// in place. Other buses select a resumable entry instead.
+    fn can_suspend(&self) -> bool { false }
     /// Run code from `target` (bit 0 = Thumb) until control comes back to `ret`; returns the pc
     /// reached (`ret` normally; anything else means the callee left by another way, e.g. a
     /// switch helper that rewrote lr, and the caller must continue from there).

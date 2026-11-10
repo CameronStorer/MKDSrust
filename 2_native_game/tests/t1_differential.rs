@@ -234,11 +234,146 @@ impl NativeTiming {
 }
 impl Drop for NativeTiming {
     fn drop(&mut self) {
+        recomp::raise_emit::set_poll_irq_preserved(false);
         recomp::lift::set_timing_native(false, &[]);
         recomp::raise_emit::set_direct(Default::default());
         recomp::raise_emit::set_boundary(Default::default());
         recomp::raise_emit::set_current("", None);
     }
+}
+
+/// Direct poll coverage includes both the conservative context path and the
+/// proven IRQ path, and executes an interrupt while the loop's locals are live.
+#[test]
+fn direct_poll_loops_resume_with_live_registers_and_flags() {
+    use recomp::raise_emit::{set_current, set_direct, set_poll_irq_preserved, take_direct, take_facts, DirectSig};
+    let _lock = emit_lock();
+    let _native = NativeTiming::on();
+    struct Modes(Vec<(&'static str, Option<std::ffi::OsString>)>);
+    impl Drop for Modes {
+        fn drop(&mut self) {
+            for (k, v) in &self.0 { unsafe { match v {
+                Some(v) => std::env::set_var(k, v), None => std::env::remove_var(k),
+            } } }
+        }
+    }
+    let _modes = Modes(["MKDS_POLL_DIRECT", "MKDS_FLAG_LOCALS", "MKDS_BOUNDARY"].into_iter()
+        .map(|k| (k, std::env::var_os(k))).collect());
+    unsafe { std::env::set_var("MKDS_POLL_DIRECT", "1"); }
+    let base = 0x0200_0000;
+    let mut image: Vec<u8> = [0xE92D_4010u32, 0xE3A0_4003, 0xE080_0004,
+        0xE254_4001, 0x1AFF_FFFC, 0xE8BD_4010, 0xE12F_FF1E].iter().flat_map(|w| w.to_le_bytes()).collect();
+    image.resize(0x40, 0);
+    image.extend([0xB510u16, 0x2403, 0x1900, 0x3C01, 0xD1FC, 0xBC10, 0xBC08, 0x4718].iter().flat_map(|h| h.to_le_bytes()));
+    image.resize(0x80, 0);
+    image.extend([0xE92D_4010u32, 0xE3A0_4011, 0xEBFF_FFDC,
+        0xE080_0004, 0xE8BD_4010, 0xE12F_FF1E].iter().flat_map(|w| w.to_le_bytes()));
+    let img = Image::new(base, &image);
+    for narrow in [false, true] {
+    for flags in ["0", "1"] {
+    for boundary in ["0", "1"] {
+        unsafe { std::env::set_var("MKDS_FLAG_LOCALS", flags); std::env::set_var("MKDS_BOUNDARY", boundary); }
+        set_poll_irq_preserved(narrow);
+        set_direct(Default::default());
+        let mut direct_sigs = std::collections::HashMap::new();
+        let mut src = String::from("#![allow(unused)]\nstatic IMAGE: &[u8] = include_bytes!(\"image.bin\");\nmod direct { pub use super::*; }\n");
+        src.push_str(&format!("const NARROW: bool = {narrow};\n"));
+        for (name, entry, end) in [("arm_poll", base, base + 28), ("thumb_poll", base + 0x41, base + 0x50)] {
+            let f = discover(&img, entry, Some((entry & !1, end)), 100).unwrap();
+            set_current("arm9_main", None);
+            emit_t1(&f, name, Some(&img)).unwrap();
+            let facts = take_facts().unwrap();
+            assert_eq!(facts.escape, None);
+            assert!(facts.polls);
+            if !narrow { assert_eq!(facts.live_in, 0x7FFF); assert_eq!(facts.written, 0x7FFF); }
+            let sig = DirectSig { cpu: true, params: facts.live_in, rets: facts.written, name: format!("d_{name}") };
+            direct_sigs.insert(entry, vec![("arm9_main".into(), sig.clone())]);
+            set_current("arm9_main", Some(sig));
+            let t1 = emit_t1(&f, name, Some(&img)).unwrap();
+            let d = take_direct().unwrap();
+            assert!(take_facts().unwrap().cpu, "poll macros must retain the CPU argument");
+            assert!(d.contains(if narrow { "checked IRQ preservation" } else { "full IRQ/context spill" }));
+            if narrow { assert!(!d.contains("r4 = c.r[4]")); }
+            src.push_str(&emit_full(&f, name, Some(&img), None, true));
+            src.push_str(&d); src.push_str(&t1);
+        }
+        set_direct(direct_sigs);
+        let parent = discover(&img, base + 0x80, Some((base + 0x80, base + 0x98)), 100).unwrap();
+        set_current("arm9_main", None);
+        emit_t1(&parent, "parent_poll", Some(&img)).unwrap();
+        let x = take_facts().unwrap();
+        assert_eq!(x.escape, None);
+        set_current("arm9_main", Some(DirectSig { cpu: true, params: x.live_in, rets: x.written, name: "d_parent_poll".into() }));
+        let t1 = emit_t1(&parent, "parent_poll", Some(&img)).unwrap();
+        src.push_str(&emit_full(&parent, "parent_poll", Some(&img), None, true));
+        src.push_str(&take_direct().unwrap()); src.push_str(&t1);
+        src.push_str(r#"
+use recomp::rt::{Bus as _, Mem as _};
+struct PollBus { ram: recomp::mem::Ram<'static>, polls: usize, suspends: bool }
+impl recomp::rt::Mem for PollBus {
+    fn r8(&mut self,a:u32)->u8 { self.ram.r8(a) }
+    fn r16(&mut self,a:u32)->u16 { self.ram.r16(a) }
+    fn r32(&mut self,a:u32)->u32 { self.ram.r32(a) }
+    fn w8(&mut self,a:u32,v:u8) { self.ram.w8(a,v) }
+    fn w16(&mut self,a:u32,v:u16) { self.ram.w16(a,v) }
+    fn w32(&mut self,a:u32,v:u32) { self.ram.w32(a,v) }
+}
+impl recomp::rt::Bus for PollBus {
+    fn can_suspend(&self)->bool { self.suspends }
+    fn call(&mut self,c:&mut recomp::rt::Cpu,t:u32,_:u32)->u32 {
+        assert_eq!(t,0x02000000); f_arm_poll(c,self,t)
+    }
+    fn swi(&mut self,_:&mut recomp::rt::Cpu,_:u32) { unreachable!() }
+    fn mrc(&mut self,_:&mut recomp::rt::Cpu,_:u8,_:u8,_:u8,_:u8,_:u8)->u32 { unreachable!() }
+    fn mcr(&mut self,_:&mut recomp::rt::Cpu,_:u8,_:u8,_:u8,_:u8,_:u8,_:u32) { unreachable!() }
+    fn slice_end(&mut self,c:&mut recomp::rt::Cpu,pc:u32,cost:u32)->bool {
+        self.polls += 1;
+        if !self.suspends { return false; }
+        // The BIOS stub saves volatile registers; exception mode banks sp/lr
+        // and preserves the interrupted flags. The handler uses its own stack.
+        let volatile = [c.r[0],c.r[1],c.r[2],c.r[3],c.r[12]];
+        let sp = c.r[13]; let lr = c.r[14];
+        recomp::rt::take_irq(c,pc,0xFFFF0000);
+        c.r[0] = 0xDEAD; c.r[1] = 0xBEEF; c.r[2] = 0xABCD;
+        c.r[3] = 0x1234; c.r[12] = 0x5678;
+        c.n = true; c.z = false; c.c = false; c.v = true;
+        // Model an unproven handler/context path that observes an incoming
+        // saved register and changes another. Only the full form permits this.
+        if !NARROW { assert_eq!(c.r[4],4-self.polls as u32); c.r[5] ^= c.r[6]; }
+        [c.r[0],c.r[1],c.r[2],c.r[3],c.r[12]] = volatile;
+        c.restore_spsr();
+        assert_eq!((c.r[13],c.r[14]),(sp,lr));
+        // Pay exactly this block, forcing another IRQ on the next iteration.
+        c.budget = cost;
+        assert!(recomp::rt::spend(c,cost));
+        true
+    }
+}
+fn main() {
+    for (entry,t0,t1) in [(0x02000000,f_arm_poll as recomp::mem::LiftedFn,f_arm_poll_t1 as recomp::mem::LiftedFn),
+        (0x02000041,f_thumb_poll as recomp::mem::LiftedFn,f_thumb_poll_t1 as recomp::mem::LiftedFn),
+        (0x02000080,f_parent_poll as recomp::mem::LiftedFn,f_parent_poll_t1 as recomp::mem::LiftedFn)] {
+    for seed in 0..128u64 {
+    for suspends in [false,true] {
+        let mut a = recomp::rt::Cpu::default();
+        for i in 0..15 { a.r[i] = (seed as u32).wrapping_mul(0x9E3779B1).rotate_left(i as u32); }
+        a.r[13]=0x027E3000; a.r[14]=0x02000401; a.budget=0;
+        a.banked[2][0]=0x027E1000;
+        a.n=seed&1!=0; a.z=seed&2!=0; a.c=seed&4!=0; a.v=seed&8!=0;
+        let mut b=a.clone();
+        let mut x=PollBus { ram:recomp::mem::Ram::new(IMAGE,0x02000000,seed),polls:0,suspends };
+        let mut y=PollBus { ram:recomp::mem::Ram::new(IMAGE,0x02000000,seed),polls:0,suspends };
+        assert_eq!(t0(&mut a,&mut x,entry),t1(&mut b,&mut y,entry));
+        let expected = if suspends { 3 } else { 1 };
+        assert_eq!(x.polls,expected); assert_eq!(y.polls,expected);
+        a.budget=0; b.budget=0;
+        assert_eq!(a.state(),b.state(),"entry {entry:#X} seed {seed}");
+        assert_eq!(x.ram.writes,y.ram.writes);
+    }}}
+}
+"#);
+        compile_and_run(&src, &image, &format!("poll_{narrow}_{flags}_{boundary}"));
+    }}}
 }
 
 struct BoundaryMode(Option<std::ffi::OsString>);
@@ -262,6 +397,51 @@ impl Drop for BoundaryMode {
 }
 
 #[test]
+fn direct_poll_proof_rejects_unsaved_handlers_and_exact_output_is_unchanged() {
+    use recomp::raise_emit::{set_current, take_facts};
+    let _lock = emit_lock();
+    let _native = NativeTiming::on();
+    let _boundary = BoundaryMode::on();
+    struct PollMode(Option<std::ffi::OsString>);
+    impl Drop for PollMode { fn drop(&mut self) { unsafe { match &self.0 {
+        Some(v) => std::env::set_var("MKDS_POLL_DIRECT", v),
+        None => std::env::remove_var("MKDS_POLL_DIRECT"),
+    } } } }
+    let _poll = PollMode(std::env::var_os("MKDS_POLL_DIRECT"));
+    let base = 0x0200_0000;
+    // A saved r4 is preserved across every loop iteration. The otherwise
+    // identical handler without the push/pop must not certify a narrow poll.
+    let safe = [0xE92D_4010u32, 0xE3A0_4003, 0xE254_4001,
+        0x1AFF_FFFD, 0xE8BD_4010, 0xE12F_FF1E];
+    let unsafe_handler = [0xE3A0_4003u32, 0xE254_4001, 0x1AFF_FFFD, 0xE12F_FF1E];
+    unsafe { std::env::set_var("MKDS_POLL_DIRECT", "1"); }
+    for (words, preserved) in [(&safe[..], true), (&unsafe_handler[..], false)] {
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let img = Image::new(base, &bytes);
+        let f = discover(&img, base, Some((base, base + bytes.len() as u32)), 100).unwrap();
+        set_current("arm9_main", None);
+        emit_t1(&f, "handler", Some(&img)).unwrap();
+        let x = take_facts().unwrap();
+        assert_eq!(x.irq_preserved & 0x2FF0 == 0x2FF0, preserved);
+        assert_eq!(x.preserved, 0, "unproven IRQ paths cannot be narrow boundary callees");
+        assert!(x.polls);
+    }
+    let bytes: Vec<u8> = safe.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let img = Image::new(base, &bytes);
+    let f = discover(&img, base, Some((base, base + bytes.len() as u32)), 100).unwrap();
+    unsafe { std::env::set_var("MKDS_POLL_DIRECT", "0"); }
+    emit_t1(&f, "off", Some(&img)).unwrap();
+    assert_eq!(take_facts().unwrap().escape, Some("loop (poll point)"));
+    recomp::lift::set_timing_native(false, &[]);
+    let t0 = emit_full(&f, "exact", Some(&img), None, true);
+    let t1 = emit_t1(&f, "exact", Some(&img)).unwrap();
+    unsafe { std::env::set_var("MKDS_POLL_DIRECT", "1"); }
+    assert!(!recomp::raise_emit::poll_direct_enabled());
+    assert_eq!(t0, emit_full(&f, "exact", Some(&img), None, true));
+    assert_eq!(t1, emit_t1(&f, "exact", Some(&img)).unwrap());
+}
+
+#[test]
 fn boundary_direct_calls_match_translation_on_random_states() {
     use recomp::raise_emit::{set_boundary, set_current, take_direct, take_facts, BoundarySig, DirectSig};
     let _lock = emit_lock();
@@ -276,12 +456,12 @@ fn boundary_direct_calls_match_translation_on_random_states() {
     // Tail call through the same boundary.
     image.extend([0xE3A0_2063u32, 0xEA00_002D].iter().flat_map(|w| w.to_le_bytes()));
     image.resize(0x100, 0);
-    // The loop makes this callee open: mov r2,#3; subs r2,#1; bne; add r0,r0,r1;
-    // add r3,r3,#1; bx lr. r12 and r1 pass through unchanged.
-    image.extend([0xE3A0_2003u32, 0xE252_2001, 0x1AFF_FFFD, 0xE080_0001,
+    // Consume incoming carry before the loop overwrites it: tail boundaries
+    // must load their flag inputs too. r12 and r1 pass through unchanged.
+    image.extend([0xE0A0_0001u32, 0xE3A0_2003, 0xE252_2001, 0x1AFF_FFFD, 0xE080_0001,
         0xE283_3001, 0xE12F_FF1E].iter().flat_map(|w| w.to_le_bytes()));
     let img = Image::new(base, &image);
-    let open = discover(&img, base + 0x100, Some((base + 0x100, base + 0x118)), 100).unwrap();
+    let open = discover(&img, base + 0x100, Some((base + 0x100, base + 0x11C)), 100).unwrap();
     set_current("arm9_main", None);
     emit_t1(&open, "open", Some(&img)).unwrap();
     let facts = take_facts().unwrap();
