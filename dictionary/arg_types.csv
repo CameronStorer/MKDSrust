@@ -2,18 +2,18 @@ address,segment,register,type,reason
 0x01FF9144,arm9_autoload1_itcm,r0,buffer<u32>,Display list pointer sent by DMA.
 0x01FF9210,arm9_autoload1_itcm,r0,buffer<u32>,Single flag word cleared.
 0x01FF92E0,arm9_autoload1_itcm,r0,buffer<u32>,Single pointer stored into a global.
-0x01FFA478,arm9_autoload1_itcm,r2,buffer<u32>,Horizontal vector components are squared and compared with a fixed length threshold.
-0x01FFA4B4,arm9_autoload1_itcm,r1,buffer<u32>,The argument is a numeric vector used by the kart geometry calculations.
+0x01FFA478,arm9_autoload1_itcm,r2,ptr<VecFx32>,tylzars/mkds prototype: func_01ffa478 param 2 is Vec3 *
+0x01FFA4B4,arm9_autoload1_itcm,r1,ptr<VecFx32>,tylzars/mkds prototype: func_01ffa4b4 param 1 is Vec3 *
 0x01FFB930,arm9_autoload1_itcm,r0,buffer<u32>,Mutable scalar magnitude is compared with 0x3000 before applying kart lean.
 0x01FFC500,arm9_autoload1_itcm,r0,buffer<u32>,Scales a single fixed-point lean value and clamps small magnitudes to zero.
 0x01FFCCD0,arm9_autoload1_itcm,r1,buffer<u32>,Input quaternion of four fixed-point words
 0x01FFCD84,arm9_autoload1_itcm,r1,buffer<u32>,Reads four numeric quaternion components to construct a rotation matrix.
 0x01FFCF7C,arm9_autoload1_itcm,r0,buffer<u32>,Reads four fixed-point quaternion components to calculate their squared magnitude.
 0x01FFCF7C,arm9_autoload1_itcm,r1,buffer<u32>,Receives four normalized quaternion components as a numeric array.
-0x01FFD190,arm9_autoload1_itcm,r0,buffer<u32>,The argument is a numeric vector used by the kart geometry calculations.
+0x01FFD190,arm9_autoload1_itcm,r0,ptr<VecFx32>,tylzars/mkds prototype: QuaternionFromAxisAngle param 0 is const Vec3 *
 0x01FFD190,arm9_autoload1_itcm,r2,buffer<u32>,Outputs four fixed-point quaternion components from an axis and half-angle sine and cosine.
 0x01FFF3E8,arm9_autoload1_itcm,r0,buffer<u32>,This internal continuation reads one numeric component with other inputs held in registers and stack slots.
-0x01FFF434,arm9_autoload1_itcm,r3,buffer<u32>,Three output coordinates are weighted sums of the edge endpoint vectors.
+0x01FFF434,arm9_autoload1_itcm,r3,ptr<VecFx32>,tylzars/mkds prototype: func_01fff434 param 3 is Vec3 *
 0x01FFFEF4,arm9_autoload1_itcm,r2,buffer<u32>,Single word read as DMA register offset.
 0x0200002D,arm9_main,r0,buffer<u8>,"Fragment of data decoded as code, not a function."
 0x02000507,arm9_main,r2,buffer<u16>,"Fragment of data decoded as code, not a function."
@@ -60,7 +60,7 @@ address,segment,register,type,reason
 0x0202553C,arm9_main,r1,buffer<u8>,Callers pass a stack buffer (sp+0) that receives four bytes.
 0x02025CD1,arm9_main,r0,buffer<u16>,Output buffer of ten 16-bit characters written one digit at a time.
 0x0202C885,arm9_main,r1,buffer<u16>,The pointer is a mutable text buffer whose halfword at +0x14 is cleared before menu_fit_text.
-0x02039708,arm9_main,r0,buffer<u16>,Only clears six consecutive halfwords without demonstrating distinct member roles.
+0x02039708,arm9_main,r0,ptr<KeyInputState>,tylzars/mkds prototype: ClearInputSlotBitsAndRepeat param 0 is InputSlot *
 0x02039E08,arm9_main,r1,buffer<u32>,Single output pointer written with a created heap.
 0x02039E08,arm9_main,r2,buffer<u32>,Single output pointer written with a created heap.
 0x02039E08,arm9_main,r3,buffer<u32>,Single output pointer written with a created heap.
@@ -82,8 +82,8 @@ address,segment,register,type,reason
 0x0203F5F0,arm9_main,r1,buffer<u8>,Output scalar stored as a byte.
 0x0203F5F0,arm9_main,r2,buffer<u16>,Output scalar stored as a halfword.
 0x0203FA60,arm9_main,r1,buffer<u32>,Pointer to a single out value stored and reloaded.
-0x02040FD8,arm9_main,r2,buffer<u32>,Receives three direction components from the respawn record or a default unit vector.
-0x020410A4,arm9_main,r2,buffer<u32>,Receives three direction components from the respawn record or a default unit vector.
+0x02040FD8,arm9_main,r2,ptr<VecFx32>,tylzars/mkds prototype: GetCourseMapRespawnBattlePointLink param 2 is Vec3 *
+0x020410A4,arm9_main,r2,ptr<VecFx32>,tylzars/mkds prototype: GetCourseMapRespawnRacePointLink param 2 is Vec3 *
 0x02042D35,arm9_main,r1,buffer<u16>,Callers pass elements of a graph-building loop; only two u16 values are read.
 0x02042EC1,arm9_main,r1,buffer<u16>,Same pair-of-u16 element as the enemy path linker; callers pass loop elements.
 0x020431A5,arm9_main,r0,buffer<u32>,A pointer to a stream cursor is advanced twice while reading a section count.
@@ -112,9 +112,9 @@ address,segment,register,type,reason
 0x0205FD2C,arm9_main,r0,buffer<u32>,Holder whose first word points to a 13-byte-stride table.
 0x0205FD78,arm9_main,r2,buffer<u32>,Out word receiving a record byte.
 0x020617A8,arm9_main,r0,buffer<u32>,Outputs a single difference between two global state values.
-0x02063B10,arm9_main,r1,buffer<u32>,The argument is a numeric vector used by the kart geometry calculations.
-0x02063B30,arm9_main,r1,buffer<u32>,The argument is a numeric vector used by the kart geometry calculations.
-0x02063B50,arm9_main,r1,buffer<u32>,Copies three consecutive kart basis words into a numeric output vector.
+0x02063B10,arm9_main,r1,ptr<VecFx32>,tylzars/mkds prototype: GetKartForward param 1 is Vec3 *
+0x02063B30,arm9_main,r1,ptr<VecFx32>,tylzars/mkds prototype: GetKartUp param 1 is Vec3 *
+0x02063B50,arm9_main,r1,ptr<VecFx32>,tylzars/mkds prototype: GetKartMatrixRow0 param 1 is Vec3 *
 0x02067B0C,arm9_main,r1,buffer<u32>,Writes a single recovery or reaction code through an output word pointer.
 0x02067B60,arm9_main,r1,buffer<u32>,Writes a single recovery or reaction code through an output word pointer.
 0x02067BF4,arm9_main,r1,buffer<u32>,Writes a single recovery or reaction code through an output word pointer.
@@ -131,19 +131,19 @@ address,segment,register,type,reason
 0x02067F88,arm9_main,r1,buffer<u32>,Writes a single recovery or reaction code through an output word pointer.
 0x020681E4,arm9_main,r1,buffer<u32>,Writes a single recovery or reaction code through an output word pointer.
 0x0206CEB4,arm9_main,r0,buffer<u32>,Writes the scalar fixed-point acceleration output through this pointer.
-0x0206F694,arm9_main,r2,buffer<u32>,The three vector components are ORed together to detect a zero wall response vector.
+0x0206F694,arm9_main,r2,ptr<VecFx32>,tylzars/mkds prototype: func_0206f694 param 2 is Vec3 *
 0x02071318,arm9_main,r1,buffer<u16>,The input is a scalar animation selector and r1 is reassigned to kart plus 0x300 before the store.
-0x02072B94,arm9_main,r2,buffer<u32>,The optional placement pointer supplies vector components at zero and eight.
+0x02072B94,arm9_main,r2,ptr<VecFx32>,tylzars/mkds prototype: ResetKartAndSetPos param 2 is const Vec3 *
 0x02072D84,arm9_main,r1,buffer<u32>,This is an output pointer receiving the single fixed-point fall scale value.
-0x020745D4,arm9_main,r0,buffer<u32>,The accessed words form the output target position vector.
+0x020745D4,arm9_main,r0,ptr<VecFx32>,tylzars/mkds prototype: UpdateChaseCameraLookAt param 0 is Vec3 *
 0x020745D4,arm9_main,r2,buffer<u32>,Only one mutable numeric value is evidenced through this argument.
-0x02075FE0,arm9_main,r2,buffer<u32>,The second component of a numeric direction vector controls camera slope.
+0x02075FE0,arm9_main,r2,ptr<VecFx32>,tylzars/mkds prototype: UpdateChaseCameraPosGoalYOffset param 2 is Vec3 *
 0x02077A71,arm9_main,r0,buffer<u32>,The output pointer receives a scalar unlock group index or minus one.
 0x02077F0D,arm9_main,r0,buffer<u16>,Single u16 angle value updated in place.
 0x0207A2A8,arm9_main,r0,buffer<u32>,Writes one tracked scalar value to an output pointer when available.
-0x0207B960,arm9_main,r0,buffer<u32>,Receives three numeric coordinates computed by spline interpolation.
-0x0207F630,arm9_main,r1,buffer<u32>,Dereferences a pointer slot to obtain the source object.
-0x0207F668,arm9_main,r1,buffer<u32>,Dereferenced once to get a global pointer; r1 is the address of a pointer slot.
+0x0207B960,arm9_main,r0,ptr<VecFx32>,tylzars/mkds prototype: ComputePosCurvePoint param 0 is Vec3 *
+0x0207F630,arm9_main,r1,ptr<PathDirectionTracker>,tylzars/mkds prototype: SetKartAiLinkPosAndClearSideOffset param 1 is LinkCursor *
+0x0207F668,arm9_main,r1,ptr<PathDirectionTracker>,tylzars/mkds prototype: SetKartAiLinkPosAndAddSideOffset param 1 is LinkCursor *
 0x02084FB0,arm9_main,r1,buffer<u8>,Callers compute r1 from file-relative offsets inside a loaded model resource block.
 0x02088888,arm9_main,r0,buffer<u32>,"Plain flag value that selects a table, never dereferenced."
 0x02089D70,arm9_main,r0,buffer<u8>,Entry of a table of three halfwords.
@@ -177,8 +177,8 @@ address,segment,register,type,reason
 0x0209DDEC,arm9_main,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
 0x0209DDEC,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
 0x0209EA10,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
-0x020A4B70,arm9_main,r1,buffer<u32>,Three fixed point components are added to balloon positions.
-0x020A5744,arm9_main,r0,buffer<u32>,Three coordinate words are copied to the spawned shine position with a vertical offset.
+0x020A4B70,arm9_main,r1,ptr<VecFx32>,tylzars/mkds prototype: BalloonKartOffsetCallback param 1 is Vec3 *
+0x020A5744,arm9_main,r0,ptr<VecFx32>,tylzars/mkds prototype: StartShine16 param 0 is Vec3 *
 0x020A6AE4,arm9_main,r2,buffer<u8>,Only a byte flag is dereferenced and compared with one.
 0x020A6AE4,arm9_main,r3,buffer<u8>,Only a byte return value is dereferenced.
 0x020A7F18,arm9_main,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
@@ -191,7 +191,7 @@ address,segment,register,type,reason
 0x020AB11D,arm9_main,r1,buffer<u32>,Outputs the top coordinate through a scalar pointer.
 0x020AB11D,arm9_main,r2,buffer<u32>,Outputs the right coordinate through a scalar pointer.
 0x020AB11D,arm9_main,r3,buffer<u32>,Outputs the bottom coordinate through a scalar pointer.
-0x020AB59D,arm9_main,r0,buffer<u16>,Compares the first of three halfword values with each of the other two.
+0x020AB59D,arm9_main,r0,ptr<MenuRangeCursor>,tylzars/mkds prototype: IsRepeatCounterFiring param 0 is RepeatCounter *
 0x020AB849,arm9_main,r0,buffer<u32>,Adjusts a scalar left coordinate relative to the text box.
 0x020AB849,arm9_main,r1,buffer<u32>,Adjusts a scalar top coordinate relative to the text box.
 0x020AB849,arm9_main,r2,buffer<u32>,Adjusts a scalar right coordinate relative to the text box.
@@ -214,18 +214,18 @@ address,segment,register,type,reason
 0x020B4BF8,arm9_main,r0,buffer<u32>,Outputs four numeric coefficients of a scaled 2x2 minimap rotation matrix.
 0x020B4CB0,arm9_main,r0,buffer<u32>,Outputs four fixed-point coefficients of a 2x2 rotation matrix.
 0x020B4CEC,arm9_main,r0,buffer<u32>,Outputs a four-element diagonal scale matrix with reciprocal scale on the diagonal.
-0x020B4E70,arm9_main,r0,buffer<u32>,Tests three world-position components against course-specific bounds.
-0x020B4F64,arm9_main,r1,buffer<u32>,Reads the three fixed-point components of the starting vector for interpolation.
-0x020B4F64,arm9_main,r2,buffer<u32>,Reads the three fixed-point components of the ending vector for interpolation.
-0x020B5AE8,arm9_main,r0,buffer<u32>,Reads world X and Z coordinates for conversion to minimap coordinates.
-0x020B5F68,arm9_main,r0,buffer<u32>,Reads two numeric coordinates to test overlap with the course map viewport.
-0x020B5FE4,arm9_main,r0,buffer<u32>,Reads world X and Z coordinates for the minimap transform.
-0x020B5FE4,arm9_main,r1,buffer<u32>,Receives two integer minimap coordinates.
-0x020B6078,arm9_main,r1,buffer<u32>,Receives a two-component minimap position derived from the racer position.
-0x020B6B18,arm9_main,r0,buffer<u32>,Outputs the first corner as two fixed-point coordinates.
-0x020B6B18,arm9_main,r1,buffer<u32>,Outputs the second corner as two fixed-point coordinates.
-0x020B6BD4,arm9_main,r0,buffer<u32>,Outputs two interpolated fixed-point corner coordinates.
-0x020B6BD4,arm9_main,r1,buffer<u32>,Outputs the second interpolated fixed-point corner pair.
+0x020B4E70,arm9_main,r0,ptr<VecFx32>,tylzars/mkds prototype: IsPositionOutsideBox param 0 is const Vec3 *
+0x020B4F64,arm9_main,r1,ptr<VecFx32>,tylzars/mkds prototype: ComputePointAlongLine param 1 is const Vec3 *
+0x020B4F64,arm9_main,r2,ptr<VecFx32>,tylzars/mkds prototype: ComputePointAlongLine param 2 is const Vec3 *
+0x020B5AE8,arm9_main,r0,ptr<VecFx32>,tylzars/mkds prototype: ComputeRaceHudSubScreenPosition param 0 is const Vec3 *
+0x020B5F68,arm9_main,r0,ptr<Vec2Fx32>,tylzars/mkds prototype: IsRaceHudSubScreenPairNearCenter param 0 is const UnkPair020b502c *
+0x020B5FE4,arm9_main,r0,ptr<VecFx32>,tylzars/mkds prototype: ComputeRaceHudSubScreenCoursePosition param 0 is const Vec3 *
+0x020B5FE4,arm9_main,r1,ptr<Vec2Fx32>,tylzars/mkds prototype: ComputeRaceHudSubScreenCoursePosition param 1 is UnkPair020b502c *
+0x020B6078,arm9_main,r1,ptr<Vec2Fx32>,tylzars/mkds prototype: ComputeSubScreenState0KartPosition param 1 is UnkPair020b502c *
+0x020B6B18,arm9_main,r0,ptr<Vec2Fx32>,tylzars/mkds prototype: SetFixed12MinMaxFromWhole param 0 is UnkPair020b502c *
+0x020B6B18,arm9_main,r1,ptr<Vec2Fx32>,tylzars/mkds prototype: SetFixed12MinMaxFromWhole param 1 is UnkPair020b502c *
+0x020B6BD4,arm9_main,r0,ptr<Vec2Fx32>,tylzars/mkds prototype: ComputeRaceHudSubScreenState0MinMax param 0 is UnkPair020b502c *
+0x020B6BD4,arm9_main,r1,ptr<Vec2Fx32>,tylzars/mkds prototype: ComputeRaceHudSubScreenState0MinMax param 1 is UnkPair020b502c *
 0x020B7EE8,arm9_main,r1,buffer<u32>,Outputs a scalar identifier read from the course record and dispatches on that value.
 0x020B7EE8,arm9_main,r2,buffer<u32>,Serves as a separate scalar output pointer rather than a multi-field record.
 0x020B7FD8,arm9_main,r1,buffer<u32>,Pointer to a single out word.
@@ -233,31 +233,31 @@ address,segment,register,type,reason
 0x020C0C2C,arm9_main,r0,buffer<u32>,Callers pass three different global addresses each holding one resource word.
 0x020C4AB8,arm9_main,r0,buffer<u32>,Used as a small index into a table; no struct fields read through it.
 0x020C8DBC,arm9_main,r0,buffer<u16>,The entry argument selects a switch case and is not a pointer.
-0x020CA808,arm9_main,r0,buffer<u32>,Stores four supplied words into a numeric output block.
+0x020CA808,arm9_main,r0,ptr<FourWordRecord>,tylzars/mkds prototype: func_020ca808 param 0 is TextCanvas *
 0x020CB600,arm9_main,r0,buffer<u32>,Single saturating counter word incremented.
 0x020D22E0,arm9_main,r1,buffer<u32>,pointer to a global pointer word read to find the object RNG
-0x020D4130,arm9_main,r0,buffer<u32>,position vector (x at +0 z at +8)
+0x020D4130,arm9_main,r0,ptr<VecFx32>,tylzars/mkds prototype: FindMapObjectsOfKindInRadius param 0 is Vec3 *
 0x020D49D9,arm9_main,r0,buffer<u32>,54 callers pass a slot whose stored owner pointer gets a back pointer at +0x28; a link slot not a struct.
-0x020D555C,arm9_main,r0,buffer<u32>,position vector (x at +0 and z at +8) stored by pointer in the broadphase entry
+0x020D555C,arm9_main,r0,ptr<VecFx32>,tylzars/mkds prototype: CreateCollisionSlot param 0 is Vec3 *
 0x020D5A68,arm9_main,r0,buffer<u32>,Caller passes a stack address as the argument.
-0x020D5A68,arm9_main,r2,buffer<u32>,pointer to a single u32 compared with the record
+0x020D5A68,arm9_main,r2,ptr<PlaneEquation>,tylzars/mkds prototype: func_020d5a68 param 2 is Unk020e04b0 *
 0x020D5AA0,arm9_main,r0,buffer<u32>,Argument is a pointer slot dereferenced to a ground-contact record.
 0x020D5F64,arm9_main,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
 0x020D5F64,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
 0x020D5F8C,arm9_main,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
 0x020D5F8C,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
-0x020D6F78,arm9_main,r0,buffer<u32>,Reads X and Z components of a numeric vector for horizontal normalization.
-0x020D6F78,arm9_main,r1,buffer<u32>,Receives the normalized horizontal vector components.
-0x020D720C,arm9_main,r0,buffer<u32>,3 x fx32 vector or output vector
+0x020D6F78,arm9_main,r0,ptr<VecFx32>,tylzars/mkds prototype: Vec3NormalizeXZAndGetLengthOrZero param 0 is Vec3 *
+0x020D6F78,arm9_main,r1,ptr<VecFx32>,tylzars/mkds prototype: Vec3NormalizeXZAndGetLengthOrZero param 1 is Vec3 *
+0x020D720C,arm9_main,r0,ptr<VecFx32>,tylzars/mkds prototype: QuaternionFromVec3Degrees param 0 is Vec3 *
 0x020D79B0,arm9_main,r0,buffer<u32>,Reads fixed-point quaternion components to combine tilt with heading.
 0x020D79B0,arm9_main,r2,buffer<u32>,Outputs four numeric quaternion components after heading rotation.
 0x020D7A3C,arm9_main,r0,buffer<u32>,3 x fx32 vector or output vector
-0x020D7B88,arm9_main,r0,buffer<u32>,Reads three surface-normal components to calculate terrain tilt.
+0x020D7B88,arm9_main,r0,ptr<VecFx32>,tylzars/mkds prototype: QuaternionFromYAxisToVec3 param 0 is Vec3 *
 0x020D7B88,arm9_main,r1,buffer<u32>,Outputs four fixed-point quaternion components from the surface normal.
-0x020D91DC,arm9_main,r2,buffer<u32>,output position vector
-0x020D94DC,arm9_main,r1,buffer<u32>,vector read and written at +0 and +8
+0x020D91DC,arm9_main,r2,ptr<VecFx32>,tylzars/mkds prototype: GetSegmentCurveXzLinearY param 2 is Vec3 *
+0x020D94DC,arm9_main,r1,ptr<VecFx32>,tylzars/mkds prototype: ComputeWeightedPointXz param 1 is Vec3 *
 0x020D95C0,arm9_main,r0,buffer<u32>,Twelve numeric words form four three component Bezier control points.
-0x020D95C0,arm9_main,r1,buffer<u32>,Three output coordinates accumulate weighted control points.
+0x020D95C0,arm9_main,r1,ptr<VecFx32>,tylzars/mkds prototype: ComputeWeightedPoint param 1 is Vec3 *
 0x020D970C,arm9_main,r1,buffer<u32>,Stores one scalar cubic interpolation weight.
 0x020D970C,arm9_main,r2,buffer<u32>,Stores and reuses one scalar polynomial coefficient.
 0x020D970C,arm9_main,r3,buffer<u32>,Provides scalar output storage for cubic weights.
@@ -302,39 +302,39 @@ address,segment,register,type,reason
 0x020E5B88,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
 0x020E5BA0,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
 0x020E6489,arm9_main,r0,buffer<u32>,"Single word at +0 is an output slot for a result, not a struct."
-0x020E69BC,arm9_main,r0,buffer<u32>,Three coordinate words are dotted with the view matrix to compute depth.
+0x020E69BC,arm9_main,r0,ptr<VecFx32>,tylzars/mkds prototype: func_020e69bc param 0 is Vec3 *
 0x020E6DF0,arm9_main,r0,buffer<u32>,Words at 0x10 and 0x14 supply cosine and sine terms for a numeric rotation matrix.
 0x020E6F51,arm9_main,r0,buffer<u32>,42 callers pass a link slot whose stored owner gets a back pointer at +0x24.
 0x020EA1D4,arm9_main,r1,buffer<u32>,Callers pass ROM table addresses 12 bytes before the spec argument.
 0x020EA4BD,arm9_main,r2,buffer<u32>,"Single word at +0 is an output slot for a result, not a struct."
 0x020EA55D,arm9_main,r0,buffer<u32>,"Single word at +0 is an output slot for a result, not a struct."
 0x020EA589,arm9_main,r0,buffer<u32>,"Single word at +0 is an output slot for a result, not a struct."
-0x020EA94C,arm9_main,r1,buffer<u32>,Plain vec3 normal tested on its y component.
-0x020EAC20,arm9_main,r0,buffer<u32>,Updates three fixed point vector components to ease a floor normal.
+0x020EA94C,arm9_main,r1,ptr<VecFx32>,tylzars/mkds prototype: func_020ea94c param 1 is Vec3 *
+0x020EAC20,arm9_main,r0,ptr<VecFx32>,tylzars/mkds prototype: func_020eac20 param 0 is Vec3 *
 0x020EB760,arm9_main,r2,buffer<u8>,Reads a single collision classification byte to gate particle effects.
 0x020EB760,arm9_main,r3,buffer<u8>,Reads and returns a single byte through this pointer.
 0x020EB7E0,arm9_main,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
 0x020EB7E0,arm9_main,r3,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
 0x020EC41C,arm9_main,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
 0x020EC450,arm9_main,r2,buffer<u8>,Only a byte at +0 is read: a callback status byte rather than a struct.
-0x020F1F98,arm9_main,r2,buffer<u32>,Three-word direction vector is copied and its vertical component is clamped before reflection.
-0x020F2A6C,arm9_main,r0,buffer<u32>,Input heading is used componentwise in fixed-point vector arithmetic.
-0x020F2A6C,arm9_main,r2,buffer<u32>,Output receives the three components of the adjusted heading.
-0x020F3A58,arm9_main,r0,buffer<u32>,Points to a route node pointer slot that is dereferenced before traversal.
-0x020F3A58,arm9_main,r1,buffer<u32>,Receives two words of route search output without evidence of a distinct object layout.
-0x020F3A58,arm9_main,r2,buffer<u32>,Supplies a three component position for squared distance comparisons.
-0x020F3C54,arm9_main,r0,buffer<u32>,Points to a route node pointer slot that is dereferenced before traversal.
-0x020F3C54,arm9_main,r1,buffer<u32>,Receives two words of route search output without evidence of a distinct object layout.
-0x020F3C54,arm9_main,r2,buffer<u32>,Supplies a three component position for squared distance comparisons.
+0x020F1F98,arm9_main,r2,ptr<VecFx32>,tylzars/mkds prototype: DeflectItemObjectOnHit param 2 is Vec3 *
+0x020F2A6C,arm9_main,r0,ptr<VecFx32>,tylzars/mkds prototype: func_020f2a6c param 0 is Vec3 *
+0x020F2A6C,arm9_main,r2,ptr<VecFx32>,tylzars/mkds prototype: func_020f2a6c param 2 is Vec3 *
+0x020F3A58,arm9_main,r0,ptr<RouteCursor>,tylzars/mkds prototype: FollowItemPointLinksToPos param 0 is ItemPointLinkRef *
+0x020F3A58,arm9_main,r1,ptr<RouteCursor>,tylzars/mkds prototype: FollowItemPointLinksToPos param 1 is ItemPointLinkRef *
+0x020F3A58,arm9_main,r2,ptr<VecFx32>,tylzars/mkds prototype: FollowItemPointLinksToPos param 2 is Vec3 *
+0x020F3C54,arm9_main,r0,ptr<RouteCursor>,tylzars/mkds prototype: PickNearestNearbyItemPointLink param 0 is ItemPointLinkRef *
+0x020F3C54,arm9_main,r1,ptr<RouteCursor>,tylzars/mkds prototype: PickNearestNearbyItemPointLink param 1 is ItemPointLinkRef *
+0x020F3C54,arm9_main,r2,ptr<VecFx32>,tylzars/mkds prototype: PickNearestNearbyItemPointLink param 2 is Vec3 *
 0x020F4DFC,arm9_main,r0,buffer<u32>,Dereferences an item pointer slot and clears that slot after launching the item.
-0x020F6BE8,arm9_main,r2,buffer<u32>,Three-component vector participates in velocity projection.
-0x020F77F8,arm9_main,r3,buffer<u32>,Argument supplies a three-component collision or motion vector.
-0x020F7C90,arm9_main,r1,buffer<u32>,Three-component vector supplies track collision resolution.
+0x020F6BE8,arm9_main,r2,ptr<VecFx32>,tylzars/mkds prototype: func_020f6be8 param 2 is Vec3 *
+0x020F77F8,arm9_main,r3,ptr<VecFx32>,tylzars/mkds prototype: func_020f77f8 param 3 is Vec3 *
+0x020F7C90,arm9_main,r1,ptr<VecFx32>,tylzars/mkds prototype: func_020f7c90 param 1 is Vec3 *
 0x020F98A0,arm9_main,r3,buffer<u16>,Copies nine halfwords into the sphere orientation matrix.
 0x020FAB34,arm9_main,r0,buffer<u32>,Mutable item-kind scalar is compared with 0x13 and used to index the kind table.
 0x020FAD9C,arm9_main,r1,buffer<u32>,Outputs a single item state_2ec value.
 0x020FAD9C,arm9_main,r2,buffer<u32>,Outputs a single fixed-point scaled grow_max value.
-0x020FC2E8,arm9_main,r1,buffer<u32>,Direction vector is length-tested and normalized for blue-shell orientation.
+0x020FC2E8,arm9_main,r1,ptr<VecFx32>,tylzars/mkds prototype: UpdateItemKouraWOrientation param 1 is Vec3 *
 0x020FD308,arm9_main,r1,buffer<u32>,Outputs a single item state value.
 0x020FD308,arm9_main,r2,buffer<u32>,Outputs a single fixed-point scaled grow_max value.
 0x020FD494,arm9_main,r0,buffer<u32>,Dereferences an object pointer slot to destroy the object and then clears the slot.
@@ -348,7 +348,7 @@ address,segment,register,type,reason
 0x020FF1B8,arm9_main,r1,buffer<u32>,"Single word at +0 is an output slot for a result, not a struct."
 0x02100084,arm9_main,r0,buffer<u32>,pointer to a word
 0x0210008C,arm9_main,r0,buffer<u32>,pointer to a word
-0x0210D570,arm9_main,r0,buffer<u32>,sound_shutdown_scene passes a global address and only a single word is cleared.
+0x0210D570,arm9_main,r0,ptr<SoundBgmPlayer>,tylzars/mkds prototype: func_0210d570 param 0 is ScenePlayers *
 0x0210FA40,arm9_main,r0,buffer<u32>,Plain argument value; the flag word is in a global.
 0x0210FA74,arm9_main,r0,buffer<u32>,Plain 0/1 argument; the +8 flag word is in a global.
 0x02110100,arm9_main,r0,buffer<u32>,Tests whether a single pointer slot contains a nonzero value.
@@ -447,7 +447,7 @@ address,segment,register,type,reason
 0x02189FE5,ov9_000,r0,buffer<u8>,Combines four address bytes into one integer.
 0x0218A459,ov9_000,r1,buffer<u8>,The destination is a 13-byte key buffer transformed by indexed XOR and permutation loops.
 0x0218A789,ov9_000,r0,buffer<u8>,Initializes and shuffles a 256-byte permutation buffer then seeds trailing cipher-state bytes.
-0x0218AEA9,ov9_000,r1,buffer<u32>,Callers pass a list node embedded in a request object (request+0x14).
+0x0218AEA9,ov9_000,r1,ptr<NetServerRecord>,tylzars/mkds prototype: func_ov000_0218aedc param 1 is SbServer *
 0x0218AF6D,ov9_000,r0,buffer<u32>,The argument is a string pointer slot dereferenced before tail calling a string comparison routine.
 0x0218AF6D,ov9_000,r1,buffer<u32>,The argument is a string pointer slot dereferenced before tail calling a string comparison routine.
 0x0218B379,ov9_000,r0,buffer<u32>,The argument is a server pointer cell used as a table-element destructor argument.
@@ -635,3 +635,140 @@ address,segment,register,type,reason
 0x021D24CD,ov9_003,r0,buffer<u16>,Reads a pair of halfword origin coordinates to construct rectangle bounds.
 0x021D24CD,ov9_003,r1,buffer<u16>,Reads a pair of halfword dimensions added to the origin coordinates.
 0x021D2EC1,ov9_003,r0,buffer<u32>,pointer to a single OAM style attribute word marked free
+0x01FF9940,arm9_autoload1_itcm,r2,ptr,tylzars/mkds prototype: func_01ff9940 param 2 is Unk01ff9940_C *
+0x01FFA380,arm9_autoload1_itcm,r0,ptr<Kart>,tylzars/mkds prototype: func_01ffa380 param 0 is Kart *
+0x01FFA41C,arm9_autoload1_itcm,r0,ptr<Kart>,tylzars/mkds prototype: func_01ffa41c param 0 is Kart *
+0x02001A74,arm9_main,r0,ptr,tylzars/mkds prototype: UpdateLogoScene param 0 is SceneNumbersView *
+0x0200ADFD,arm9_main,r0,ptr,tylzars/mkds prototype: CopyFromDataRanges param 0 is DataRangeTable *
+0x0200B02D,arm9_main,r0,ptr,tylzars/mkds prototype: StartWorkerThread param 0 is WorkerQueue *
+0x02032AC5,arm9_main,r0,ptr,tylzars/mkds prototype: AdvanceResultsBattle param 0 is SceneNumbersView *
+0x02034371,arm9_main,r0,ptr,tylzars/mkds prototype: func_02034370 param 0 is SceneNumbersView *
+0x0203A0DC,arm9_main,r0,ptr,tylzars/mkds prototype: UpdateRaceScene param 0 is Unk0203a0dc *
+0x0203A520,arm9_main,r0,ptr,tylzars/mkds prototype: SetNextSceneFromPickedValue param 0 is Unk0203a0dc *
+0x0204A620,arm9_main,r0,ptr,tylzars/mkds prototype: func_0204a620 param 0 is KeyRecording *
+0x0204A650,arm9_main,r0,ptr,tylzars/mkds prototype: IsKeyRecordingFull param 0 is KeyRecording *
+0x02057F8C,arm9_main,r0,ptr,tylzars/mkds prototype: func_02057f8c param 0 is ThreadFunctionQueue *
+0x0205ECA4,arm9_main,r0,ptr,tylzars/mkds prototype: CopyEmblemFromBlock param 0 is EmblemBlock *
+0x02060C68,arm9_main,r0,ptr,tylzars/mkds prototype: SetBuddyRecordFromPlayer param 0 is Unk0217aa00_45c *
+0x0207940D,arm9_main,r0,ptr,tylzars/mkds prototype: UploadKartAPaletteSlice param 0 is a model *
+0x0207F630,arm9_main,r0,ptr<CpuDriver>,tylzars/mkds prototype: SetKartAiLinkPosAndClearSideOffset param 0 is KartAi *
+0x0207F668,arm9_main,r2,ptr<Kart>,tylzars/mkds prototype: SetKartAiLinkPosAndAddSideOffset param 2 is Kart *
+0x02080E88,arm9_main,r1,ptr<Kart>,tylzars/mkds prototype: func_02080e88 param 1 is Kart *
+0x0208442C,arm9_main,r0,ptr<Kart>,tylzars/mkds prototype: func_0208442c param 0 is Kart *
+0x02085360,arm9_main,r0,ptr,tylzars/mkds prototype: a model draw function param 0 is a model *
+0x02087459,arm9_main,r0,ptr,tylzars/mkds prototype: SetTextureSizeFromBits param 0 is TexPlttEntry *
+0x020882FC,arm9_main,r0,ptr,tylzars/mkds prototype: func_020882fc param 0 is Unk020882fc *
+0x0208BEA4,arm9_main,r2,ptr<CpuDriver>,tylzars/mkds prototype: CopyBattleKartAiLinkPosAndDirection param 2 is KartAi *
+0x0208BEE0,arm9_main,r0,ptr<CpuDriver>,tylzars/mkds prototype: IsBattleKartAiLinkRequested param 0 is KartAi *
+0x0208C03C,arm9_main,r0,ptr<CpuDriver>,tylzars/mkds prototype: IsKartAiLinkRequested param 0 is KartAi *
+0x0208EB10,arm9_main,r0,ptr,tylzars/mkds prototype: StopPosStrip param 0 is PosStrip *
+0x020902FC,arm9_main,r0,ptr,tylzars/mkds prototype: SetupBattleHeldItemEntry param 0 is KartAiItemUse *
+0x020902FC,arm9_main,r1,ptr<CpuDriver>,tylzars/mkds prototype: SetupBattleHeldItemEntry param 1 is KartAi *
+0x02092194,arm9_main,r0,ptr,tylzars/mkds prototype: func_02092194 param 0 is Unk0217b498_00 *
+0x020931AC,arm9_main,r0,ptr,tylzars/mkds prototype: func_020931ac param 0 is Unk0217b498_00 *
+0x02098268,arm9_main,r0,ptr,tylzars/mkds prototype: InitFlipper param 0 is Flipper *
+0x020A392C,arm9_main,r1,ptr<BalloonObject>,tylzars/mkds prototype: func_020a392c param 1 is Balloon *
+0x020A6D8C,arm9_main,r1,ptr,tylzars/mkds prototype: func_020a6d8c param 1 is Unk020a6cb4 *
+0x020AAB41,arm9_main,r0,ptr,tylzars/mkds prototype: IsKeyboardTouchOnStartKeyId param 0 is KeyboardKeys *
+0x020ACA09,arm9_main,r0,ptr,tylzars/mkds prototype: UpdateTitleState6 param 0 is Unk020aca24 *
+0x020ACA25,arm9_main,r0,ptr,tylzars/mkds prototype: UpdateTitleState5 param 0 is Unk020aca24 *
+0x020D24D8,arm9_main,r0,ptr<MapObj>,tylzars/mkds prototype: SetMapObjectDrawDistance param 0 is MapObject *
+0x020D4E28,arm9_main,r1,ptr<VecFx32>,tylzars/mkds prototype: func_020d4e28 param 1 is Vec3 *
+0x020D7DA9,arm9_main,r1,ptr,tylzars/mkds prototype: InitGroupFollower param 1 is CourseMapRow *
+0x020D8488,arm9_main,r0,ptr,tylzars/mkds prototype: GetSegmentProgressPoint param 0 is SegmentPoints *
+0x020DE184,arm9_main,r0,ptr,tylzars/mkds prototype: ResetWanwanChainPoints param 0 is WanwanChainObject *
+0x020E04B0,arm9_main,r0,ptr<PlaneEquation>,tylzars/mkds prototype: func_020e04b0 param 0 is Unk020e04b0 *
+0x020E20A9,arm9_main,r0,ptr,tylzars/mkds prototype: func_020e20a8 param 0 is Unk020e20a8 *
+0x020E2CCC,arm9_main,r0,ptr,tylzars/mkds prototype: func_020e2ccc param 0 is Unk020e20a8 *
+0x020E2FE4,arm9_main,r1,ptr,tylzars/mkds prototype: CollideItemObjectWithChoropu param 1 is Unk020e246c *
+0x020E34C0,arm9_main,r0,ptr,tylzars/mkds prototype: EnterChoropuState3 param 0 is Unk020e34c0 *
+0x020E47C9,arm9_main,r1,ptr<VecFx32>,tylzars/mkds prototype: InitPukupuku param 1 is Vec3 *
+0x020E57FC,arm9_main,r0,ptr,tylzars/mkds prototype: CollideKartWithSecondHand param 0 is Unk020e43a8 *
+0x020E57FC,arm9_main,r1,ptr,tylzars/mkds prototype: CollideKartWithSecondHand param 1 is KartItemEffectView *
+0x020E58B8,arm9_main,r0,ptr,tylzars/mkds prototype: EnterSecondHandState2 param 0 is Unk020e58b8 *
+0x020E5950,arm9_main,r0,ptr,tylzars/mkds prototype: EnterSecondHandState0 param 0 is Unk020e58b8 *
+0x020E72CD,arm9_main,r0,ptr,tylzars/mkds prototype: func_020e72cc param 0 is Unk020e730c *
+0x020F4020,arm9_main,r0,ptr,tylzars/mkds prototype: InitSegmentPoints param 0 is SegmentPoints *
+0x020F504C,arm9_main,r1,ptr<RequestTimer>,tylzars/mkds prototype: StartItemKinokoBoost param 1 is HeldItem *
+0x020F5968,arm9_main,r0,ptr,tylzars/mkds prototype: EnterItemKouraRState4 param 0 is ItemKouraR *
+0x020F5B74,arm9_main,r0,ptr,tylzars/mkds prototype: EnterItemKouraRState3 param 0 is ItemKouraR *
+0x020F5CC4,arm9_main,r0,ptr<Item>,tylzars/mkds prototype: func_020f5cc4 param 0 is ItemObject *
+0x020F6264,arm9_main,r1,ptr<RequestTimer>,tylzars/mkds prototype: StartItemStar param 1 is HeldItem *
+0x020F62B0,arm9_main,r1,ptr<RequestTimer>,tylzars/mkds prototype: StartItemThunder param 1 is HeldItem *
+0x020F9320,arm9_main,r0,ptr<Item>,tylzars/mkds prototype: func_020f9320 param 0 is ItemObject *
+0x020FCB30,arm9_main,r0,ptr<ItemObjectBlue>,tylzars/mkds prototype: func_020fcb30 param 0 is ItemKouraW *
+0x020FCB4C,arm9_main,r0,ptr<ObjTimerState>,tylzars/mkds prototype: StartItemKinokoPBoost param 0 is ItemInUse *
+0x020FF654,arm9_main,r0,ptr<EffectPoseController>,tylzars/mkds prototype: StartItemFBox param 0 is ItemFBox *
+0x021000C8,arm9_main,r0,ptr,tylzars/mkds prototype: GetMapObjectListCount param 0 is MapObjectList *
+0x021004C4,arm9_main,r1,ptr,tylzars/mkds prototype: func_021004c4 param 1 is ItemTeresa *
+0x02100DD8,arm9_main,r0,ptr,tylzars/mkds prototype: EnterItemTeresaState3 param 0 is Unk02100dd8 *
+0x02102668,arm9_main,r0,ptr,tylzars/mkds prototype: func_02102668 param 0 is Unk02102668 *
+0x02102764,arm9_main,r1,ptr,tylzars/mkds prototype: CopyItemGessoData param 1 is ItemGesso *
+0x021027AC,arm9_main,r2,ptr<ModelVectorSubmission>,tylzars/mkds prototype: DrawItemGesso param 2 is a model *
+0x021031E8,arm9_main,r0,ptr,tylzars/mkds prototype: func_021031e8 param 0 is Unk021031e8 *
+0x0210366C,arm9_main,r0,ptr<AnimatedQuad>,tylzars/mkds prototype: SetOrthoQuadVelocitiesFromCorners param 0 is OrthoQuad *
+0x0210465C,arm9_main,r0,ptr<AnimatedQuad>,tylzars/mkds prototype: AdvanceOrthoQuadCornersByVelocity param 0 is OrthoQuad *
+0x021051D4,arm9_main,r0,ptr<ObjTimerState>,tylzars/mkds prototype: StartItemKiller param 0 is ItemInUse *
+0x021051D4,arm9_main,r1,ptr<RequestTimer>,tylzars/mkds prototype: StartItemKiller param 1 is HeldItem *
+0x0210920C,arm9_main,r0,ptr,tylzars/mkds prototype: ComputeSoundPan param 0 is SoundParams *
+0x021092B0,arm9_main,r0,ptr,tylzars/mkds prototype: ComputeSoundVolume param 0 is SoundParams *
+0x0210A5A8,arm9_main,r1,ptr,tylzars/mkds prototype: InitKartSoundCallbacks param 1 is Unk0210a5a8 *
+0x0210A63C,arm9_main,r0,ptr,tylzars/mkds prototype: func_0210a63c param 0 is PlayingSound *
+0x0210A67C,arm9_main,r0,ptr<Kart>,tylzars/mkds prototype: func_0210a67c param 0 is Kart *
+0x0210A6B4,arm9_main,r0,ptr<Kart>,tylzars/mkds prototype: func_0210a6b4 param 0 is Kart *
+0x0210A6EC,arm9_main,r0,ptr<Kart>,tylzars/mkds prototype: func_0210a6ec param 0 is Kart *
+0x0210A724,arm9_main,r0,ptr<Kart>,tylzars/mkds prototype: func_0210a724 param 0 is Kart *
+0x0210A724,arm9_main,r1,ptr,tylzars/mkds prototype: func_0210a724 param 1 is PlayingSound *
+0x0210F068,arm9_main,r0,ptr,tylzars/mkds prototype: func_0210f068 param 0 is MicBuffer *
+0x0210F07C,arm9_main,r0,ptr,tylzars/mkds prototype: func_0210f07c param 0 is MicBuffer *
+0x02111325,arm9_main,r0,ptr,tylzars/mkds prototype: UpdateRecordScene param 0 is Unk02111324 *
+0x021251C5,arm9_main,r0,ptr,tylzars/mkds prototype: DrawTextLines param 0 is LabelTextCanvas *
+0x021253F9,arm9_main,r0,ptr,tylzars/mkds prototype: func_021253f8 param 0 is LabelTextCanvas *
+0x0212B929,arm9_main,r1,ptr,tylzars/mkds prototype: InitPaletteBlend param 1 is Nclr *
+0x02180AD8,ov9_001,r0,ptr<u8>,tylzars/mkds prototype: ClearCharCanvas param 0 is u8 *
+0x021826DD,ov9_001,r0,ptr,tylzars/mkds prototype: LoadCoin param 0 is Unk0219b478 *
+0x0218272D,ov9_001,r0,ptr,tylzars/mkds prototype: CollideKartWithCoin param 0 is Coin *
+0x02182EFD,ov9_001,r1,ptr<Kart>,tylzars/mkds prototype: func_ov001_02182f1c param 1 is Kart *
+0x021832AD,ov9_001,r1,ptr<MissionTarget>,tylzars/mkds prototype: UpdateDonketu param 1 is Unk02188950 *
+0x02184F91,ov9_001,r0,ptr<UiPositionedElement>,tylzars/mkds prototype: GetLldEntryScale param 0 is LldEntry *
+0x02184FD9,ov9_001,r0,ptr<UiPositionedElement>,tylzars/mkds prototype: GetLldEntryFrameIndex param 0 is LldEntry *
+0x02185141,ov9_001,r0,ptr,tylzars/mkds prototype: GetLldEntry param 0 is Lld *
+0x02185D55,ov9_001,r0,ptr,tylzars/mkds prototype: CollideKartWithMissionGate param 0 is MissionGateObject *
+0x02185F91,ov9_001,r1,ptr<Kart>,tylzars/mkds prototype: CollideKartWithMissionRunMapObject param 1 is Kart *
+0x02186329,ov9_000,r0,ptr<s32>,tylzars/mkds prototype: func_ov000_0218635c param 0 is s32 *
+0x02186685,ov9_000,r0,ptr,tylzars/mkds prototype: DWC_Http_GetResult param 0 is DWCHttpLabelValue *
+0x02186A05,ov9_000,r0,ptr<HttpContext>,tylzars/mkds prototype: InitHttpBuffer param 0 is Http *
+0x02187425,ov9_001,r0,ptr<MissionTarget>,tylzars/mkds prototype: StartModelEffectAtWaterHeight param 0 is Unk02188950 *
+0x02188C75,ov9_000,r0,ptr,tylzars/mkds prototype: func_ov000_02188ca8 param 0 is Unk02188408Entry0xc0 *
+0x02189519,ov9_000,r0,ptr,tylzars/mkds prototype: func_ov000_0218954c param 0 is Unk02188ec0 *
+0x02189EB9,ov9_001,r1,ptr<Item>,tylzars/mkds prototype: BombKingItemHitCallback param 1 is ItemObject *
+0x02189FC1,ov9_001,r1,ptr<Item>,tylzars/mkds prototype: func_ov001_02189fe0 param 1 is ItemObject *
+0x0218A015,ov9_001,r0,ptr<MissionTarget>,tylzars/mkds prototype: func_ov001_0218a034 param 0 is Unk02188950 *
+0x0218C85D,ov9_001,r0,ptr,tylzars/mkds prototype: func_ov001_0218c87c param 0 is Unk0218d87c *
+0x0218CBBD,ov9_001,r1,ptr<MissionTargetDef>,tylzars/mkds prototype: func_ov001_0218cbdc param 1 is MissionRunPrm *
+0x0218D1F9,ov9_000,r0,ptr<NetServerBrowser>,tylzars/mkds prototype: func_ov000_0218d22c param 0 is SbServerList *
+0x0218FA65,ov9_000,r1,ptr,tylzars/mkds prototype: GpiDecrementBuddyIndexAbove param 1 is Unk0218fa98 *
+0x02191E25,ov9_000,r1,ptr,tylzars/mkds prototype: GpiOpenSockets param 1 is Unk021919ac_node *
+0x02192159,ov9_000,r0,ptr,tylzars/mkds prototype: func_ov000_0219218c param 0 is GpConnection *
+0x02193921,ov9_000,r0,ptr,tylzars/mkds prototype: GpiQueueOperationCallback param 0 is GpConnection *
+0x02193B55,ov9_000,r1,ptr<NetOperation>,tylzars/mkds prototype: GpiPeerSendLenMsg param 1 is GpiPeer *
+0x02193BED,ov9_000,r3,ptr,tylzars/mkds prototype: GpiPeerSendXfer param 3 is GpiTransferId *
+0x02193C41,ov9_000,r1,ptr<NetOperation>,tylzars/mkds prototype: GpiPeerQueueMessage param 1 is GpiPeer *
+0x02194191,ov9_000,r0,ptr,tylzars/mkds prototype: func_ov000_021941c4 param 0 is GpConnection *
+0x021943BD,ov9_000,r0,ptr,tylzars/mkds prototype: GpiPeerUpdateWaiting param 0 is GpConnection *
+0x0219455D,ov9_000,r0,ptr,tylzars/mkds prototype: func_ov000_02194590 param 0 is GpConnection *
+0x02194C79,ov9_000,r1,ptr<NetRequest>,tylzars/mkds prototype: GpiUpdateSearch param 1 is GpiOperation *
+0x0219B1E9,ov9_001,r0,ptr<MissionAnimSet>,tylzars/mkds prototype: func_ov001_0219b208 param 0 is Unk0219b250 *
+0x0219B459,ov9_001,r0,ptr,tylzars/mkds prototype: LoadMapObjectModelAnimated param 0 is Unk0219b478 *
+0x0219C1B1,ov9_000,r3,ptr<cstr>,tylzars/mkds prototype: InitWiFiConnection param 3 is const char *
+0x0219C399,ov9_000,r0,ptr<s32>,tylzars/mkds prototype: func_ov000_0219c3cc param 0 is s32 *
+0x021A21F9,ov9_001,r0,ptr,tylzars/mkds prototype: ComputePointAheadOfCamera param 0 is Unk021a2048 *
+0x021A291D,ov9_000,r0,ptr<u64>,tylzars/mkds prototype: func_ov000_021a2950 param 0 is u64 *
+0x021A5E51,ov9_000,r0,ptr,tylzars/mkds prototype: func_ov000_021a5e84 param 0 is Unk021a5e84 *
+0x021B8881,ov9_003,r1,ptr,tylzars/mkds prototype: ParseSingleValueItems param 1 is SingleValueRecord *
+0x021B8951,ov9_003,r1,ptr,tylzars/mkds prototype: ParseFourValueItems param 1 is FourValueRecord *
+0x021BA01D,ov9_003,r0,ptr,tylzars/mkds prototype: func_ov003_021ba05c param 0 is ValueRecordsRequest *
+0x021CD5A1,ov9_003,r0,ptr,tylzars/mkds prototype: func_ov003_021cd5e0 param 0 is const Unk021cd5e0_arg *
+0x021CF86D,ov9_003,r0,ptr,tylzars/mkds prototype: func_ov003_021cf8ac param 0 is Unk021cf8ac *
+0x021D07D1,ov9_003,r0,ptr,tylzars/mkds prototype: func_ov003_021d0810 param 0 is Unk021da2a8 *
+0x021D34A1,ov9_003,r0,ptr,tylzars/mkds prototype: SetTaskCallback param 0 is TaskEntry *
