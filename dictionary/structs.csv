@@ -559,3 +559,13 @@ ObjTimerState,,,,,,from the struct review of untyped arguments (2026-11-03): Cal
 PiranhaTargetSlot,,,,,,from the struct review of untyped arguments (2026-11-03): Caller passes piranha+0xb8+target*0x24 so it is a 0x24-byte slot in the plant's array.
 RsaPublicKeyRecord,,,,,,from the struct review of untyped arguments (2026-11-03): Callers pass a key block at session+0x454 or the trusted certificate found by the certificate lookup; function verifies an RSA signature.
 SceneLaunchConfig,,,,,,from the struct review of untyped arguments (2026-11-03): Many scene launchers pass a stack or computed config block into the main loop.
+CallQueue,,,,,,from the struct review of untyped arguments (2026-11-03): Matching symbol resets the VRAM transfer call queue clearing its indices and counter.
+CellFileSet,,,,,,from the struct review of untyped arguments (2026-11-03): Matching C takes a cell file set and passes its cells layouts and table to the label canvas init.
+G2dCharacterData,,,,,,from the struct review of untyped arguments (2026-11-03): Matching symbol is the NCG unpack routine that relocates the raw character data pointer at +0x14.
+G3dResMat,,,,,,from the struct review of untyped arguments (2026-11-03): Matching symbol releases model textures through the material dictionary entry offset at +0xa.
+G3dResTexPatAnm,,,,,,from the struct review of untyped arguments (2026-11-03): Matching symbol inits a texture pattern animation object from the resource dictionary count at +0xd and entries at +0x12.
+GxOamAttr,,,,,,from the struct review of untyped arguments (2026-11-03): Matching prototype is the 1D OBJ arranger whose first argument is the OAM output buffer written as attribute words and halfwords.
+OSLockWord,,,,,,from the struct review of untyped arguments (2026-11-03): Matching symbol tries to lock a lock word and writes the owner id at +4.
+SndArc,,,,,,from the struct review of untyped arguments (2026-11-03): Matching symbol is the sound archive FAT dispose callback clearing the FAT pointer at +0x84.
+SndFader,,,,,,from the struct review of untyped arguments (2026-11-03): Matching symbol is the sound fader finished test comparing counter at +8 with frame count at +0xc.
+SndWaveArc,,,,,,from the struct review of untyped arguments (2026-11-03): Matching symbol destroys a sound wave archive and walks its bank link list at +0x18.

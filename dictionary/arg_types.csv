@@ -772,3 +772,6 @@ address,segment,register,type,reason
 0x021CF86D,ov9_003,r0,ptr,tylzars/mkds prototype: func_ov003_021cf8ac param 0 is Unk021cf8ac *
 0x021D07D1,ov9_003,r0,ptr,tylzars/mkds prototype: func_ov003_021d0810 param 0 is Unk021da2a8 *
 0x021D34A1,ov9_003,r0,ptr,tylzars/mkds prototype: SetTaskCallback param 0 is TaskEntry *
+0x020649EC,arm9_main,r1,buffer<u32>,Matching C takes an array of nine kart slot function pointers copied into the kart.
+0x0218173D,ov9_001,r0,buffer<u16>,Matching C takes an s32 value compared with the race setup mission counts.
+0x020162D4,arm9_main,r1,buffer<u32>,Matching symbol is the frame palette VRAM allocator whose second argument is a 4-colour palette flag; reads go to the global manager.

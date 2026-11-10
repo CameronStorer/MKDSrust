@@ -754,7 +754,7 @@ address,segment,name,kind,args,returns,status,confidence,notes
 0x02141F14,arm9_main,libc_uint64_to_decimal,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x021420C0,arm9_main,libc_decimal_round,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0214214C,arm9_main,libc_decimal_increment,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x02142218,arm9_main,libc_decimal_epilogue_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
+0x02142218,arm9_main,libc_decimal_increment_epilogue,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02142224,arm9_main,libc_decimal_round_direction,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x021422A0,arm9_main,libc_count_trailing_zeros,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x02142368,arm9_main,libc_runtime_dispatch,sdk,,,named,guess,Library entry; identity and signature still need review.
@@ -1050,7 +1050,7 @@ address,segment,name,kind,args,returns,status,confidence,notes
 0x0214C6A8,arm9_main,GX_BeginLoadTex,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0214C768,arm9_main,MI_SetWramBank,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0214C778,arm9_main,mi_check_dma0_source,sdk,,,named,guess,Library entry; identity and signature still need review.
-0x0214C7DC,arm9_main,mi_dma_check_return_fragment_maybe,sdk,,,named,guess,Library entry; identity and signature still need review.
+0x0214C7DC,arm9_main,mii_check_dma0_source_address_epilogue,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0214C7E8,arm9_main,mi_check_dma_timing_conflict,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0214C89C,arm9_main,MI_StopDma,sdk,,,named,guess,Library entry; identity and signature still need review.
 0x0214C920,arm9_main,MI_WaitDma,sdk,,,named,guess,Library entry; identity and signature still need review.
