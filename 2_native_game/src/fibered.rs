@@ -122,7 +122,8 @@ fn new_fiber(thread: u32) -> Fiber {
                 In::Resume(s, pc, start) => (s, pc, start),
                 In::Go(_) => unreachable!("a fiber starts with Resume"),
             };
-            let mut g = Guest { s, y: y as *const _, thread, loops: Vec::new(), fresh: false, quiet: false };
+            let cap = (*s).capture.is_some();
+            let mut g = Guest { s, y: y as *const _, thread, loops: Vec::new(), fresh: false, quiet: false, cap, acts: Vec::new(), cur: None };
             let pc = if start { g.end_slice_resumed(pc) } else { pc };
             g.run(pc, None);
             unreachable!("the root loop never returns")
@@ -142,6 +143,22 @@ struct Guest {
     fresh: bool,
     /// The next dispatch is a quiet call (`Bus::call_quiet`): an empty budget does not end the slice there.
     quiet: bool,
+    /// `MKDS_CAPTURE` is on ([`crate::capture`]): `acts` holds one entry per active call on this fiber
+    /// (and per IRQ taken, which records nothing), `cur` the recording the running code's own accesses
+    /// go to. Both stay empty when capture is off.
+    cap: bool,
+    acts: Vec<Act>,
+    cur: Option<u32>,
+}
+
+/// A call active on a fiber, for [`crate::capture`].
+struct Act {
+    /// The recording of this call, if it is one.
+    rec: Option<u32>,
+    /// The function its first dispatch ran (0: none yet).
+    f: usize,
+    /// It branched into another function's code (a tail call): later accesses are not its own.
+    tail: bool,
 }
 
 impl Guest {
@@ -152,6 +169,32 @@ impl Guest {
 
     fn cpu(&mut self) -> &mut Cpu {
         unsafe { &mut (*self.s).cpu }
+    }
+
+    fn capture(&mut self) -> &mut crate::capture::Capture {
+        self.s().capture.as_mut().unwrap()
+    }
+
+    /// The recording the running code's accesses belong to: the innermost call's, unless it tail-called.
+    fn refresh_cur(&mut self) {
+        self.cur = self.acts.last().and_then(|a| if a.tail { None } else { a.rec });
+    }
+
+    /// Capture: the dispatch loop of the innermost call is about to run `f` at `pc`. A second, different
+    /// function in the same call is a tail call (or another branch out of the function's code).
+    fn capture_dispatch(&mut self, pc: u32, f: usize) {
+        self.capture().ran.insert(f);
+        let Some(a) = self.acts.last_mut() else { return };
+        if a.f == 0 {
+            a.f = f;
+        } else if a.f != f && !a.tail {
+            a.tail = true;
+            if let Some(id) = a.rec {
+                let s = unsafe { &mut *self.s };
+                s.capture.as_mut().unwrap().tail(id, pc, &s.cpu);
+            }
+            self.cur = None;
+        }
     }
 
     fn suspend(&mut self, out: Out) -> In {
@@ -174,6 +217,9 @@ impl Guest {
     /// before `pc`. Returns `pc` (where execution continues).
     fn end_slice(&mut self, pc: u32, why: &'static str) -> u32 {
         self.s().fibers.as_mut().unwrap().last_end = (pc, why);
+        if self.cap {
+            self.capture().slices += 1;
+        }
         match self.suspend(Out::SliceEnd) {
             In::Go(s) => self.s = s,
             In::Resume(..) => unreachable!("a slice end is resumed with Go"),
@@ -217,7 +263,17 @@ impl Guest {
         let vector = rt::take_irq(self.cpu(), pc, 0xffff_0000);
         self.s().stats.irqs += 1;
         self.fresh = true; // the vector is the slice's first dispatch
+        if self.cap {
+            // the handler's accesses belong to no recording of the interrupted code
+            self.capture().irqs += 1;
+            self.acts.push(Act { rec: None, f: 0, tail: false });
+            self.cur = None;
+        }
         self.run(vector, Some((pc, sp)));
+        if self.cap {
+            self.acts.pop();
+            self.refresh_cur();
+        }
         true
     }
 
@@ -251,6 +307,9 @@ impl Guest {
                     fb.current = t;
                     self.thread = t;
                 } else {
+                    if self.cap {
+                        self.capture().switches += 1;
+                    }
                     pc = match self.suspend(Out::Switch(t, pc)) {
                         In::Resume(s, pc, _) => {
                             self.s = s;
@@ -288,6 +347,9 @@ impl Guest {
                 pc = self.end_slice(pc, "no code");
                 continue;
             };
+            if self.cap {
+                self.capture_dispatch(pc, f as usize);
+            }
             let me: *mut Guest = self;
             let mut bus = GuestBus { g: me };
             pc = f(self.cpu(), &mut bus, pc);
@@ -334,32 +396,48 @@ impl GuestBus {
 
 impl Mem for GuestBus {
     fn r8(&mut self, a: u32) -> u8 {
-        self.m().r8(a)
+        let v = self.m().r8(a);
+        if let Some(id) = self.g().cur {
+            self.g().capture().read(id, a, 1, v as u32);
+        }
+        v
     }
     fn r16(&mut self, a: u32) -> u16 {
-        self.m().r16(a)
+        let v = self.m().r16(a);
+        if let Some(id) = self.g().cur {
+            self.g().capture().read(id, a, 2, v as u32);
+        }
+        v
     }
     fn r32(&mut self, a: u32) -> u32 {
-        self.m().r32(a)
+        let v = self.m().r32(a);
+        if let Some(id) = self.g().cur {
+            self.g().capture().read(id, a, 4, v as u32);
+        }
+        v
     }
     fn w8(&mut self, a: u32, v: u8) {
+        if let Some(id) = self.g().cur {
+            self.g().capture().write(id, a, 1, v as u32);
+        }
         self.m().w8(a, v)
     }
     fn w16(&mut self, a: u32, v: u16) {
+        if let Some(id) = self.g().cur {
+            self.g().capture().write(id, a, 2, v as u32);
+        }
         self.m().w16(a, v)
     }
     fn w32(&mut self, a: u32, v: u32) {
+        if let Some(id) = self.g().cur {
+            self.g().capture().write(id, a, 4, v as u32);
+        }
         self.m().w32(a, v)
     }
 }
 
-impl Bus for GuestBus {
-    fn call_quiet(&mut self, c: &mut Cpu, target: u32, ret: u32) -> u32 {
-        self.g().quiet = true;
-        self.call(c, target, ret)
-    }
-    fn can_suspend(&self) -> bool { true }
-    fn call(&mut self, c: &mut Cpu, target: u32, ret: u32) -> u32 {
+impl GuestBus {
+    fn call_inner(&mut self, c: &mut Cpu, target: u32, ret: u32) -> u32 {
         let sp = c.r[13];
         // a host after-hook (mod script events): run the function, then the hook on a normal return
         if let Some(mut h) = self.g().s().machine.take_after(target) {
@@ -381,13 +459,64 @@ impl Bus for GuestBus {
         }
         pc
     }
+}
+
+impl Bus for GuestBus {
+    fn call_quiet(&mut self, c: &mut Cpu, target: u32, ret: u32) -> u32 {
+        self.g().quiet = true;
+        self.call(c, target, ret)
+    }
+    fn can_suspend(&self) -> bool { true }
+    fn call(&mut self, c: &mut Cpu, target: u32, ret: u32) -> u32 {
+        if !self.g().cap {
+            return self.call_inner(c, target, ret);
+        }
+        // capture: the caller's call event, then maybe a recording of the callee
+        let caller = self.g().cur;
+        let ev = caller.and_then(|id| self.g().capture().call_begin(id, target, ret, c));
+        let rec = {
+            let s = self.g().s();
+            let frame = s.frame_number();
+            let d = s.dispatcher;
+            match d.get(target) {
+                Some(f) => s.capture.as_mut().unwrap().start(target, f as usize, c, frame, &|| d.resident()),
+                None => None,
+            }
+        };
+        self.g().acts.push(Act { rec, f: 0, tail: false });
+        self.g().cur = rec;
+        let pc = self.call_inner(c, target, ret);
+        // registers are read from the session, not `c` (the fiber may have been suspended)
+        let g = self.g();
+        g.acts.pop();
+        g.refresh_cur();
+        let s = unsafe { &mut *g.s };
+        let cap = s.capture.as_mut().unwrap();
+        if let Some(id) = rec {
+            cap.finish(id, &s.cpu, pc, ret);
+        }
+        if let (Some(id), Some(ev)) = (caller, ev) {
+            cap.call_end(id, ev, &s.cpu, pc);
+        }
+        pc
+    }
     fn swi(&mut self, c: &mut Cpu, n: u32) {
-        self.m().swi(c, n)
+        let Some(id) = self.g().cur else { return self.m().swi(c, n) };
+        let before = crate::capture::regs(c);
+        self.m().swi(c, n);
+        self.g().capture().swi(id, n, before, c);
     }
     fn mrc(&mut self, c: &mut Cpu, cp: u8, o1: u8, n: u8, cm: u8, o2: u8) -> u32 {
-        self.m().mrc(c, cp, o1, n, cm, o2)
+        let v = self.m().mrc(c, cp, o1, n, cm, o2);
+        if let Some(id) = self.g().cur {
+            self.g().capture().coproc(id, false, [cp, o1, n, cm, o2], v);
+        }
+        v
     }
     fn mcr(&mut self, c: &mut Cpu, cp: u8, o1: u8, n: u8, cm: u8, o2: u8, v: u32) {
+        if let Some(id) = self.g().cur {
+            self.g().capture().coproc(id, true, [cp, o1, n, cm, o2], v);
+        }
         self.m().mcr(c, cp, o1, n, cm, o2, v)
     }
     fn slice_end(&mut self, _c: &mut Cpu, pc: u32, cost: u32) -> bool {

@@ -41,6 +41,8 @@ pub struct Session<'a> {
     /// Block 4A.2: the ARM9 runs in fibers with nested calls ([`Session::enable_fibers`],
     /// or `MKDS_FIBERS=1` when the session is created).
     fibers: Option<fibered::Fibers>,
+    /// `MKDS_CAPTURE=<dir>`: function-input recorder (fiber runtime only; [`crate::capture`]).
+    pub capture: Option<Box<crate::capture::Capture>>,
     fiber_error: Option<String>,
     /// Diagnostics (`MKDS_SLICE_TRACE=<file>`): per frame, a hash of the CPU at every slice end;
     /// `MKDS_TRACE_FRAME=<n>` also lists that frame's slices. Compares flat and fiber runs.
@@ -130,6 +132,7 @@ impl<'a> Session<'a> {
             overlay_windows: Vec::new(),
             shadow: None,
             fibers: std::env::var_os("MKDS_FIBERS").map(|_| fibered::Fibers::new(entry)),
+            capture: crate::capture::Capture::from_env(dispatcher.table()),
             fiber_error: None,
             trace: std::env::var_os("MKDS_SLICE_TRACE").map(|p| {
                 let detail = std::env::var("MKDS_TRACE_FRAME").ok().and_then(|v| v.parse().ok()).unwrap_or(u64::MAX);
