@@ -32,6 +32,8 @@ mod rt;
 mod signature;
 #[path = "../thumb.rs"]
 mod thumb;
+#[path = "../mkds_gen_poll.rs"]
+mod poll_flat;
 
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -810,7 +812,36 @@ fn direct_excluded() -> HashSet<u32> {
     x.extend(recomp::os_hle::SAFE_ENTRIES.iter().map(|e| e.0 & !1));
     x.extend(recomp::native::EVENT_ENTRIES.iter().map(|e| e & !1));
     x.extend([recomp::os_hle::OS_GET_TICK, 0x0200_DE50, 0x0200_E6EC, 0x0200_E738]);
+    if raise_emit::poll_direct_enabled() { x.insert(0x01FF_8058); }
     x
+}
+
+/// Context transfers can leave by a different return, even if a wrapper saves
+/// every callee-saved register. Preservation alone must never certify that wrapper.
+/// Unknown indirect transfers are conservative context roots too.
+fn poll_context_paths(jobs: &[(String, &lift::Func, String, Option<String>)], facts: &[Option<raise_emit::Facts>]) -> HashSet<(String, u32)> {
+    let roots = [0x01FF8058, 0x0200DE50, 0x0200E6EC, 0x0200E738];
+    let mut rows: HashMap<u32, Vec<usize>> = HashMap::new();
+    for (i, (_, f, _, _)) in jobs.iter().enumerate() { rows.entry(f.entry).or_default().push(i); }
+    let mut bad: HashSet<_> = jobs.iter().enumerate().filter(|(i, (_, f, _, _))| {
+        roots.contains(&(f.entry & !1)) || facts[*i].as_ref().is_none_or(|x| x.escape.is_some())
+    }).map(|(_, (s, f, _, _))| (s.clone(), f.entry)).collect();
+    loop {
+        let mut next = bad.clone();
+        for (j, (seg, f, _, _)) in jobs.iter().enumerate() {
+            // Use raised targets: constant veneers may turn an indirect guest
+            // jump into a known call, including a context-transfer entry.
+            for &target in facts[j].iter().flat_map(|x| &x.calls) {
+                let callee = rows.get(&target).and_then(|r| r.iter().copied().find(|&i| jobs[i].0 == *seg)
+                    .or_else(|| r.iter().copied().find(|&i| !jobs[i].0.starts_with("ov9_"))));
+                if callee.is_none_or(|i| bad.contains(&(jobs[i].0.clone(), jobs[i].1.entry))) {
+                    next.insert((seg.clone(), f.entry));
+                }
+            }
+        }
+        if next == bad { return bad; }
+        bad = next;
+    }
 }
 
 /// An ARM9 function: its translation and, when the exact passes are on, its raised version.
@@ -1390,6 +1421,8 @@ fn run() -> Result<ExitCode, String> {
     }
     // Block 5.5 (`--timing native`): closed functions and their direct signatures
     let mut own_sig: HashMap<(String, u32), raise_emit::DirectSig> = HashMap::new();
+    let (mut flat_sig, mut poll_boundary) = (HashMap::new(), HashMap::new());
+    let mut poll_selected = false;
     if raise() && std::env::var_os("MKDS_NO_T1").is_none() && raise_emit::nospill_enabled() {
         let t = std::time::Instant::now();
         let emit_facts = |seg: &str, f: &lift::Func, id: &str, src: &Option<String>| -> Option<raise_emit::Facts> {
@@ -1405,6 +1438,18 @@ fn run() -> Result<ExitCode, String> {
         raise_emit::set_direct(HashMap::new());
         raise_emit::set_boundary(HashMap::new());
         let boundary_requested = raise_emit::boundary_enabled();
+        let poll_requested = raise_emit::poll_direct_enabled();
+        poll_selected = poll_requested;
+        let context_paths = if poll_requested {
+            let initial: Vec<_> = jobs.iter().map(|(seg, f, id, src)| emit_facts(seg, f, id, src)).collect();
+            poll_context_paths(&jobs, &initial)
+        } else { HashSet::new() };
+        let mut poll_before = [0usize; 2];
+        let mut poll_before_entries = [HashSet::new(), HashSet::new()];
+        for poll_pass in 0..if poll_requested { 2 } else { 1 } {
+        if poll_requested {
+            unsafe { std::env::set_var("MKDS_POLL_DIRECT", if poll_pass == 1 { "1" } else { "0" }); }
+        }
         let mut direct_before = 0;
         let mut before_entries = HashSet::new();
         for boundary_pass in 0..if boundary_requested { 2 } else { 1 } {
@@ -1412,12 +1457,14 @@ fn run() -> Result<ExitCode, String> {
         unsafe { std::env::set_var("MKDS_BOUNDARY", if boundary_pass == 1 { "1" } else { "0" }); }
         raise_emit::set_direct(HashMap::new());
         raise_emit::set_boundary(HashMap::new());
+        raise_emit::set_poll_irq_preserved(false);
         let excluded = direct_excluded();
         if boundary_pass == 1 {
             let mut conventions: HashMap<u32, Vec<(String, raise_emit::BoundarySig)>> = HashMap::new();
             for (seg, f, _, _) in &jobs {
                 conventions.entry(f.entry).or_default().push((seg.clone(), raise_emit::BoundarySig {
-                    params: 0, preserved: if excluded.contains(&(f.entry & !1)) { 0 } else { 0x2FF0 },
+                    params: 0, preserved: if excluded.contains(&(f.entry & !1))
+                        || poll_pass == 1 && context_paths.contains(&(seg.clone(), f.entry)) { 0 } else { 0x2FF0 },
                 }));
             }
             // Greatest fixed point for preservation, least fixed point for arguments. Unknown
@@ -1436,9 +1483,39 @@ fn run() -> Result<ExitCode, String> {
                 conventions = next;
             }
             if !converged { return Err("boundary calling conventions did not converge".into()); }
+            if poll_requested && poll_pass == 1 { poll_boundary = conventions.clone(); }
             raise_emit::set_boundary(conventions);
         }
-        let facts: Vec<Option<raise_emit::Facts>> = jobs.iter().map(|(seg, f, id, src)| emit_facts(seg, f, id, src)).collect();
+        let mut facts: Vec<Option<raise_emit::Facts>> = jobs.iter().map(|(seg, f, id, src)| emit_facts(seg, f, id, src)).collect();
+        if poll_pass == 1 {
+            // All address-taken entries are a conservative superset of possible IRQ callbacks.
+            // Include the installed SDK dispatcher and its context-switching exit even when
+            // flag analysis is disabled. A computed/context path has no preservation proof.
+            let handlers: Vec<usize> = jobs.iter().enumerate().filter_map(|(i, (_, f, _, _))|
+                (raise::direct_flag_observers(f.entry).1 || matches!(f.entry & !1, 0x01FF8000 | 0x01FF8058))
+                    .then_some(i)).collect();
+            let failed: Vec<usize> = handlers.iter().copied().filter(|&i|
+                facts[i].as_ref().is_none_or(|x| x.irq_preserved & 0x2FF0 != 0x2FF0)).collect();
+            let proven = !handlers.is_empty() && failed.is_empty();
+            raise_emit::set_poll_irq_preserved(proven);
+            let sample: Vec<String> = failed.iter().take(8).map(|&i| format!("{}/{:#X}", jobs[i].0, jobs[i].1.entry)).collect();
+            eprintln!("mkds_gen: poll-direct IRQ proof: {} candidates, {} preserved, {} unproven ({sample:?}); polls use {}", handlers.len(), handlers.len() - failed.len(), failed.len(), if proven { "sp/lr only" } else { "full IRQ/context spill" });
+            if proven {
+                facts = jobs.iter().map(|(seg, f, id, src)| emit_facts(seg, f, id, src)).collect();
+            }
+            // The online area is outside readable-source work. Do not add to its direct set.
+            for (i, x) in facts.iter_mut().enumerate() {
+                if context_paths.contains(&(jobs[i].0.clone(), jobs[i].1.entry)) {
+                    if let Some(x) = x { x.escape = Some("thread-context reachability (full spill)"); }
+                    continue;
+                }
+                let net = CALL_NAMES.get().and_then(|n| n.get(&(jobs[i].0.clone(), jobs[i].1.entry & !1)))
+                    .is_some_and(|n| area_of(n, false) == "net");
+                if net && !poll_before_entries[boundary_pass].contains(&i) {
+                    if let Some(x) = x { x.escape = Some("online area (out of scope)"); }
+                }
+            }
+        }
         let mut closed: Vec<bool> = jobs.iter().zip(&facts).map(|((_, f, _, _), x)| x.as_ref().is_some_and(|x| x.escape.is_none()) && !excluded.contains(&(f.entry & !1))).collect();
         let mut rows: HashMap<u32, Vec<usize>> = HashMap::new();
         for (i, (_, f, _, _)) in jobs.iter().enumerate() {
@@ -1606,17 +1683,38 @@ fn run() -> Result<ExitCode, String> {
             }
             eprintln!("mkds_gen: boundary: direct functions {direct_before} -> {} (MKDS_BOUNDARY=1)", sigs.len());
         }
+        if poll_pass == 0 {
+            poll_before[boundary_pass] = sigs.len();
+            poll_before_entries[boundary_pass].extend(sigs.keys().copied());
+        }
+        if poll_pass == 1 {
+            eprintln!("mkds_gen: poll-direct: direct functions {} -> {} (MKDS_BOUNDARY={boundary_pass}); remaining reasons printed above", poll_before[boundary_pass], sigs.len());
+        }
         own_sig.clear();
         for (i, d) in sigs {
             own_sig.insert((jobs[i].0.clone(), jobs[i].1.entry), d);
         }
+        if poll_requested && poll_pass == 0 && boundary_pass == 0 {
+            flat_sig = own_sig.iter().map(|(k, d)| {
+                let mut d = d.clone(); d.name = format!("__poll_flat_{}", d.name); (k.clone(), d)
+            }).collect();
+        }
     }
+        }
+        if poll_requested { unsafe { std::env::set_var("MKDS_POLL_DIRECT", "1"); } }
         if boundary_requested { unsafe { std::env::set_var("MKDS_BOUNDARY", "1"); } }
+    }
+    let mut flat = if poll_selected { poll_flat::emit(&jobs, &image, &flat_sig) } else { HashMap::new() };
+    if poll_selected {
+        raise_emit::set_direct(poll_flat::table(&own_sig));
+        raise_emit::set_boundary(poll_boundary);
     }
     for (seg, f, id, src) in &jobs {
         let img = image(src);
         raise_emit::set_current(seg, own_sig.get(&(seg.clone(), f.entry)).cloned());
-        funcs.push(lifted9(seg.clone(), f, id.clone(), &img));
+        let mut lifted = lifted9(seg.clone(), f, id.clone(), &img);
+        if let Some(flat) = flat.remove(id) { poll_flat::attach(&mut lifted, flat); }
+        funcs.push(lifted);
     }
     raise_emit::set_current("", None);
     if let Some(p) = std::env::var_os("MKDS_TYPE_DUMP") {
@@ -2031,6 +2129,27 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn poll_context_exclusion_follows_callers_even_when_their_registers_are_preserved() {
+        let root = 0x0200_E6ECu32;
+        let caller = 0x0200_0000u32;
+        let outer = caller + 0x20;
+        let leaf = caller + 0x40;
+        let make = |entry: u32, callee: Option<u32>| {
+            let word = callee.map_or(0xE1A0_0000, |t|
+                0xEB00_0000 | (t.wrapping_sub(entry + 8) >> 2 & 0x00FF_FFFF));
+            let bytes: Vec<u8> = [word, 0xE12F_FF1E].iter().flat_map(|w| w.to_le_bytes()).collect();
+            lift::discover(&lift::Image::new(entry, &bytes), entry, Some((entry, entry + 8)), 100).unwrap()
+        };
+        let funcs = [make(root, None), make(caller, Some(root)), make(outer, Some(caller)), make(leaf, None)];
+        let jobs: Vec<_> = funcs.iter().map(|f| ("arm9_main".into(), f, String::new(), None)).collect();
+        let facts = [vec![], vec![root], vec![caller], vec![]].into_iter().map(|calls|
+            Some(raise_emit::Facts { calls, preserved: 0x2FF0, ..Default::default() })).collect::<Vec<_>>();
+        let paths = poll_context_paths(&jobs, &facts);
+        for e in [root, caller, outer] { assert!(paths.contains(&("arm9_main".into(), e))); }
+        assert!(!paths.contains(&("arm9_main".into(), leaf)));
+    }
 
     #[test]
     fn names_table_gives_one_comment_line_per_known_function() {

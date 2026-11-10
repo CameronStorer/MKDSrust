@@ -351,6 +351,7 @@ impl Mem for GuestBus {
 }
 
 impl Bus for GuestBus {
+    fn can_suspend(&self) -> bool { true }
     fn call(&mut self, c: &mut Cpu, target: u32, ret: u32) -> u32 {
         let sp = c.r[13];
         // a host after-hook (mod script events): run the function, then the hook on a normal return

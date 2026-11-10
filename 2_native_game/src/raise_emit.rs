@@ -20,6 +20,10 @@ use std::fmt::Write;
 #[path = "raise_emit_flags.rs"]
 pub(crate) mod flag_locals;
 
+#[path = "raise_emit_poll.rs"]
+mod poll_direct;
+pub use poll_direct::{enabled as poll_direct_enabled, set_irq_preserved as set_poll_irq_preserved};
+
 pub fn flag_locals_enabled() -> bool { flag_locals::enabled() }
 
 /// Why a function stays T0.
@@ -130,6 +134,10 @@ pub struct Facts {
     pub flag_calls_after: usize,
     pub preserved: u16,
     pub boundary_params: u16,
+    /// Independent IRQ proof: preservation plus no implicit saved-register inputs.
+    /// Zero for computed/context paths, helpers, and unknown callees.
+    pub irq_preserved: u16,
+    pub polls: bool,
 }
 
 thread_local! {
@@ -360,7 +368,8 @@ impl SymState {
 /// direct variant does not return them. Values are followed through the function's own stack slots
 /// (offsets from the entry sp); stores through other pointers are assumed not to hit those slots (the
 /// calling convention: nothing else writes a frame's saved registers). `kept(target)`: the registers a
-/// direct callee keeps. Closed functions have no loops, so one pass in reverse postorder suffices.
+/// direct callee keeps. Ordinary closed functions need one reverse-postorder pass;
+/// boundary and poll-direct proofs also join loop back edges to convergence.
 fn preserved_regs(blocks: &BTreeMap<u32, Block>, order: &[u32], entry: u32, all: u16, switches: &BTreeMap<u32, Vec<u32>>, kept: &dyn Fn(u32) -> Option<u16>, boundary: bool) -> (u16, bool) {
     let thumb = entry & 1;
     let internal = |t: u32| blocks.contains_key(&((t & !1) | thumb));
@@ -497,7 +506,7 @@ fn preserved_regs(blocks: &BTreeMap<u32, Block>, order: &[u32], entry: u32, all:
             || matches!(s, S::Do(e) | S::SetReg(_, e) if syncs(e))
             || matches!(s, S::Let(ir::Tmp::Fa | ir::Tmp::Fb | ir::Tmp::Fz, _))
     };
-    // Boundary callees may contain loops. Join back edges until the symbolic inputs settle;
+    // Boundary callees and poll-direct bodies may contain loops. Join back edges until the symbolic inputs settle;
     // a one-pass proof could miss a register changed on a later iteration.
     for _round in 0..64 {
     let before = ins_state.clone();
@@ -571,7 +580,7 @@ fn preserved_regs(blocks: &BTreeMap<u32, Block>, order: &[u32], entry: u32, all:
             }
         }
     }
-    if !boundary || ins_state == before { return (keep, ret_ok); }
+    if !(boundary || poll_direct_enabled()) || ins_state == before { return (keep, ret_ok); }
     }
     (0, false)
 }
@@ -646,12 +655,17 @@ fn step_sym(st: &mut SymState, s: &S, all: u16, kept: &dyn Fn(u32) -> Option<u16
         }
         S::Call { target: E::Const(t), .. } => {
             let d = direct_for(*t);
+            // Poll-direct's ABI admits only ordinary stack-preserving returns.
+            // Even the full context spill returns sp as a value, but does not
+            // make the caller's saved stack slots unknown to this proof.
+            let direct_sp = poll_direct_enabled() && d.is_some();
             let proof = kept(*t);
             let keeps = proof.unwrap_or(0);
             // not (yet) in the direct table: the calling convention's clobbers (checked once it is)
-            let rets = d.map_or_else(|| {
+            let mut rets = d.map_or_else(|| {
                 if proof.is_some() { 0x500F | (CALLEE_SAVED & !keeps) } else { 0x500F }
             }, |d| d.rets);
+            if direct_sp { rets &= !(1 << 13); }
             for r in mask_regs(rets & !keeps) {
                 st.regs[r as usize] = Sym::Unk;
             }
@@ -2352,6 +2366,7 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
     // Block 5.5: no-spill emission (ARM9, `--timing native`)
     let nospill = cost.is_none() && crate::lift::timing_native() && nospill_enabled();
     let own = if nospill { CURRENT.with(|c| c.borrow().1.clone()) } else { None };
+    let has_poll = nospill && blocks.values().any(|b| header.contains(&b.start) || crate::lift::polls(b.start));
     if nospill {
         let thumb = f.entry & 1;
         let internal = |t: u32| blocks.contains_key(&((t & !1) | thumb));
@@ -2362,7 +2377,7 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
         let mut boundary_bad = false;
         let mut calls = Vec::new();
         for b in blocks.values() {
-            if header.contains(&b.start) || crate::lift::polls(b.start) {
+            if !poll_direct_enabled() && (header.contains(&b.start) || crate::lift::polls(b.start)) {
                 escape.get_or_insert("loop (poll point)");
             }
             if b.falls_to.is_some_and(|t| !internal(t)) {
@@ -2388,17 +2403,37 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
                 }
             }
         }
+        if has_poll && poll_direct_enabled() {
+            let regs = if poll_direct::narrow() { 0x6000 } else { 0x7FFF };
+            u2.extend(mask_regs(regs));
+            if !poll_direct::narrow() { w2.extend(mask_regs(regs)); }
+        }
         written = w2.into_iter().filter(|&i| i < 15).collect();
         all = u2.union(&written).copied().filter(|&i| i < 15).collect();
         let mut rets = to_mask(&written);
         let mut preserved = 0;
+        let mut irq_preserved = 0;
+        if poll_direct_enabled() && !boundary_bad {
+            let (keep, ok) = preserved_regs(&blocks, &order, f.entry, to_mask(&all), &switches,
+                &|t| Some(convention_for(t).map_or(0, |d| d.preserved)), true);
+            if ok { irq_preserved = keep; }
+        }
         if boundary_enabled() {
             // Helpers, computed calls and abnormal returns require the full register file.
-            if !boundary_bad {
+            if poll_direct_enabled() {
+                // The same symbolic proof was just computed for IRQ certification.
+                // Its extra volatile-input restriction is applied separately below.
+                preserved = irq_preserved;
+            } else if !boundary_bad {
                 let (keep, ok) = preserved_regs(&blocks, &order, f.entry, to_mask(&all), &switches,
                     &|t| Some(convention_for(t).map_or(0, |d| d.preserved)), true);
                 if ok { preserved = keep; }
             }
+        }
+        if has_poll && poll_direct_enabled() && !poll_direct::narrow() {
+            // A narrow boundary caller cannot supply the interrupted saved
+            // registers needed by an unproven IRQ/context path.
+            preserved = 0;
         }
         if escape.is_none() {
             let (keep, ret_ok) = preserved_regs(&blocks, &order, f.entry, to_mask(&all), &switches,
@@ -2406,14 +2441,17 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
             if !ret_ok {
                 // a jump through a register or a popped value that is not the return address (a tail call)
                 escape = Some("returns elsewhere");
-            } else if std::env::var("MKDS_SPILL").map_or(true, |v| v != "exact") {
+            } else if poll_direct_enabled() && keep & (1 << 13) == 0 {
+                escape = Some("stack pointer not preserved (poll ABI)");
+            } else if !(has_poll && poll_direct_enabled() && !poll_direct::narrow())
+                && std::env::var("MKDS_SPILL").map_or(true, |v| v != "exact") {
                 // a closed function's results leave out the registers it keeps (`MKDS_SPILL=exact`: all it writes)
                 rets &= !keep;
             }
         }
         let allm = to_mask(&all);
         // register liveness (backward, to a fixed point); every exit reads the results
-        let entry_live = |results: u16| {
+        let entry_live = |results: u16, poll_inputs: bool| {
         let mut lin: BTreeMap<u32, u16> = blocks.keys().map(|&b| (b, 0)).collect();
         loop {
             let mut changed = false;
@@ -2444,6 +2482,11 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
                         live |= to_mask(&u);
                     }
                 }
+                if poll_inputs && poll_direct_enabled() && (header.contains(&b) || crate::lift::polls(b)) {
+                    // A poll observes values even when the function overwrites them
+                    // before its ordinary return (e.g. Thumb pops lr into r3).
+                    live |= if poll_direct::narrow() { 0x6000 } else { 0x7FFF };
+                }
                 if lin[&b] != live {
                     lin.insert(b, live);
                     changed = true;
@@ -2455,9 +2498,12 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
         }
         lin[&f.entry]
         };
-        let live_in = entry_live(rets);
-        let boundary_params = if boundary_enabled() { entry_live(VOLATILE) & VOLATILE } else { 0 };
-        LAST_FACTS.with(|x| *x.borrow_mut() = Some(Facts { escape, calls, live_in, written: rets, preserved, boundary_params, cpu: true, ..Facts::default() }));
+        let live_in = entry_live(rets, true);
+        let boundary_params = if boundary_enabled() { entry_live(VOLATILE, true) & VOLATILE } else { 0 };
+        // The BIOS stub preserves volatile values, but a handler must not consume
+        // them as implicit interrupted-function arguments when they remain local.
+        if poll_direct_enabled() && entry_live(0, false) & VOLATILE != 0 { irq_preserved = 0; }
+        LAST_FACTS.with(|x| *x.borrow_mut() = Some(Facts { escape, calls, live_in, written: rets, preserved, boundary_params, irq_preserved, polls: has_poll, cpu: true, ..Facts::default() }));
         if let Some(o) = &own {
             // the signature handed in must cover what this emission found (mkds_gen iterates to a fixed point)
             if o.params & live_in != live_in || o.rets & rets != rets {
@@ -2479,7 +2525,7 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
         Some(n) => format!("r{r} = `{n}` (a `{st}`)"),
         None => format!("r{r} points to a `{st}`"),
     }).collect();
-    let flag_plan = if own.is_some() && flag_locals::enabled() { flag_locals::for_function(&blocks, f.entry, &order, &live, &sf) } else { None };
+    let flag_plan = if own.is_some() && flag_locals::enabled() { flag_locals::for_function(&blocks, f.entry, &order, &live, &sf, has_poll) } else { None };
     let mut ctx = Ctx { local_flags: flag_plan.is_some(), blocks: &blocks, rpo, idom, merge, header, children, names, notes, switches: &switches, fields: typed.fields, budget_flags, native_timing: cost.is_none() && crate::lift::timing_native(), nospill, selfn: own.is_some(), tail_fallback };
     ir::set_reg_names(reg_names);
     let (own_args, own_ret) = match own_typed {
@@ -2492,7 +2538,7 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
     let local_flags = ctx.local_flags;
     ctx.local_flags = false;
     do_tree(&ctx, f.entry, 2, &mut body);
-    let cpu_before_flags = flag_locals::uses_cpu(&body);
+    let cpu_before_flags = has_poll || flag_locals::uses_cpu(&body);
     let flag_calls_before = flag_locals::call_count(&body);
     ctx.local_flags = local_flags;
     if local_flags {
@@ -2536,7 +2582,7 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
         let flag_init = flag_plan.map_or(String::new(), |(input, _)| flag_locals::init(input));
         let flag_exit = flag_plan.map_or(String::new(), |(_, output)| flag_locals::sync(output, false));
         if !flag_init.is_empty() { let _ = writeln!(d, "    {flag_init}"); }
-        let cpu = [&body, &flag_init, &flag_exit].iter().any(|s| flag_locals::uses_cpu(s));
+        let cpu = has_poll || [&body, &flag_init, &flag_exit].iter().any(|s| flag_locals::uses_cpu(s));
         LAST_FACTS.with(|x| { if let Some(f) = &mut *x.borrow_mut() {
             f.cpu = cpu;
             f.cpu_before_flags = cpu_before_flags;
@@ -2545,7 +2591,12 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
         } });
         let back = if rets.is_empty() { "t".to_string() } else { format!("(t, {})", rets.iter().map(|&i| ir::reg_name(i)).collect::<Vec<_>>().join(", ")) };
         let _ = writeln!(d, "    macro_rules! exit {{ ($e:expr) => {{{{ let t: u32 = $e; {flag_exit}return {back}; }}}} }}");
-        for mac in ["spill", "reload", "leave", "poll"] {
+        if has_poll && poll_direct_enabled() {
+            let _ = writeln!(d, "    macro_rules! poll {{ {} }}", poll_direct::macro_body(local_flags));
+        } else {
+            let _ = writeln!(d, "    macro_rules! poll {{ ($($x:tt)*) => {{ compile_error!(\"poll in a direct function\") }} }}");
+        }
+        for mac in ["spill", "reload", "leave"] {
             let _ = writeln!(d, "    macro_rules! {mac} {{ ($($x:tt)*) => {{ compile_error!(\"{mac} in a direct function\") }} }}");
         }
         let _ = writeln!(d, "    macro_rules! budget {{ ($($x:tt)*) => {{}} }}");
@@ -2557,6 +2608,9 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
         let _ = writeln!(s, "pub fn f_{id}_t1(c: &mut recomp::rt::Cpu, m: &mut dyn recomp::rt::Bus, pc: u32) -> u32 {{");
         let _ = writeln!(s, "    #[allow(unused_imports)] use recomp::rt as R;");
         let _ = writeln!(s, "    if pc != {:#X} || !R::t1_enabled({:#X}) {{ return f_{id}(c, m, pc); }}", f.entry, f.entry);
+        if poll_direct_enabled() {
+            let _ = writeln!(s, "    if !m.can_suspend() {{ return f_{id}(c, m, pc); }}");
+        }
         let args: String = params.iter().map(|&i| format!(", c.r[{i}]")).collect();
         let cpu_arg = if o.cpu { "c, " } else { "" };
         if rets.is_empty() {
@@ -2575,6 +2629,9 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
     let _ = writeln!(s, "pub fn f_{id}_t1(c: &mut recomp::rt::Cpu, m: &mut dyn recomp::rt::Bus, pc: u32) -> u32 {{");
     let _ = writeln!(s, "    #[allow(unused_imports)] use recomp::rt as R;\n    #[allow(unused_imports)] use recomp::arm::interwork as iw;\n    #[allow(unused_imports)] use recomp::rt::Mem as _;");
     let _ = writeln!(s, "    if pc != {:#X} || !R::t1_enabled({:#X}) {{ return f_{id}(c, m, pc); }}", f.entry, f.entry);
+    if nospill && poll_direct_enabled() {
+        let _ = writeln!(s, "    if !m.can_suspend() {{ return f_{id}(c, m, pc); }}");
+    }
     let names: Vec<String> = all.iter().map(|&i| ir::reg_name(i)).collect();
     if !all.is_empty() {
         let loads: Vec<String> = all.iter().map(|&i| format!("c.r[{i}]")).collect();
@@ -2783,7 +2840,9 @@ fn stmt_code(c: &Ctx, x: u32, s: &S, depth: usize, out: &mut String) {
         }
         S::Goto(E::Const(t)) if c.selfn && boundary_for(*t).is_some() => {
             let d = boundary_for(*t).unwrap();
+            if c.local_flags { line(out, &flag_locals::sync(crate::raise::NZCV, false)); }
             line(out, &boundary_call(*t, &ir::reg_name(14), &d));
+            if c.local_flags { line(out, &flag_locals::sync(crate::raise::NZCV, true)); }
             line(out, "exit!(x);");
         }
         S::Goto(e) => {
@@ -2811,7 +2870,9 @@ fn stmt_code(c: &Ctx, x: u32, s: &S, depth: usize, out: &mut String) {
         }
         S::Call { target: E::Const(t), ret } if c.selfn && boundary_for(*t).is_some() => {
             let d = boundary_for(*t).unwrap();
+            if c.local_flags { line(out, &flag_locals::sync(crate::raise::NZCV, false)); }
             line(out, &boundary_call(*t, &format!("{ret:#X}"), &d));
+            if c.local_flags { line(out, &flag_locals::sync(crate::raise::NZCV, true)); }
             let bad = if c.selfn { format!("R::bad_return(x, {ret:#X})") } else { "exit!(x)".into() };
             line(out, &format!("if x != {ret:#X} {{ {bad}; }}"));
         }

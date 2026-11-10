@@ -32,7 +32,7 @@ pub fn init(mask: u8) -> String {
 
 /// Entry reads and observable return writes, after compare folding/materialization.
 /// Unwritten return flags stay in the CPU and need neither a local load nor a store.
-fn plan(blocks: &BTreeMap<u32, Block>, entry: u32, order: &[u32], live: &BTreeMap<u32, u8>, sf: &dyn Fn(&S, u32) -> (u8, u8), returned: u8) -> (u8, u8) {
+fn plan(blocks: &BTreeMap<u32, Block>, entry: u32, order: &[u32], live: &BTreeMap<u32, u8>, sf: &dyn Fn(&S, u32) -> (u8, u8), returned: u8, polls: bool) -> (u8, u8) {
     let internal = |t: u32| blocks.contains_key(&((t & !1) | (entry & 1)));
     let exit = |s: &S| match s {
         S::Goto(E::Const(t)) => !internal(*t),
@@ -41,7 +41,7 @@ fn plan(blocks: &BTreeMap<u32, Block>, entry: u32, order: &[u32], live: &BTreeMa
         _ => false,
     };
     let effects = |s: &S| match s {
-        S::Goto(E::Const(t)) if !internal(*t) && direct_for(*t).is_some_and(|d| d.cpu) => (crate::raise::NZCV, crate::raise::NZCV),
+        S::Goto(E::Const(t)) if !internal(*t) && (direct_for(*t).is_some_and(|d| d.cpu) || boundary_for(*t).is_some()) => (crate::raise::NZCV, crate::raise::NZCV),
         S::Call { target: E::Const(t), .. } if direct_for(*t).is_some_and(|d| !d.cpu) => (0, 0),
         S::Call { .. } => (crate::raise::NZCV, crate::raise::NZCV),
         S::IfSome(..) if block_return(s).is_some() => (0, 0),
@@ -60,7 +60,7 @@ fn plan(blocks: &BTreeMap<u32, Block>, entry: u32, order: &[u32], live: &BTreeMa
                 if exit(s) { observed |= live.get(&ins.addr).copied().unwrap_or(crate::raise::NZCV) | sf(s, ins.addr).0; }
                 // A tail call that still takes a CPU can observe all incoming flags.
                 if let S::Goto(E::Const(t)) = s {
-                    if !internal(*t) && direct_for(*t).is_some_and(|d| d.cpu) { observed |= crate::raise::NZCV; }
+                    if !internal(*t) && (direct_for(*t).is_some_and(|d| d.cpu) || boundary_for(*t).is_some()) { observed |= crate::raise::NZCV; }
                 }
             }
         }
@@ -85,13 +85,16 @@ fn plan(blocks: &BTreeMap<u32, Block>, entry: u32, order: &[u32], live: &BTreeMa
                     state |= after | crate::raise::cond_reads(ins.cond);
                 }
             }
+            // IRQ entry snapshots the entire CPSR, including flags dead to the
+            // ordinary return. Keep their incoming values available at polls.
+            if polls { state |= crate::raise::NZCV; }
             if inn[&b] != state { inn.insert(b, state); changed = true; }
         }
         if !changed { return (inn[&entry], out); }
     }
 }
 
-pub(super) fn for_function(blocks: &BTreeMap<u32, Block>, entry: u32, order: &[u32], live: &BTreeMap<u32, u8>, sf: &dyn Fn(&S, u32) -> (u8, u8)) -> Option<(u8, u8)> {
+pub(super) fn for_function(blocks: &BTreeMap<u32, Block>, entry: u32, order: &[u32], live: &BTreeMap<u32, u8>, sf: &dyn Fn(&S, u32) -> (u8, u8), polls: bool) -> Option<(u8, u8)> {
     // Closed-function selection already rejects external fall-throughs. Keep
     // this check beside the plan too: the emitter's fall-off exit has no S.
     if blocks.values().any(|b| b.falls_to.is_some_and(|t| !blocks.contains_key(&((t & !1) | (entry & 1))))) {
@@ -105,7 +108,7 @@ pub(super) fn for_function(blocks: &BTreeMap<u32, Block>, entry: u32, order: &[u
     let status = blocks.values().flat_map(|b| &b.insts).flat_map(|i| &i.stmts).any(|s| {
         matches!(s, S::Do(E::Call(H::Msr, _))) || matches!(s, S::SetReg(_, E::Cpsr | E::Spsr))
     });
-    (!status).then(|| plan(blocks, entry, order, live, sf, returned))
+    (!status).then(|| plan(blocks, entry, order, live, sf, returned, polls))
 }
 
 #[cfg(test)]
@@ -116,7 +119,7 @@ mod tests {
     fn fall_off_without_a_statement_is_excluded() {
         let entry = 0x0200_0000;
         let blocks = [(entry, Block { start: entry, insts: vec![], succ: vec![], falls_to: Some(entry + 4), charge: 1 })].into_iter().collect();
-        assert_eq!(for_function(&blocks, entry, &[entry], &BTreeMap::new(), &|_, _| (0, 0)), None);
+        assert_eq!(for_function(&blocks, entry, &[entry], &BTreeMap::new(), &|_, _| (0, 0), false), None);
     }
 
     #[test]
@@ -128,6 +131,6 @@ mod tests {
         }], succ: vec![], falls_to: None, charge: 1 })].into_iter().collect();
         // No statement or instruction fact advertises a reader. The whole-
         // program return contract must still force the carry write-back.
-        assert_eq!(plan(&blocks, entry, &[entry], &[(entry, 0)].into_iter().collect(), &|_, _| (0, 0), crate::raise::C), (0, crate::raise::C));
+        assert_eq!(plan(&blocks, entry, &[entry], &[(entry, 0)].into_iter().collect(), &|_, _| (0, 0), crate::raise::C, false), (0, crate::raise::C));
     }
 }
