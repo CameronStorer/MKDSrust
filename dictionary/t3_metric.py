@@ -4,6 +4,9 @@
   T3a:    direct, and the body never uses the simulated CPU (`c`).
   T3b:    T3a, and the body never uses the simulated memory bus (`m`).
 
+In scope (owner decision 2026-11-10): everything except ARM7 code (replaced by native services) and the
+online area (`code_net`, Nintendo's servers are gone).
+
 Usage: python t3_metric.py <build>/source"""
 import collections, csv, os, re, sys
 
@@ -39,6 +42,10 @@ for a, b in zip(starts, starts[1:]):
 
 print(f'functions {total}: direct {direct} ({direct/total:.1%}), T3a no CPU {t3a} ({t3a/total:.1%}), '
       f'T3b no simulated memory {t3b} ({t3b/total:.1%})')
+OUT = ('code_arm7', 'code_net')
+sn = sum(v[0] for k, v in area.items() if k not in OUT)
+sa = sum(v[2] for k, v in area.items() if k not in OUT); sb = sum(v[3] for k, v in area.items() if k not in OUT)
+print(f'in scope (no ARM7, no online) {sn}: T3a {sa} ({sa/sn:.1%}), T3b {sb} ({sb/sn:.1%})')
 for k, (n, d, x, y) in sorted(area.items(), key=lambda kv: -kv[1][0]):
     if n:
         print(f'  {k:18} direct {d:5}  T3a {x:5}  T3b {y:5}  / {n}')

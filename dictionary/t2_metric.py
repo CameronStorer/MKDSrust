@@ -24,6 +24,9 @@ for t in csv.DictReader(open(tiers, encoding='utf-8')):
     a = area[t['part'].rsplit('_', 1)[0] if t['part'][-1].isdigit() else t['part']]
     a[0] += 1; a[1] += ok_name and ok_type
 print(f'functions {tot}: confirmed name {named} ({named/tot:.1%}), pointer args typed {typed} ({typed/tot:.1%}), T2 {both} ({both/tot:.1%})')
+OUT = ('code_arm7', 'code_net')
+sn = sum(v[0] for k, v in area.items() if k not in OUT); sd = sum(v[1] for k, v in area.items() if k not in OUT)
+print(f'in scope (no ARM7, no online) {sn}: T2 {sd} ({sd/sn:.1%})')
 print('functions with untyped pointer args:', len(untyped))
 for k, (n, d) in sorted(area.items(), key=lambda x: -x[1][0]):
     print(f'  {k:18} {d:5}/{n:<5} {d/n:.0%}')
