@@ -2783,7 +2783,7 @@ fn stmt_code(c: &Ctx, x: u32, s: &S, depth: usize, out: &mut String) {
         }
         S::Goto(E::Const(t)) if c.selfn && boundary_for(*t).is_some() => {
             let d = boundary_for(*t).unwrap();
-            line(out, &boundary_call(*t, &ir::reg_name(14), &d));
+            line(out, &boundary_call(*t, &ir::reg_name(14), &d, c.local_flags));
             line(out, "exit!(x);");
         }
         S::Goto(e) => {
@@ -2811,7 +2811,7 @@ fn stmt_code(c: &Ctx, x: u32, s: &S, depth: usize, out: &mut String) {
         }
         S::Call { target: E::Const(t), ret } if c.selfn && boundary_for(*t).is_some() => {
             let d = boundary_for(*t).unwrap();
-            line(out, &boundary_call(*t, &format!("{ret:#X}"), &d));
+            line(out, &boundary_call(*t, &format!("{ret:#X}"), &d, c.local_flags));
             let bad = if c.selfn { format!("R::bad_return(x, {ret:#X})") } else { "exit!(x)".into() };
             line(out, &format!("if x != {ret:#X} {{ {bad}; }}"));
         }
@@ -2858,11 +2858,14 @@ fn stmt_code(c: &Ctx, x: u32, s: &S, depth: usize, out: &mut String) {
     }
 }
 
-fn boundary_call(target: u32, ret: &str, d: &BoundarySig) -> String {
+fn boundary_call(target: u32, ret: &str, d: &BoundarySig, local_flags: bool) -> String {
+    // The callee takes the CPU and may read or write flags there (hand-written SDK asm): keep the
+    // flag locals coherent with `c` across the call, like any other call that still takes a CPU.
+    let (fsync, freload) = if local_flags { (flag_locals::sync(crate::raise::NZCV, false), flag_locals::sync(crate::raise::NZCV, true)) } else { Default::default() };
     let spill: String = mask_regs(d.params | 1 << 13 | 1 << 14)
         .map(|r| format!("c.r[{r}] = {}; ", ir::reg_name(r))).collect();
     let reload: String = mask_regs(VOLATILE)
         .map(|r| format!("{} = c.r[{r}]; ", ir::reg_name(r))).collect();
     // `c.r[13]` is not a result of a direct function: put back the value it had before the spill
-    format!("let sp0 = c.r[13]; {spill}let x = m.call(c, {target:#X}, {ret}); c.r[13] = sp0; {reload}// checked dispatcher boundary")
+    format!("let sp0 = c.r[13]; {spill}{fsync}let x = m.call(c, {target:#X}, {ret}); c.r[13] = sp0; {reload}{freload}// checked dispatcher boundary")
 }

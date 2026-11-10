@@ -41,7 +41,7 @@ fn plan(blocks: &BTreeMap<u32, Block>, entry: u32, order: &[u32], live: &BTreeMa
         _ => false,
     };
     let effects = |s: &S| match s {
-        S::Goto(E::Const(t)) if !internal(*t) && direct_for(*t).is_some_and(|d| d.cpu) => (crate::raise::NZCV, crate::raise::NZCV),
+        S::Goto(E::Const(t)) if !internal(*t) && (direct_for(*t).is_some_and(|d| d.cpu) || boundary_for(*t).is_some()) => (crate::raise::NZCV, crate::raise::NZCV),
         S::Call { target: E::Const(t), .. } if direct_for(*t).is_some_and(|d| !d.cpu) => (0, 0),
         S::Call { .. } => (crate::raise::NZCV, crate::raise::NZCV),
         S::IfSome(..) if block_return(s).is_some() => (0, 0),
@@ -60,7 +60,7 @@ fn plan(blocks: &BTreeMap<u32, Block>, entry: u32, order: &[u32], live: &BTreeMa
                 if exit(s) { observed |= live.get(&ins.addr).copied().unwrap_or(crate::raise::NZCV) | sf(s, ins.addr).0; }
                 // A tail call that still takes a CPU can observe all incoming flags.
                 if let S::Goto(E::Const(t)) = s {
-                    if !internal(*t) && direct_for(*t).is_some_and(|d| d.cpu) { observed |= crate::raise::NZCV; }
+                    if !internal(*t) && (direct_for(*t).is_some_and(|d| d.cpu) || boundary_for(*t).is_some()) { observed |= crate::raise::NZCV; }
                 }
             }
         }
