@@ -9,7 +9,8 @@ thread_local! {
 }
 
 pub fn enabled() -> bool {
-    nospill_enabled() && std::env::var("MKDS_POLL_DIRECT").as_deref() == Ok("1")
+    // on by default in native builds; `MKDS_POLL_DIRECT=0` opts out
+    nospill_enabled() && std::env::var("MKDS_POLL_DIRECT").map_or(true, |v| v != "0")
 }
 
 pub fn set_irq_preserved(proven: bool) {

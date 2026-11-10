@@ -649,7 +649,7 @@ thread_local! {
     static BASES: std::cell::RefCell<std::collections::HashMap<u8, (u8, u32)>> = std::cell::RefCell::new(Default::default());
     /// The accessors printed since the last [`take_field_uses`].
     static FIELD_USES: std::cell::RefCell<Vec<(FieldRef, Access)>> = const { std::cell::RefCell::new(Vec::new()) };
-    /// Typed signatures (`MKDS_TYPED_SIG=1`): registers that hold, unchanged, a `Ptr<Struct>` parameter:
+    /// Typed signatures (default in native builds): registers that hold, unchanged, a `Ptr<Struct>` parameter:
     /// register -> (the `Ptr` variable's name, the struct). Accesses through them print as methods.
     static PTR_REGS: std::cell::RefCell<std::collections::HashMap<u8, (String, String)>> = std::cell::RefCell::new(Default::default());
 }

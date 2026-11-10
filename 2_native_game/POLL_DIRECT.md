@@ -1,7 +1,8 @@
 # Direct functions with loop polls
 
-`MKDS_POLL_DIRECT=1` is an opt-in **generator** switch for native timing. It
-composes with `MKDS_BOUNDARY=1` and the default flag locals. Exact generation
+Direct functions with loop polls are a **generator** feature of native timing, on by
+default (`MKDS_POLL_DIRECT=0` opts out). It composes with boundary calls (`MKDS_BOUNDARY=0`
+opts out), typed signatures (`MKDS_TYPED_SIG=0`) and the default flag locals. Exact generation
 ignores the switch. ARM7 is unchanged, and selection adds no direct functions in
 the online area.
 

@@ -1778,7 +1778,7 @@ fn run() -> Result<ExitCode, String> {
             eprintln!("mkds_gen: flag-locals: {} direct functions; still using c: {} -> {}; R::*(c, ...) arithmetic sites: {} -> {}", sigs.len(), before.0, after.0, before.1, after.1);
         }
         if raise_emit::typed_sig_enabled() {
-            // MKDS_TYPED_SIG=1: which direct functions return to their unchanged `lr` (so it stays implicit),
+            // typed signatures (default; MKDS_TYPED_SIG=0 opts out): which direct functions return to their unchanged `lr` (so it stays implicit),
             // and which parameters are `fx32` values; a printing change only
             raise_emit::set_typed_info(HashMap::new());
             let mut info: HashMap<String, raise_emit::TypedInfo> = HashMap::new();
@@ -1816,7 +1816,7 @@ fn run() -> Result<ExitCode, String> {
             if before_entries.iter().any(|i| !sigs.contains_key(i)) {
                 return Err("boundary selection lost an existing direct function".into());
             }
-            eprintln!("mkds_gen: boundary: direct functions {direct_before} -> {} (MKDS_BOUNDARY=1)", sigs.len());
+            eprintln!("mkds_gen: boundary: direct functions {direct_before} -> {} (boundary calls on)", sigs.len());
         }
         if poll_pass == 0 {
             poll_before[boundary_pass] = sigs.len();

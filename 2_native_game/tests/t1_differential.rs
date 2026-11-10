@@ -21,8 +21,23 @@ type Cost<'a> = Option<&'a dyn Fn(&recomp::arm::Decoded, bool) -> u32>;
 /// Emission settings are process-wide (`--timing native`): tests that emit hold this lock.
 static EMIT: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-fn emit_lock() -> std::sync::MutexGuard<'static, ()> {
-    EMIT.lock().unwrap_or_else(|e| e.into_inner())
+/// The lock, and the fixtures' poll mode: direct functions with loop polls are on by default in native builds,
+/// where `mkds_gen` adds what they need (the IRQ proof, the flat copies). These single-function fixtures were
+/// written without it, so they run with `MKDS_POLL_DIRECT=0` unless the variable is set; the poll tests set it
+/// themselves.
+struct EmitLock(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>, Option<std::ffi::OsString>);
+
+impl Drop for EmitLock {
+    fn drop(&mut self) {
+        unsafe { match &self.1 { Some(v) => std::env::set_var("MKDS_POLL_DIRECT", v), None => std::env::remove_var("MKDS_POLL_DIRECT") } }
+    }
+}
+
+fn emit_lock() -> EmitLock {
+    let guard = EMIT.lock().unwrap_or_else(|e| e.into_inner());
+    let old = std::env::var_os("MKDS_POLL_DIRECT");
+    if old.is_none() { unsafe { std::env::set_var("MKDS_POLL_DIRECT", "0"); } }
+    EmitLock(guard, old)
 }
 
 fn build_checks_cost(funcs: &[(String, u32, Func)], image: &[u8], base: u32, seeds: u32, cost: Cost) -> (String, usize) {

@@ -82,7 +82,7 @@ struct Ctx<'a> {
 //   every register it writes. Nothing can observe `c.r` while it runs, so nothing is spilled.
 // The whole-program part (which functions are closed, their arguments and results) is computed by
 // `mkds_gen` from the [`Facts`] each emission records, and handed back with [`set_direct`].
-// `MKDS_BOUNDARY=1` also admits constant dispatcher calls whose callee is certified to preserve
+// Boundary calls (default; `MKDS_BOUNDARY=0` opts out) also admit constant dispatcher calls whose callee is certified to preserve
 // r4-r11 and sp. Only its volatile inputs, sp and lr are synchronized; r4-r11 remain local.
 // ---------------------------------------------------------------------------------------------
 
@@ -108,9 +108,9 @@ pub struct BoundarySig {
 const CALLEE_SAVED: u16 = 0x2FF0; // r4-r11, sp
 const VOLATILE: u16 = 0x100F; // r0-r3, r12
 
-/// Opt-in generator feature, confined to native no-spill emission.
+/// Generator feature confined to native no-spill emission: on by default, `MKDS_BOUNDARY=0` opts out.
 pub fn boundary_enabled() -> bool {
-    nospill_enabled() && std::env::var("MKDS_BOUNDARY").as_deref() == Ok("1")
+    nospill_enabled() && std::env::var("MKDS_BOUNDARY").map_or(true, |v| v != "0")
 }
 
 /// Per-segment calling-convention proofs, including rejected rows (with an incomplete mask).
@@ -144,10 +144,11 @@ pub struct Facts {
     pub polls: bool,
 }
 
-/// Typed signatures (`MKDS_TYPED_SIG=1`, native builds): a printing change only. Parameters and results
-/// print as `Ptr<Struct>` / `Fx32` where the type rounds or the field types say so, with the same bits.
+/// Typed signatures (native builds, on by default, `MKDS_TYPED_SIG=0` opts out): a printing change only.
+/// Parameters and results print as `Ptr<Struct>` / `Fx32` where the type rounds or the field types say so,
+/// with the same bits.
 pub fn typed_sig_enabled() -> bool {
-    nospill_enabled() && std::env::var("MKDS_TYPED_SIG").as_deref() == Ok("1")
+    nospill_enabled() && std::env::var("MKDS_TYPED_SIG").map_or(true, |v| v != "0")
 }
 
 /// What the generator found about a direct function, for printing its signature and its calls.
@@ -172,10 +173,23 @@ fn typed_info(name: &str) -> TypedInfo {
     TYPED_INFO.with(|t| t.borrow().get(name).copied().unwrap_or_default())
 }
 
-/// The `layout` crate's root alias of a struct's marker type (`Kart` for `kart::T`), if it gets one.
+/// Names a root alias must not take: the `layout` crate's own root items, and names the generated crates
+/// (which `use layout::*`) or the layout crate itself use unqualified. A glob import shadows the prelude, and
+/// a marker is a unit struct (a value too), so `Some`, `Ok`, `Clone` and the like are all taken.
+const RESERVED_ALIASES: &[&str] = &[
+    "Ptr", "Fx32", "T", "Self", "R", "Mem", "Bus", "Cpu", "PhantomData",
+    "Option", "Some", "None", "Result", "Ok", "Err", "Box", "Vec", "String", "ToString", "ToOwned",
+    "Copy", "Clone", "Send", "Sync", "Sized", "Unpin", "Drop", "Fn", "FnMut", "FnOnce", "AsyncFn", "AsyncFnMut",
+    "AsyncFnOnce", "Default", "Eq", "PartialEq", "Ord", "PartialOrd", "Debug", "Hash", "Iterator",
+    "IntoIterator", "DoubleEndedIterator", "ExactSizeIterator", "Extend", "FromIterator", "AsRef", "AsMut",
+    "Into", "From", "TryFrom", "TryInto", "Future", "IntoFuture",
+];
+
+/// The `layout` crate's root alias of a struct's marker type (`Kart` for `kart::T`), if it gets one. The
+/// other root items are `Ptr`, `Fx32` (reserved here) and the struct modules, whose names are lower case.
 pub fn marker_alias(st: &str) -> Option<String> {
     let ok = st.starts_with(|c: char| c.is_ascii_uppercase()) && st.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        && !["Ptr", "Fx32", "T", "Self"].contains(&st);
+        && !RESERVED_ALIASES.contains(&st);
     ok.then(|| st.to_string())
 }
 
@@ -2541,6 +2555,10 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
             if !poll_direct::narrow() { w2.extend(mask_regs(regs)); }
         }
         written = w2.into_iter().filter(|&i| i < 15).collect();
+        // every register the body can change: `SetReg` (a `bl` sets `lr` this way), plain block loads (`ldm`/`pop`,
+        // base write-back), direct calls (their results; what they keep is proven preserved), boundary calls (the
+        // volatile registers), `msr` (the banked ones) and full polls. Other helpers that touch `c.r` are escapes,
+        // and flag locals hold flags only. Typed `Ptr` parameters and `fx_param_scan` rely on this.
         body_written = to_mask(&written);
         all = u2.union(&written).copied().filter(|&i| i < 15).collect();
         let mut rets = to_mask(&written);
@@ -2658,7 +2676,7 @@ pub fn emit_t1_full(f: &Func, id: &str, img: Option<&Image>, notes: &Notes, cost
         Some(n) => format!("r{r} = `{n}` (a `{st}`)"),
         None => format!("r{r} points to a `{st}`"),
     }).collect();
-    // typed signatures (`MKDS_TYPED_SIG=1`): the parameters' kinds, and the pointer parameters that stay as they
+    // typed signatures (default; `MKDS_TYPED_SIG=0` opts out): the parameters' kinds, and the pointer parameters that stay as they
     // are for the whole function (their accesses print as methods: `kart.bounce_height(m)`)
     let mut reg_names = reg_names;
     let typed_sig = own.is_some() && typed_sig_enabled();
@@ -2959,7 +2977,7 @@ fn block_code(c: &Ctx, x: u32, depth: usize, out: &mut String) {
         for (si, s) in ins.stmts.iter().enumerate() {
             set(si);
             ir::set_bases(derived.clone());
-            stmt_code(c, x, s, inner, &mut text);
+            stmt_code(c, x, s, &ins.stmts[..si], inner, &mut text);
             match s {
                 // flag-setting helpers (`R::subs`) and plain block transfers name what they write; a mode
                 // change (`msr`, user-bank transfers) can swap banked registers, so it clears everything
@@ -3012,7 +3030,26 @@ fn block_code(c: &Ctx, x: u32, depth: usize, out: &mut String) {
     }
 }
 
-fn stmt_code(c: &Ctx, x: u32, s: &S, depth: usize, out: &mut String) {
+/// Whether the statements before a call in its instruction (`before`) set `lr` to `ret` and leave it so: a
+/// standard `bl` (`lr = ret`, then perhaps flag statements, then the call).
+fn lr_set_to(before: &[S], ret: u32) -> bool {
+    for s in before.iter().rev() {
+        if let S::SetReg(14, E::Const(v)) = s {
+            return *v == ret;
+        }
+        let (mut u, mut w) = (BTreeSet::new(), BTreeSet::new());
+        regs_ext(s, 0xFFFF, &mut u, &mut w);
+        let plain = matches!(s, S::Let(..) | S::Let2(..) | S::SetFlag(..) | S::SetNz(_) | S::SetReg(..) | S::Store { .. } | S::Do(_))
+            && !matches!(s, S::Do(e) if has_helper(e, &|h| matches!(h, H::Msr | H::Block | H::BlockUser)));
+        if !plain || w.contains(&14) {
+            return false;
+        }
+    }
+    false
+}
+
+/// `before` are the statements before `s` in the same instruction.
+fn stmt_code(c: &Ctx, x: u32, s: &S, before: &[S], depth: usize, out: &mut String) {
     let thumb = x & 1;
     let line = |out: &mut String, t: &str| {
         indent(out, depth);
@@ -3070,11 +3107,16 @@ fn stmt_code(c: &Ctx, x: u32, s: &S, depth: usize, out: &mut String) {
             let reload = if c.local_flags && d.cpu { flag_locals::sync(crate::raise::NZCV, true) } else { String::new() };
             let call = format!("{path}({cpu_arg}m{args})");
             if typed_sig_enabled() {
-                // typed call; a leaf with an implicit `lr` returns no pc (it returns to `ret`, which `lr` was set to)
+                // typed call; a leaf with an implicit `lr` returns no pc: it returns to `lr`. That is `ret` (no
+                // check needed) only when this very instruction set `lr` to `ret` (a standard `bl`, see `lr_set_to`); otherwise the
+                // call keeps the check, on `lr` as the leaf leaves it
                 let stmt = typed_call_stmt(c, *t, &d, &call, false);
-                let check = if typed_info(&d.name).lr_implicit { String::new() } else {
+                let implicit = typed_info(&d.name).lr_implicit;
+                let lr_is_ret = lr_set_to(before, *ret);
+                let check = if implicit && lr_is_ret { String::new() } else {
+                    let x = if implicit { format!("let x = iw({});", ir::reg_name(14)) } else { String::new() };
                     let bad = if c.selfn { format!("R::bad_return(x, {ret:#X})") } else { "exit!(x)".into() };
-                    format!(" if x != {ret:#X} {{ {bad}; }}")
+                    format!(" {x}if x != {ret:#X} {{ {bad}; }}")
                 };
                 line(out, &format!("{sync}{stmt}{check}{reload}{name}"));
                 return;
@@ -3228,8 +3270,23 @@ mod typed_sig_tests {
     fn marker_aliases_avoid_reserved_names() {
         assert_eq!(marker_alias("Kart").as_deref(), Some("Kart"));
         assert_eq!(marker_alias("Ptr"), None);
+        for taken in ["Fx32", "T", "Some", "None", "Ok", "Err", "Option", "Clone", "Default", "Box", "Vec", "R", "Mem"] {
+            assert_eq!(marker_alias(taken), None, "{taken}");
+        }
         assert_eq!(marker_alias("kart"), None);
         assert_eq!(marker_alias("A B"), None);
+    }
+
+    #[test]
+    fn implicit_lr_check_dropped_only_after_a_standard_bl() {
+        let ret = 0x0200_1235;
+        let bl = S::SetReg(14, E::Const(ret));
+        let flags = S::SetNz(E::Reg(0));
+        assert!(lr_set_to(&[bl.clone()], ret));
+        assert!(lr_set_to(&[bl.clone(), flags.clone()], ret), "flag statements between keep the proof");
+        assert!(!lr_set_to(&[], ret), "no `lr = ret` in the instruction");
+        assert!(!lr_set_to(&[S::SetReg(14, E::Const(ret + 4))], ret), "another return address");
+        assert!(!lr_set_to(&[bl, S::SetReg(14, E::Reg(0))], ret), "lr overwritten before the call");
     }
 
     #[test]

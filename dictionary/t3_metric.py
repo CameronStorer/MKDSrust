@@ -32,6 +32,8 @@ for name, p in part_of.items():
 for a, b in zip(starts, starts[1:]):
     chunk = text[a:b]
     name = fn_re.match(chunk).group(1)
+    if name.startswith('__poll_flat_'):
+        continue  # the flat-dispatch copy of a poll-direct function: not a function of its own
     body = chunk.split('{', 1)[1] if '{' in chunk else ''
     body = '\n'.join(l for l in body.split('\n') if not boiler.match(l))
     a_ok = not uses_c.search(body)
