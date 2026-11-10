@@ -803,7 +803,11 @@ static TYPE_DUMP: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new
 fn direct_excluded() -> HashSet<u32> {
     // Adding a trial must not change the default native call graph (and safe-point timing).
     // Opt in at generation as well as execution; exact generation has no direct variants.
-    let math_on = matches!(std::env::var("MKDS_NATIVES").as_deref(), Ok("math" | "all"));
+    direct_excluded_with(matches!(std::env::var("MKDS_NATIVES").as_deref(), Ok("math" | "all")))
+}
+
+/// [`direct_excluded`] with the math trials on or off (off: the default native call graph).
+fn direct_excluded_with(math_on: bool) -> HashSet<u32> {
     let mut x: HashSet<u32> = recomp::native::NATIVE.iter()
         .filter(|n| math_on || !recomp::native::math::is_new_entry(n.entry))
         .chain(recomp::native::fs::NATIVES).map(|n| n.entry & !1).collect();
@@ -1512,6 +1516,35 @@ fn run() -> Result<ExitCode, String> {
             dropped.insert(i);
         }
         };
+        // Opt-in natives (MKDS_NATIVES=math|all) take functions out of the direct call graph. Calls to a
+        // function the default graph calls directly then become dispatches, and a dispatch is where an empty
+        // slice budget ends the slice (and takes the pending IRQ), so the IRQ would move. Those calls are
+        // emitted as `call_quiet`, which dispatches without that check (the default graph's behaviour).
+        if matches!(std::env::var("MKDS_NATIVES").as_deref(), Ok("math" | "all")) {
+            let base_excluded = direct_excluded_with(false);
+            let mut base_closed: Vec<bool> = jobs.iter().zip(&facts).enumerate().map(|(i, ((_, f, _, _), x))| {
+                x.as_ref().is_some_and(|x| x.escape.is_none()) && !base_excluded.contains(&(f.entry & !1)) && !dropped.contains(&i)
+            }).collect();
+            loop {
+                let mut changed = false;
+                for i in 0..jobs.len() {
+                    if base_closed[i] && facts[i].as_ref().unwrap().calls.iter().any(|&t| reaches(&base_closed, &jobs[i].0, t).is_none()) {
+                        base_closed[i] = false;
+                        changed = true;
+                    }
+                }
+                if !changed { break; }
+            }
+            let n_base = base_closed.iter().filter(|&&b| b).count();
+            let mut quiet: HashMap<u32, Vec<String>> = HashMap::new();
+            for i in 0..jobs.len() {
+                if base_closed[i] && !closed[i] {
+                    quiet.entry(jobs[i].1.entry).or_default().push(jobs[i].0.clone());
+                }
+            }
+            eprintln!("mkds_gen: quiet calls: default graph has {n_base} closed functions, this one {}; {} entries dispatch quietly", closed.iter().filter(|&&b| b).count(), quiet.len());
+            raise_emit::set_quiet(quiet);
+        }
         if raise_emit::flag_locals_enabled() {
             // CPU arguments only disappear: a caller can become CPU-free once its
             // direct callees have, so iterate separately from register signatures.

@@ -135,3 +135,34 @@ Reproduce from this worktree using the fleet build/race commands. For the benchm
 `MKDS_ROM=<private ROM> MKDS_MATH_SCRATCH=<private lane folder> cargo test --release
 --locked --features gen --test native_math_bench -- --ignored --nocapture`.
 The benchmark emits Rust only to that private folder and writes `math_bench/results.csv`.
+
+## Why the math natives moved native timing (t3-math-timing lane) and the fix
+
+Finding: the natives are not the cause. A bundle generated with `MKDS_NATIVES=math` and run with every math
+native skipped (`MKDS_NATIVES_SKIP=<entries>`, a diagnostic that leaves the lifted code in place and keeps the
+generated call graph) produced exactly the same slice trace and the same telemetry divergence (first at
+frame 2572) as the run with the natives on. So the cause is the changed call graph.
+
+Mechanism. In `--timing native` a slice's budget (32 units) is spent only at poll points. When it reaches 0 the
+slice does not end at once: the fiber dispatch loop (`fibered.rs`, `run`) ends it, and takes the pending IRQ,
+at the next *dispatch* (`budget == 0` check before each dispatched block or call). Calls to closed functions
+are direct Rust calls and are not dispatch points. The math entries are excluded from the direct graph (they are
+natives), and so are all their transitive callers: 45 functions went from direct to dispatched (3474 -> 3429
+closed). Each of those calls became a dispatch point, so with an empty budget the slice (and the IRQ) ended a few
+instructions earlier, for example at the entry of `vec_dot_product` (0x02039828) instead of later. The IRQ
+handler and thread switch then ran at a different place in the game's code, which changed game state (slice
+instruction count per frame stayed equal, `irqs` per frame stayed equal, position differed).
+
+Fix (only when `MKDS_NATIVES=math|all` at generation; nothing is emitted otherwise). `mkds_gen` computes the
+closed set of the default graph (no math trials excluded; it reproduces the baseline's 3474 exactly, with the
+same 3 "returns elsewhere" drops) and, for the functions closed there but not in this graph, emits calls to
+them as `m.call_quiet(..)` (`rt::Bus::call_quiet`, default = `call`). The fiber runtime (`Guest.quiet`) skips
+the `budget == 0` slice-end check for that one dispatch. Dispatch points are therefore exactly those of the
+default graph. A diagnostic `MKDS_NATIVES_SKIP` (comma list of hex entries) was added to `native::selected`.
+
+Evidence (native timing, `MKDS_NATIVES=math`, bundle generated with the same selector): telemetry
+IDENTICAL to the unchanged native baseline, finish frame 11260 in 1st, 335,036,416 instructions, 567,039 IRQs.
+Exact timing (`--timing exact`, rebuilt with this change): telemetry, inputs and screenshots IDENTICAL to
+`race_main` in fiber mode (only the documented overlay-instruction counter, 0 vs 77,107, differs) and flat mode
+prints IDENTICAL; finish 11462, 1,707,950,080 instructions, 581,521 IRQs.
+Not done: unit tests were not re-run in this lane; the math natives remain opt-in (`MKDS_NATIVES=math`).

@@ -123,7 +123,9 @@ pub fn selected() -> &'static [Native] {
         _ => VERIFIED,
     };
     let fs_on = fs::enabled();
-    if !fs_on && !math_only {
+    // Diagnostics: MKDS_NATIVES_SKIP=0xADDR,... leaves those entries lifted (the generated call graph stays).
+    let skip: Vec<u32> = std::env::var("MKDS_NATIVES_SKIP").map(|v| v.split(',').filter_map(|x| u32::from_str_radix(x.trim().trim_start_matches("0x"), 16).ok()).collect()).unwrap_or_default();
+    if !fs_on && !math_only && skip.is_empty() {
         return base;
     }
     // Block 5 hardware services (`MKDS_HW_<UNIT>=native`) come on top of the selection.
@@ -131,6 +133,7 @@ pub fn selected() -> &'static [Native] {
         .iter()
         .chain(NATIVE.iter().filter(|n| math_only && math::ENTRIES.contains(&n.entry)))
         .chain(fs::NATIVES.iter().filter(|_| fs_on))
+        .filter(|n| !skip.contains(&n.entry))
         .map(|n| Native { segment: n.segment, entry: n.entry, name: n.name, f: n.f })
         .collect();
     Box::leak(all.into_boxed_slice())
