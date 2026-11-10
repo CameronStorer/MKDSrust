@@ -380,6 +380,20 @@ fn preserved_regs(blocks: &BTreeMap<u32, Block>, order: &[u32], entry: u32, all:
             // implicit argument is not: a narrow caller keeps that value only in its locals.
             let saves = matches!(s, S::Store { addr, val, .. }
                 if matches!(x.eval(addr), Sym::Sp(_)) && matches!(x.eval(val), Sym::Entry(4..=11)));
+            // Block transfers carry their registers as literals, which `regs_s` does not see: a
+            // transfer whose base is not sp reads/writes through its list and base; an unplain one is unknown.
+            let blk = match s { S::Do(e) | S::IfSome(e, _) | S::SetReg(_, e) => Some(e), _ => None };
+            if let Some(e @ E::Call(H::Block, _)) = blk {
+                match plain_block(e) {
+                    None => *keep = 0,
+                    Some((load, _, _, _, rn, list)) => {
+                        let entry = |r: usize| matches!(x.regs[r], Sym::Entry(4..=11));
+                        let sp_base = matches!(x.regs[rn as usize], Sym::Sp(_));
+                        if entry(rn as usize) && !sp_base { *keep = 0; }
+                        if !load && !sp_base && (0..16).any(|r| list >> r & 1 != 0 && entry(r)) { *keep = 0; }
+                    }
+                }
+            }
             if !saves {
                 let (mut used, mut written) = (BTreeSet::new(), BTreeSet::new());
                 regs_s(s, &mut used, &mut written);

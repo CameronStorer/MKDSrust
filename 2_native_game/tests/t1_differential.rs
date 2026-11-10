@@ -811,3 +811,27 @@ fn nospill_rom_functions_match_their_translation() {
     assert_eq!(raised, funcs.len());
     compile_and_run(&src, &image, "nospill_rom");
 }
+
+/// A register-dump callee (`stmia r0, {r4-r11}; bx lr`) reads r4-r11 as implicit arguments through a
+/// block store with a non-sp base: it must not be certified for a boundary call. `push {r4-r11}; pop`
+/// (sp base) still is.
+#[test]
+fn boundary_rejects_register_dump_through_block_store() {
+    use recomp::raise_emit::{set_current, take_facts};
+    let _lock = emit_lock();
+    let _native = NativeTiming::on();
+    let _boundary = BoundaryMode::on();
+    let base = 0x0200_0000;
+    let words: [u32; 4] = [0xE880_0FF0, 0xE12F_FF1E, 0xE92D_0FF0, 0xE8BD_0FF0];
+    let mut image: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    image.extend(0xE12F_FF1Eu32.to_le_bytes());
+    let img = Image::new(base, &image);
+    let preserved = |entry: u32, end: u32| {
+        let f = discover(&img, entry, Some((entry, end)), 100).unwrap();
+        set_current("arm9_main", None);
+        emit_t1(&f, "x", Some(&img)).unwrap();
+        take_facts().unwrap().preserved
+    };
+    assert_ne!(preserved(base, base + 8), 0x2FF0, "register dump must not be certified");
+    assert_eq!(preserved(base + 8, base + 20), 0x2FF0, "sp-based save/restore stays certified");
+}
