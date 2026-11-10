@@ -1501,6 +1501,7 @@ fn run() -> Result<ExitCode, String> {
     // Block 5.5 (`--timing native`): closed functions and their direct signatures
     let mut own_sig: HashMap<(String, u32), raise_emit::DirectSig> = HashMap::new();
     let (mut flat_sig, mut poll_boundary) = (HashMap::new(), HashMap::new());
+    let mut flat_info: HashMap<String, raise_emit::TypedInfo> = HashMap::new();
     let mut poll_selected = false;
     if raise() && std::env::var_os("MKDS_NO_T1").is_none() && raise_emit::nospill_enabled() {
         let t = std::time::Instant::now();
@@ -1796,6 +1797,10 @@ fn run() -> Result<ExitCode, String> {
             }
             let (lr, fx) = (info.values().filter(|i| i.lr_implicit).count(), info.values().filter(|i| i.fx != 0).count());
             eprintln!("mkds_gen: typed signatures: {} direct functions, {lr} with an implicit lr, {fx} with fx32 parameters", sigs.len());
+            if poll_requested && poll_pass == 0 && boundary_pass == 0 {
+                // the flat copies are emitted from this (pre-poll) graph: they print with these signatures
+                flat_info = info.iter().map(|(k, v)| (format!("__poll_flat_{k}"), *v)).collect();
+            }
             raise_emit::set_typed_info(info);
         }
         let sites: usize = (0..jobs.len())
@@ -1834,6 +1839,7 @@ fn run() -> Result<ExitCode, String> {
         if poll_requested { unsafe { std::env::set_var("MKDS_POLL_DIRECT", "1"); } }
         if boundary_requested { unsafe { std::env::set_var("MKDS_BOUNDARY", "1"); } }
     }
+    if poll_selected { raise_emit::add_typed_info(std::mem::take(&mut flat_info)); }
     let mut flat = if poll_selected { poll_flat::emit(&jobs, &image, &flat_sig) } else { HashMap::new() };
     if poll_selected {
         raise_emit::set_direct(poll_flat::table(&own_sig));
