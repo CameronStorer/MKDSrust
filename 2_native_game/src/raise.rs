@@ -131,6 +131,18 @@ fn context() -> Option<std::sync::Arc<FlagContext>> {
     CONTEXT.read().unwrap().clone()
 }
 
+/// Native direct variants share the flag ABI with every caller, including T0 and
+/// wrapper entries. Address-taken functions can also be reached by computed calls.
+/// Without whole-program facts, conservatively keep every return flag.
+pub(crate) fn direct_flag_observers(entry: u32) -> (u8, bool) {
+    let Some(ctx) = context() else { return (NZCV, false) };
+    let me = entry & !1;
+    let taken = ctx.taken.contains(&me);
+    let ret = ctx.ret.get(&me).copied().unwrap_or(NZCV)
+        | if taken { ctx.any_ret } else { 0 };
+    (ret, taken)
+}
+
 /// How a function's control transfers read flags under a [`FlagContext`].
 struct Exits {
     ctx: std::sync::Arc<FlagContext>,

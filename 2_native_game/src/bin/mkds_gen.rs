@@ -1513,6 +1513,9 @@ fn run() -> Result<ExitCode, String> {
         }
         };
         if raise_emit::flag_locals_enabled() {
+            let computed = sigs.keys().filter(|&&i| raise::direct_flag_observers(jobs[i].1.entry).1).count();
+            let returned = sigs.keys().filter(|&&i| raise::direct_flag_observers(jobs[i].1.entry).0 != 0).count();
+            eprintln!("mkds_gen: flag-locals guards: {computed} address-taken functions keep CPU flag emission; {returned} functions have caller-observed return flags");
             // CPU arguments only disappear: a caller can become CPU-free once its
             // direct callees have, so iterate separately from register signatures.
             let mut before = (0usize, 0usize);
