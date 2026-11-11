@@ -1068,8 +1068,8 @@ mod tests {
         let display = Display { settings: settings.clone(), controls_path: None, scale: None, smooth: false, side_by_side: false, fullscreen: false, texture_pack: None, dump_textures: None, widescreen_mod: true };
         let l = Layout::configured(336,192,&settings,40);
         let (r, _, _) = map_overlay(&display, 40, false).unwrap();
-        assert_eq!(r, [336 - 72 - 4, 192 - 96 - 4, 72, 96]);
-        assert_eq!(overlay_touch(&display, &l, (r[0] + 36) as f64, (r[1] + 48) as f64), Some((112 + 72, 96)));
+        assert_eq!(r, [336 - 70 - 4, 192 - 96 - 4, 70, 96]);
+        assert_eq!(overlay_touch(&display, &l, (r[0] + 35) as f64, (r[1] + 48) as f64), Some((116 + 70, 96)));
         assert_eq!(overlay_touch(&display, &l, 10.0, 10.0), None);
         s.gap = 32;
         let l = Layout::configured(256,416,&s,0);

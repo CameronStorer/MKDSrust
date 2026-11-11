@@ -505,10 +505,15 @@ fn emulate(
     }
     // buttons a mod script holds this frame (`input.set`); they replace the player's for that frame
     let script_input: Rc<std::cell::Cell<Option<u16>>> = Rc::new(std::cell::Cell::new(None));
+    // the Track-style map overlay's tap (see `arrange::WholeCourseTap`), also held through the guest's idle polls
+    let injected_touch: Rc<std::cell::Cell<Option<(u8, u8)>>> = Rc::new(std::cell::Cell::new(None));
+    let mut whole_course = arrange::WholeCourseTap::default();
+    let widescreen_mod = options.mods.iter().any(|m| m == "widescreen");
     if let Some(window) = &window {
         let w = Arc::clone(window);
         let live_input = scripted.is_none();
         let held = Rc::clone(&script_input);
+        let idle_touch = Rc::clone(&injected_touch);
         let bindings = Rc::clone(&bindings);
         let pads = Rc::clone(&pads);
         let mut last_poll = Instant::now();
@@ -522,6 +527,7 @@ fn emulate(
             w.pause_key(bindings.quit(&w, &pads));
             let quit = !w.is_open();
             let (buttons, touch) = if live_input { input(&w, &bindings, &pads) } else { (0, None) };
+            let touch = touch.or(idle_touch.get());
             Some(recomp::machine::IdleAction {
                 quit,
                 buttons: live_input.then_some(held.get().unwrap_or(buttons)),
@@ -602,7 +608,11 @@ fn emulate(
                     }
                     if scripted.is_none() {
                         let (buttons, touch) = input(w, &bindings, &pads);
-                        session.machine.set_input(buttons, touch);
+                        // Widescreen mod, map overlay in Track style: keep the game's whole-course map on screen.
+                        let wanted = widescreen_mod && w.preferences.lock().unwrap().as_ref().is_some_and(|(s, _)| track_overlay_shown(s));
+                        let tap = whole_course.frame(&session.machine.hw.main, wanted, touch);
+                        injected_touch.set(tap);
+                        session.machine.set_input(buttons, touch.or(tap));
                     }
                 }
                 let remaining = options.instruction_limit.map_or(16_384, |n| {
@@ -923,6 +933,12 @@ impl Bindings {
         let buttons = live.as_ref().map_or(&self.quit_pad, |(_,c)| &c.pad[controls::QUIT]);
         window.any_down(keys) || pads.any_down_at(buttons, live.as_ref().map_or(0.5, |(s,_)| s.deadzone as f32 / 100.0))
     }
+}
+
+/// The map overlay shows in Track style: on by MapOverlay, or always in races with the Combined layout (GPU renderer).
+fn track_overlay_shown(s: &Settings) -> bool {
+    s.map_overlay_track && s.renderer == Renderer::Gpu
+        && (s.map_overlay || s.layout == Layout::Combined)
 }
 
 fn load_settings() -> Result<Settings, String> {

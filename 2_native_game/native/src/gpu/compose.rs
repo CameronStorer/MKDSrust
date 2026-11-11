@@ -38,8 +38,8 @@ struct Frame {
 pub enum OverlayStyle {
     /// The whole screen, as it is.
     Picture = 0,
-    /// Its map half (DS columns 104-255) without the backdrop or the background layer: the course outline and the
-    /// racers' heads float over the 3D view (best with the game's whole-course map: tap the map once).
+    /// Its map half (DS columns `TRACK_X0`-255) without the backdrop or the background layer: the course outline and the
+    /// racers' heads float over the 3D view (the game keeps its whole-course map while this style shows, see `arrange::WholeCourseTap`).
     Track = 1,
 }
 
@@ -53,8 +53,9 @@ impl OverlayStyle {
     }
 }
 
-/// First DS column of the map half of the race touch screen (the positions list is left of it).
-pub const TRACK_X0: u32 = 112;
+/// First DS column of the map half of the race touch screen: right of the positions list, which reaches column ~110
+/// in the game's whole-course view (`compose.wgsl` uses the same value).
+pub const TRACK_X0: u32 = 116;
 
 const PIXELS: usize = 256 * 192;
 

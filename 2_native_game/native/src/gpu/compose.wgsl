@@ -106,7 +106,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let oy = min((y3 - r.y) * 192u / r.w, 191u);
         if frame.overlay_style == 1u {
             // Track: the map half, only where a foreground layer (track, heads, text) is.
-            let ox = min(112u + (gid.x - r.x) * 144u / r.z, 255u);
+            let ox = min(116u + (gid.x - r.x) * 140u / r.z, 255u); // TRACK_X0 in compose.rs
             let fg = top[49152u + oy * 256u + ox];
             if (fg & 255u) != 0u { c = mix_weights(fg, frame.overlay_alpha, c, 255u - frame.overlay_alpha, 255u); }
         } else {

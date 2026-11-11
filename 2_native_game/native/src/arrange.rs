@@ -25,6 +25,56 @@ pub fn phase(main: &[u8]) -> u32 {
     scene | if finished { FINISHED } else { 0 }
 }
 
+/// Pointer to the race's 2D screen object; its +0x828 is the touch-screen map's view (1 close-up with the
+/// positions list, 0 the whole course). A tap on the touch screen switches it.
+const RACE_SCREEN_PTR: usize = 0x0217_B330 - 0x0200_0000;
+const MAP_VIEW: u32 = 0x828;
+
+/// The touch-screen map shows its close-up view (`Some(false)`), the whole course (`Some(true)`), or no race map.
+pub fn whole_course_map(main: &[u8]) -> Option<bool> {
+    let r32 = |a: usize| main.get(a..a + 4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+    if phase(main) != 2 {
+        return None; // not racing, or finished (results)
+    }
+    let p = r32(RACE_SCREEN_PTR)?;
+    if !(0x0200_0000..0x0240_0000 - 0x1000).contains(&p) {
+        return None;
+    }
+    match r32(p as usize - 0x0200_0000 + MAP_VIEW as usize)? {
+        0 => Some(true),
+        1 => Some(false),
+        _ => None,
+    }
+}
+
+/// Map overlay, Track style: keeps the touch-screen map in its whole-course view by tapping it the way the player
+/// would (the game's own toggle), only while the style is shown. Off, it never touches anything.
+#[derive(Default)]
+pub struct WholeCourseTap {
+    /// Frames left of the current tap, then frames to wait before checking again.
+    press: u32,
+    wait: u32,
+}
+
+impl WholeCourseTap {
+    /// Where to touch this frame, if anywhere. `wanted`: the Track style is on; `player`: the player's own touch.
+    pub fn frame(&mut self, main: &[u8], wanted: bool, player: Option<(u8, u8)>) -> Option<(u8, u8)> {
+        if self.press > 0 {
+            self.press -= 1;
+            return Some((184, 96)); // on the map, away from the positions list
+        }
+        if self.wait > 0 {
+            self.wait -= 1;
+            return None;
+        }
+        if wanted && player.is_none() && whole_course_map(main) == Some(false) {
+            self.press = 4;
+            self.wait = 30;
+        }
+        None
+    }
+}
+
 /// What kind of picture a scene shows, which decides its arrangement.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scene {
@@ -282,6 +332,28 @@ mod tests {
         assert_eq!(Scene::of(phase(&ram)), Scene::Results);
         assert_eq!(Scene::of(UNKNOWN), Scene::Other);
         assert_eq!(Scene::of(phase(&[])), Scene::Other);
+    }
+
+    #[test]
+    fn the_whole_course_tap_presses_once_while_the_close_up_map_shows() {
+        let mut ram = vec![0u8; 0x40_0000];
+        ram[SCENE_HISTORY + 2] = 2;
+        ram[RACE_SCREEN_PTR..RACE_SCREEN_PTR + 4].copy_from_slice(&0x0220_0000u32.to_le_bytes());
+        ram[0x20_0000 + MAP_VIEW as usize] = 1;
+        assert_eq!(whole_course_map(&ram), Some(false));
+        let mut tap = WholeCourseTap::default();
+        assert_eq!(tap.frame(&ram, false, None), None, "off: never touches");
+        assert_eq!(tap.frame(&ram, true, Some((1, 1))), None, "the player is touching");
+        assert_eq!(tap.frame(&ram, true, None), None);
+        let presses = (0..34).filter(|_| tap.frame(&ram, true, None).is_some()).count();
+        assert_eq!(presses, 4, "one 4-frame tap, then a 30-frame pause");
+        assert!(tap.frame(&ram, true, None).is_none() && tap.frame(&ram, true, None).is_some(), "still close-up: tap again");
+        ram[0x20_0000 + MAP_VIEW as usize] = 0;
+        assert_eq!(whole_course_map(&ram), Some(true));
+        for _ in 0..40 {
+            tap.frame(&ram, true, None); // the tap in progress ends
+        }
+        assert!((0..100).all(|_| tap.frame(&ram, true, None).is_none()), "already the whole course");
     }
 
     #[test]

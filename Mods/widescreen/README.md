@@ -12,8 +12,9 @@ the sides at the same height ("Hor+"), so nothing is stretched or zoomed. The HU
    (positions and map) appears in the bottom-right corner of the 3D screen. Size and opacity are adjustable
    (`MapOverlay`, `MapOverlaySize`, `MapOverlayOpacity` in settings.txt).
 5. Prefer just the track? Choose **Track and heads only** (or press **F9** again): the course outline, the racers'
-   heads and the timer float over the 3D view, with the map's background left out. Click the map once to switch the
-   game to its whole-course view; clicking the overlay taps the touch screen. F9 cycles Off → Picture → Track.
+   heads and the timer float over the 3D view, with the map's background and the positions list left out. While this style shows, the touch
+   screen is kept on the game's whole-course map (MKDSrust taps the map for you, as you would); clicking the overlay
+   taps the touch screen. F9 cycles Off → Picture → Track.
 
 6. Want the whole game on one widescreen screen, menus included? Choose **Screen layout → Combined** in F10 (or
    `Layout = Combined` in settings.txt). Every menu is rebuilt from both screens: the title bar spans the top, the
@@ -24,6 +25,7 @@ the sides at the same height ("Hor+"), so nothing is stretched or zoomed. The HU
 
 ## Changes
 - 1.3.0: Combined layout: one widescreen picture built from both screens, arranged per scene, with transitions.
+  Track style keeps the game's whole-course map and leaves out the positions list.
 - 1.2.0: Track style for the map overlay (outline and heads only, no background); clicking the overlay taps the
   touch screen.
 - 1.1.0: map overlay (F9); no more flickering side bars when both screens show 3D (the pre-race course preview).

@@ -247,7 +247,7 @@ impl Settings {
              MapOverlaySize = {}\n\
              MapOverlayOpacity = {}\n\
              # Picture: the whole touch screen. Track: only the course map's track, heads and timer over the 3D view\n\
-             # (tap the map once for the game's whole-course view). F9 cycles Off, Picture, Track.\n\
+             # (the touch screen is kept on the game's whole-course map while it shows). F9 cycles Off, Picture, Track.\n\
              MapOverlayStyle = {}\n\
              \n\
              # Yes: start in fullscreen. F11 switches between window and fullscreen at any time.\n\

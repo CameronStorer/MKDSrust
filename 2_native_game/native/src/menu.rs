@@ -361,7 +361,7 @@ impl Menu {
                             ui.selectable_value(&mut self.settings.map_overlay_track, true, "Track and heads only");
                         });
                         if self.settings.map_overlay_track {
-                            ui.small("Click the map once to switch the game to its whole-course view.");
+                            ui.small("The touch screen stays on the game's whole-course map while this style shows.");
                         }
                         ui.add(egui::Slider::new(&mut self.settings.map_overlay_size, 25..=75).text("Map size %"));
                         ui.add(egui::Slider::new(&mut self.settings.map_overlay_opacity, 30..=100).text("Map opacity %"));
