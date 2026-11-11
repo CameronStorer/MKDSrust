@@ -4,14 +4,39 @@
 
 # MKDSrust
 
-MKDSrust turns your own dumped **Mario Kart DS (USA, revision 0)** ROM into a native game and a generated Rust workspace. It statically translates the ARM9 and ARM7 programs before play, with native graphics, audio and input. This is a work in progress: Windows is the primary platform, Linux has limited validation, and macOS is untested.
+**Play Mario Kart DS natively on Windows, and mod it.**
 
-## Purpose
+MKDSrust turns your own dumped **Mario Kart DS (USA, revision 0)** ROM into a native Windows game. It is not an
+emulator: the launcher translates the game's code into Rust on your PC and compiles it, with native graphics,
+audio and input. Races play exactly like the DS (frame for frame in accuracy mode), and mods are compiled
+straight into your game.
 
-- Preserve playability beyond the original hardware.
-- Support modding through generated source and GPU texture replacement.
-- Improve performance and presentation while retaining the original driving behavior.
-- Make the game's behavior easier to study and learn from.
+- **Download, pick your ROM, play.** The [launcher](https://github.com/CameronStorer/MKDSrust/releases/latest)
+  sets everything up itself: no Visual Studio, no Rust install.
+- **Mods built in.** Tick a mod in the launcher and rebuild. First official mod:
+  [Widescreen](Mods/widescreen) (16:10, 16:9 or 21:9, with a see-through track map overlay).
+- **Readable source.** Every build includes the generated Rust for your copy of the game, with real function
+  and field names.
+
+## Status
+
+| Part | Status |
+|---|---|
+| **Recompilation**: the whole game runs natively | ✅ Complete. All 12,736 functions translated; exact mode matches the DS frame for frame. |
+| **Decompilation**: functions named and typed | ✅ Complete in scope (99.5% of 9,496 functions; ARM7 and online code excluded). |
+| **Launcher and mods** | ✅ Released ([latest](https://github.com/CameronStorer/MKDSrust/releases/latest)). Next mod: a *Single Screen* layout for Widescreen (the whole game in one frame, no bottom screen). |
+| **Readable Rust**: plain Rust without the simulated DS | 🟡 In progress. 39% of functions have real parameters and 20% no longer use the simulated CPU. Now testing a route that runs converted code directly on the game's memory. |
+| **MKDSrust Toolbox** (asset editor) | ⏸ Paused. |
+
+Windows is the main platform. Linux has limited testing; macOS is untested.
+
+## Quick start
+
+1. Download `MKDSrust-windows-x64.zip` from the [latest release](https://github.com/CameronStorer/MKDSrust/releases/latest)
+   and unzip it anywhere.
+2. Run `MKDSrust.exe` and follow **Setup**: choose your ROM, let it install its private toolchain, and build.
+   The first build takes a while; later builds are cached.
+3. Press **Play**. Open **Mods** to add Widescreen, then rebuild.
 
 ## Instructions
 
@@ -29,7 +54,9 @@ MKDSrust turns your own dumped **Mario Kart DS (USA, revision 0)** ROM into a na
 For development builds, install Rust from [rustup.rs](https://rustup.rs), then reopen your terminal.
 Build on the OS where you intend to play; generated executables are platform specific.
 
-### Windows launcher
+### Windows launcher from source
+
+Most players should use the [release download](#quick-start). To build the launcher yourself:
 
 1. Open a terminal in this checkout and build the launcher:
 
@@ -153,6 +180,7 @@ all other trademarks belong to their respective owners.
 - [Wheel Wizard](https://github.com/TeamWheelWizard/WheelWizard): launcher workflow inspiration.
 - [GBATEK](https://problemkaputt.de/gbatek.htm), [melonDS](https://github.com/melonDS-emu/melonDS) and [DeSmuME](https://github.com/TASEmulators/desmume): public hardware and architecture references.
 - [N64Recomp](https://github.com/N64Recomp/N64Recomp), [ultramodern / N64ModernRuntime](https://github.com/N64Recomp/N64ModernRuntime), [RT64](https://github.com/rt64/rt64) and [aurora](https://github.com/encounter/aurora): translation, native service and presentation references.
+- [tylzars/mkds](https://github.com/tylzars/mkds): the matching C decompilation (MIT); function names, struct layouts and signatures were cross-checked against it, with the author's permission. No code was copied.
 - [ds-decomp](https://github.com/AetiasHax/ds-decomp) and public MKDS mapping research: research references; reference status does not grant permission to copy code.
 - Rust and dependency authors, including wgpu, eframe/egui and corosensei, and dictionary and verification contributors.
 
