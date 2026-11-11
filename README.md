@@ -130,7 +130,9 @@ Launcher **Accuracy mode** sets those runtime switches; exact instruction timing
 | C / V | DS X / Y |
 | Enter / Right Shift | Start / Select |
 | Left mouse on lower screen | Touch input |
-| F11 / Esc | Toggle fullscreen / quit |
+| F11 | Toggle fullscreen |
+| Esc | Pause menu: Resume, Settings, Quit (the game waits) |
+| F10 | Settings menu (the game keeps running) |
 
 Controllers support the D-pad or left stick, bottom/right face buttons for A/B,
 left/right bumpers for item/drift, and Start/Select. Connect before launch.

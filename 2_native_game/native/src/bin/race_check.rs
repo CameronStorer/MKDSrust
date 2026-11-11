@@ -267,7 +267,8 @@ pub fn run_with_tables(
                 last_buttons = buttons;
             }
             if !replaying {
-                session.machine.set_input(buttons, None);
+                // Diagnostics only (`MKDS_SHOT_TOUCH=from-to:x,y`): hold the stylus there during those frames.
+                session.machine.set_input(buttons, diag_touch(frame));
             }
             writeln!(
                 telemetry,
@@ -1019,4 +1020,17 @@ pub mod oracle {
             self.inputs.flush()
         }
     }
+}
+
+/// `MKDS_SHOT_TOUCH=from-to:x,y` (diagnostics): the stylus position for `frame`, if it is in that range.
+fn diag_touch(frame: u64) -> Option<(u8, u8)> {
+    static T: std::sync::OnceLock<Option<(u64, u64, u8, u8)>> = std::sync::OnceLock::new();
+    let t = T.get_or_init(|| {
+        let v = std::env::var("MKDS_SHOT_TOUCH").ok()?;
+        let (range, pos) = v.split_once(':')?;
+        let (a, b) = range.split_once('-')?;
+        let (x, y) = pos.split_once(',')?;
+        Some((a.trim().parse().ok()?, b.trim().parse().ok()?, x.trim().parse().ok()?, y.trim().parse().ok()?))
+    });
+    t.filter(|&(a, b, _, _)| (a..=b).contains(&frame)).map(|(_, _, x, y)| (x, y))
 }

@@ -66,6 +66,13 @@ pub struct HostLink {
     gpu_2d_stats: Mutex<(std::time::Duration, u64, usize)>,
     /// The game's scene and race phase ([`crate::arrange::phase`]) for the Combined layout.
     phase: AtomicU32,
+    /// Pause menu (the Quit binding, Esc by default): requested by the emulation thread, open (the game waits),
+    /// the Quit binding's last state (a press opens it once), and game input held back until every button is
+    /// released after the menu closes (the press that closed it must not reach the game).
+    pub(crate) pause_request: AtomicBool,
+    pub(crate) paused: AtomicBool,
+    pub(crate) quit_held: AtomicBool,
+    pub(crate) input_guard: AtomicBool,
 }
 
 impl HostLink {
@@ -80,6 +87,10 @@ impl HostLink {
             proxy: Mutex::new(None),
             gpu_2d_stats: Mutex::new(Default::default()),
             phase: AtomicU32::new(crate::arrange::UNKNOWN),
+            pause_request: AtomicBool::new(false),
+            paused: AtomicBool::new(false),
+            quit_held: AtomicBool::new(false),
+            input_guard: AtomicBool::new(false),
         })
     }
 
@@ -126,6 +137,32 @@ impl HostLink {
     /// The game's current scene ([`crate::arrange::phase`]), published with each frame.
     pub fn set_phase(&self, phase: u32) {
         self.phase.store(phase, Ordering::Release);
+    }
+
+    /// The Quit binding's state this poll: a new press asks the window for the pause menu.
+    pub fn pause_key(&self, held: bool) {
+        if held && !self.quit_held.swap(held, Ordering::AcqRel) {
+            self.pause_request.store(true, Ordering::Release);
+            self.wake();
+        } else if !held {
+            self.quit_held.store(false, Ordering::Release);
+        }
+    }
+
+    /// The pause menu is open: the emulation waits.
+    pub fn paused(&self) -> bool {
+        self.paused.load(Ordering::Acquire)
+    }
+
+    /// After the pause menu closed: game input stays released until `any_held` is false once.
+    pub fn guard_input(&self, any_held: bool) -> bool {
+        if self.input_guard.load(Ordering::Acquire) {
+            if !any_held {
+                self.input_guard.store(false, Ordering::Release);
+            }
+            return true;
+        }
+        false
     }
 
     /// The emulation ended (normally or with an error): close the window.
@@ -346,18 +383,26 @@ impl ApplicationHandler for App {
                         let mut input = self.link.input.lock().unwrap();
                         input.held.clear(); input.touch = None;
                         w.request_redraw();
-                        self.link.menu_open.store(g.menu.open, Ordering::Release);
+                        self.link.menu_open.store(g.menu.open || g.menu.pause, Ordering::Release);
                         return;
-                    } else if g.menu.open {
+                    } else if g.menu.open || g.menu.pause {
+                        let was_paused = g.menu.pause;
                         g.menu.key(event);
-                        self.link.menu_open.store(g.menu.open, Ordering::Release);
+                        if event.physical_key == PhysicalKey::Code(KeyCode::Escape) || (was_paused && !g.menu.pause) {
+                            self.link.quit_held.store(true, Ordering::Release); // Esc closed it: wait for the release
+                        }
+                        if was_paused && !g.menu.pause {
+                            self.link.input_guard.store(true, Ordering::Release);
+                            self.link.input.lock().unwrap().held.clear();
+                        }
+                        self.link.menu_open.store(g.menu.open || g.menu.pause, Ordering::Release);
                         w.request_redraw();
                         return;
                     }
                 }
             }
-            self.link.menu_open.store(g.menu.open, Ordering::Release);
-            if g.menu.open {
+            self.link.menu_open.store(g.menu.open || g.menu.pause, Ordering::Release);
+            if g.menu.open || g.menu.pause {
                 match &event {
                     WindowEvent::KeyboardInput { .. } | WindowEvent::CursorMoved { .. } | WindowEvent::CursorLeft { .. } | WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. } => { w.request_redraw(); return; }
                     _ => {}
@@ -442,7 +487,9 @@ impl ApplicationHandler for App {
                         return;
                     }
                 }
-                if more {
+                // The pause menu stops the frames; keep drawing it (and the F10 menu over it).
+                let paused = self.gfx.as_ref().is_some_and(|g| g.menu.pause);
+                if more || paused {
                     if let Some(w) = &self.window {
                         w.request_redraw(); // the next queued frame at the next refresh
                     }
@@ -968,7 +1015,13 @@ impl Presenter {
             usage: Some(wgpu::TextureUsages::TEXTURE_BINDING),
             ..Default::default()
         });
+        let layer3d = compositor.mask().create_view(&wgpu::TextureViewDescriptor {
+            format: self.config.format.is_srgb().then_some(wgpu::TextureFormat::Rgba8UnormSrgb),
+            usage: Some(wgpu::TextureUsages::TEXTURE_BINDING),
+            ..Default::default()
+        });
         let inputs = crate::gpu::pieces::Inputs {
+            layer3d: &layer3d,
             screens: &view,
             size: (out.width(), out.height()),
             scale: compositor.scale(),
@@ -1030,6 +1083,27 @@ mod tests {
         assert_eq!(l.auto_scale(),2);
         s.swap_screens = false;
         assert_eq!(Layout::configured(512,384,&s,0).touch(256.0,192.0),None);
+    }
+
+    #[test]
+    fn esc_asks_for_the_pause_menu_once_per_press_and_the_closing_press_never_reaches_the_game() {
+        let link = HostLink::for_tests();
+        link.pause_key(true);
+        assert!(link.pause_request.swap(false, Ordering::AcqRel), "a press asks once");
+        link.pause_key(true);
+        assert!(!link.pause_request.load(Ordering::Acquire), "holding does not ask again");
+        link.pause_key(false);
+        link.pause_key(true);
+        assert!(link.pause_request.swap(false, Ordering::AcqRel), "the next press asks again");
+        // The menu closed with the key still down: no new request until it is released.
+        link.quit_held.store(true, Ordering::Release);
+        link.pause_key(true);
+        assert!(!link.pause_request.load(Ordering::Acquire));
+        // Game input stays released until nothing is held once.
+        assert!(!link.guard_input(true));
+        link.input_guard.store(true, Ordering::Release);
+        assert!(link.guard_input(true) && link.guard_input(false));
+        assert!(!link.guard_input(true), "released once: input flows again");
     }
 
     #[test]

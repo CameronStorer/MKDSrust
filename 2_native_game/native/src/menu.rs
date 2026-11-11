@@ -17,6 +17,12 @@ use winit::{
 
 pub struct Menu {
     pub open: bool,
+    /// Pause menu (Esc / the Quit binding): Resume, Settings, Quit. The game waits while it is open.
+    pub pause: bool,
+    pause_choice: usize,
+    pause_was: bool,
+    quit: bool,
+    pad_held: Vec<usize>,
     pub settings: Settings,
     controls: Controls,
     controls_path: Option<PathBuf>,
@@ -38,6 +44,8 @@ pub struct Menu {
     /// The Widescreen mod is part of this build: show its setting.
     widescreen_mod: bool,
 }
+const PAUSE: [&str; 3] = ["Resume", "Settings (F10)", "Quit game"];
+
 impl Menu {
     pub fn new(window: &Window, gpu: &Gpu, format: wgpu::TextureFormat, display: &Display) -> Self {
         let ctx = egui::Context::default();
@@ -62,6 +70,11 @@ impl Menu {
         Self {
             widescreen_mod: display.widescreen_mod,
             open: false,
+            pause: false,
+            pause_choice: 0,
+            pause_was: false,
+            quit: false,
+            pad_held: Vec::new(),
             saved_settings: settings.clone(),
             settings,
             saved_controls: controls.clone(),
@@ -100,8 +113,19 @@ impl Menu {
         if event.physical_key == PhysicalKey::Code(KeyCode::Escape) {
             if self.capture.is_some() {
                 self.cancel_capture();
-            } else {
+            } else if self.open {
                 self.open = false;
+            } else {
+                self.pause = false;
+            }
+            return;
+        }
+        if self.pause && !self.open {
+            match event.physical_key {
+                PhysicalKey::Code(KeyCode::ArrowUp) => self.pause_choice = (self.pause_choice + PAUSE.len() - 1) % PAUSE.len(),
+                PhysicalKey::Code(KeyCode::ArrowDown | KeyCode::Tab) => self.pause_choice = (self.pause_choice + 1) % PAUSE.len(),
+                PhysicalKey::Code(KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Space) => self.choose(self.pause_choice),
+                _ => {}
             }
             return;
         }
@@ -120,6 +144,47 @@ impl Menu {
             }
         }
     }
+    /// The pause menu over the dimmed game.
+    fn pause_window(&mut self, ctx: &egui::Context) {
+        // Dim the game, then a small centred menu.
+        let screen = ctx.content_rect();
+        ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("pause dim")))
+            .rect_filled(screen, 0.0, egui::Color32::from_black_alpha(150));
+        egui::Window::new("MKDSrust • Paused").anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .resizable(false).collapsible(false).show(ctx, |ui| {
+            ui.vertical_centered(|ui| {
+                for (i, label) in PAUSE.iter().enumerate() {
+                    let button = egui::Button::new(egui::RichText::new(*label).size(18.0)).min_size(egui::vec2(220.0, 36.0)).selected(i == self.pause_choice);
+                    let r = ui.add(button);
+                    if r.hovered() { self.pause_choice = i; }
+                    if r.clicked() { self.choose(i); }
+                }
+                ui.add_space(4.0);
+                ui.small("Esc / B: resume   Arrows + Enter / A: choose");
+            });
+        });
+    }
+    /// A pause menu entry: 0 Resume, 1 Settings (the F10 menu), 2 Quit.
+    fn choose(&mut self, choice: usize) {
+        match choice {
+            0 => self.pause = false,
+            1 => { self.open = true; self.cancel_capture(); }
+            _ => self.quit = true,
+        }
+    }
+    /// Controller in the pause menu: up/down choose, A (South) confirms, B (East) or Start resumes.
+    fn pause_pad(&mut self) {
+        let pressed = self.pads.pressed(self.settings.deadzone as f32 / 100.0);
+        let new: Vec<usize> = pressed.iter().copied().filter(|b| !self.pad_held.contains(b)).collect();
+        self.pad_held = pressed;
+        if !self.pause || self.open {
+            return;
+        }
+        let is = |name: &str| new.iter().any(|&b| controls::PAD[b] == name);
+        if is("DPadUp") || is("StickUp") { self.pause_choice = (self.pause_choice + PAUSE.len() - 1) % PAUSE.len(); }
+        if is("DPadDown") || is("StickDown") { self.pause_choice = (self.pause_choice + 1) % PAUSE.len(); }
+        if is("South") { self.choose(self.pause_choice); } else if is("East") || is("Start") { self.pause = false; }
+    }
     fn next(&mut self, pad: bool, action: usize) {
         self.capture = if self.wizard && action < 11 {
             Some((pad, action + 1))
@@ -135,8 +200,15 @@ impl Menu {
             self.frames = 0;
             self.fps_start = Instant::now();
         }
-        if self.open {
+        if link.pause_request.swap(false, Ordering::AcqRel) && !self.pause && !self.open {
+            self.pause = true;
+            self.pause_choice = 0;
+        }
+        if self.open || self.pause || self.pause_was {
             self.pads.poll();
+            self.pause_pad();
+        }
+        if self.open {
             if let Some((true, action)) = self.capture {
                 let pressed = self.pads.pressed(self.settings.deadzone as f32 / 100.0);
                 if pressed.is_empty() {
@@ -155,6 +227,9 @@ impl Menu {
                 egui::Area::new(egui::Id::unique("fps")).anchor(anchors[self.settings.fps_position as usize], egui::Vec2::ZERO).interactable(false).show(ctx, |ui| {
                     egui::Frame::dark_canvas(ui.style()).show(ui, |ui| { ui.label(format!("{:.1} FPS", self.fps)); });
                 });
+            }
+            if self.pause && !self.open {
+                self.pause_window(ctx);
             }
             if self.open {
                 egui::Window::new("MKDSrust • Settings").default_width(610.0).default_height(490.0).resizable(true).collapsible(false).show(ctx, |ui| {
@@ -205,7 +280,17 @@ impl Menu {
             }
         }
         *link.preferences.lock().unwrap() = Some((self.settings.clone(), self.controls.clone()));
-        link.menu_open.store(self.open, Ordering::Release);
+        if self.quit {
+            link.close();
+        }
+        if self.pause_was && !self.pause {
+            // Whatever closed the menu must not reach the game, and must not reopen it.
+            link.input_guard.store(true, Ordering::Release);
+            link.quit_held.store(true, Ordering::Release);
+        }
+        self.pause_was = self.pause;
+        link.paused.store(self.pause, Ordering::Release);
+        link.menu_open.store(self.open || self.pause, Ordering::Release);
     }
     fn page(&mut self, ui: &mut egui::Ui, link: &HostLink) {
         match self.tab {
@@ -492,6 +577,11 @@ mod tests {
         let mut menu = Menu {
             widescreen_mod: false,
             open: true,
+            pause: false,
+            pause_choice: 0,
+            pause_was: false,
+            quit: false,
+            pad_held: Vec::new(),
             settings: settings.clone(),
             saved_settings: settings,
             controls: controls.clone(),
@@ -516,6 +606,26 @@ mod tests {
             fps: 0.0,
         };
         let link = HostLink::for_tests();
+        {
+            // The pause menu (Esc), over a plain background.
+            menu.pause = true;
+            menu.open = false;
+            let mut output = None;
+            for i in 0..30 {
+                // Enough passes for the window's fade-in to finish.
+                let raw = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 700.0))), time: Some(i as f64 * 0.05), ..Default::default() };
+                let current = ctx.run_pass(raw, |ctx| menu.pause_window(ctx));
+                for (id, deltas) in &current.textures_delta.set {
+                    for delta in deltas {
+                        menu.renderer.update_texture(&gpu.device, &gpu.queue, *id, delta);
+                    }
+                }
+                output = Some(current);
+            }
+            shot(&gpu, &mut menu.renderer, &ctx, output.unwrap(), &dir.join("pause.png"));
+            menu.pause = false;
+            menu.open = true;
+        }
         for (tab, name) in [
             "graphics",
             "performance",
@@ -605,5 +715,38 @@ mod tests {
                 .write_image_data(&bytes)
                 .unwrap();
         }
+    }
+
+    /// Renders one egui output at 800x700 into a PNG (tests only).
+    fn shot(gpu: &Gpu, renderer: &mut egui_wgpu::Renderer, ctx: &egui::Context, output: egui::FullOutput, path: &std::path::Path) {
+        let jobs = ctx.tessellate(output.shapes, output.pixels_per_point);
+        let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("ROM-free overlay screenshot"),
+            size: wgpu::Extent3d { width: 800, height: 700, depth_or_array_layers: 1 },
+            mip_level_count: 1, sample_count: 1, dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        let screen = egui_wgpu::ScreenDescriptor { size_in_pixels: [800, 700], pixels_per_point: output.pixels_per_point };
+        assert!(renderer.update_buffers(&gpu.device, &gpu.queue, &mut encoder, &jobs, &screen).is_empty());
+        {
+            let view = texture.create_view(&Default::default());
+            let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view, resolve_target: None, depth_slice: None,
+                    ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.2, g: 0.35, b: 0.6, a: 1.0 }), store: wgpu::StoreOp::Store },
+                })],
+                ..Default::default()
+            });
+            renderer.render(&mut pass.forget_lifetime(), &jobs, &screen);
+        }
+        gpu.queue.submit([encoder.finish()]);
+        let bytes: Vec<u8> = gpu.read_rgba(&texture).into_iter().flat_map(u32::to_be_bytes).collect();
+        let mut png = png::Encoder::new(std::fs::File::create(path).unwrap(), 800, 700);
+        png.set_color(png::ColorType::Rgba);
+        png.set_depth(png::BitDepth::Eight);
+        png.write_header().unwrap().write_image_data(&bytes).unwrap();
     }
 }

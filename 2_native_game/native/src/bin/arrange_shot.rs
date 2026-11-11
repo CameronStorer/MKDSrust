@@ -114,7 +114,9 @@ fn run() -> Result<(), String> {
     let pass_tool = pieces::PiecesPass::new(&gpu, wgpu::TextureFormat::Rgba8Unorm);
     let out = compositor.output();
     let screens = out.create_view(&Default::default());
+    let layer3d = compositor.mask().create_view(&Default::default());
     let inputs = pieces::Inputs {
+        layer3d: &layer3d,
         screens: &screens,
         size: (out.width(), out.height()),
         scale,

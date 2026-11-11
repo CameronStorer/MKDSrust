@@ -9,6 +9,11 @@ struct Frame { engines: array<Engine, 2>, scale: u32, a_top: u32, margin: u32, a
 @group(0) @binding(4) var output: texture_storage_2d<rgba8unorm, write>; // (256+2*margin)*scale x 384*scale
 @group(0) @binding(5) var<uniform> frame: Frame;
 @group(0) @binding(6) var<storage, read> top: array<u32>;    // [engine][pixel] foreground only (0 = see-through)
+// Combined layout only (alpha_mode): where the 3D layer is, and what is behind it. Alpha: 0 no 3D, 0.5 the 3D is behind
+// a 2D layer, 0.75 the 3D is in front with only the background behind it, 1 the 3D is in front of a 2D layer whose
+// colour is rgb. The window uses it to show a 3D model that reaches past a cut-out piece (a character's head over the
+// title bar) and to show the title bar without it.
+@group(0) @binding(7) var mask: texture_storage_2d<rgba8unorm, write>;
 
 fn ch(c: u32, s: u32) -> u32 { return (c >> s) & 255u; }
 fn pack(r: u32, g: u32, b: u32) -> u32 { return (r << 24u) | (g << 16u) | (b << 8u) | 255u; }
@@ -70,10 +75,20 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     // Combined layout: alpha 0 where the screen shows only its backdrop/background layer (the window draws the
     // wide backdrop there), 255 where a foreground layer or the 3D layer is visible.
     var alpha = 255u;
-    if frame.alpha_mode != 0u && gid.x >= m && gid.x < m + 256u * s {
-        let i = engine * 49152u + (y3 / s) * 256u + (gid.x - m) / s;
-        let visible3d = a3 != 0u && (info[i] & 3u) != 0u;
-        if top[i] == 0u && !visible3d { alpha = 0u; }
+    if frame.alpha_mode != 0u {
+        var cover = 0.0;
+        var m3 = 255u;
+        if gid.x >= m && gid.x < m + 256u * s {
+            let i = engine * 49152u + (y3 / s) * 256u + (gid.x - m) / s;
+            let visible3d = a3 != 0u && (info[i] & 3u) != 0u;
+            if top[i] == 0u && !visible3d { alpha = 0u; }
+            if a3 != 0u { cover = select(0.5, select(0.75, 1.0, top[i] != 0u), (info[i] & 3u) == 1u); }
+            m3 = top[i] | 255u;
+        }
+        if (e.master_mode == 1u || e.master_mode == 2u) && e.master != 0u {
+            m3 = brighten(m3, select(3u, 2u, e.master_mode == 1u), e.master);
+        }
+        textureStore(mask, vec2<u32>(gid.xy), vec4<f32>(f32(ch(m3, 24u)) / 255.0, f32(ch(m3, 16u)) / 255.0, f32(ch(m3, 8u)) / 255.0, cover));
     }
     if gid.x < m || gid.x >= m + 256u * s {
         // Widescreen side columns: no 2D layers exist there. The 3D screen shows its 3D layer (black where empty),

@@ -8,7 +8,7 @@ pub const ACTIONS: [&str; 13] = ["A", "B", "Select", "Start", "Right", "Left", "
 /// What each action does in the game, for the file's comments and the builder's menu.
 pub const ROLES: [&str; 13] = [
     "accelerate / confirm", "brake / back", "", "pause / start", "steer right", "steer left", "", "",
-    "hop / drift", "use item", "", "", "close the game",
+    "hop / drift", "use item", "", "", "pause menu (Resume / Settings / Quit)",
 ];
 pub const QUIT: usize = 12;
 const DEFAULTS: [&[&str]; 13] = [

@@ -1,7 +1,7 @@
 //! Combined layout (Widescreen mod): draws [`crate::arrange::Piece`]s, parts of the composed screens and the
 //! menus' wrapping backdrop layer, into the window with soft edges and alpha blending.
 use super::Gpu;
-use crate::arrange::{Piece, Source};
+use crate::arrange::{Mask, Piece, Source};
 
 const MAX: usize = 16;
 
@@ -12,6 +12,9 @@ struct Globals { size: vec4<f32>, pieces: array<Piece, 16> };
 @group(0) @binding(1) var linear_sampler: sampler;
 @group(0) @binding(2) var<storage, read> back: array<u32>;
 @group(0) @binding(3) var<uniform> g: Globals;
+// Where the 3D layer is and what is behind it (`compose.wgsl`): alpha 0 none, 0.5 behind 2D, 0.75 in front of the
+// background only, 1 in front of a 2D layer whose colour is rgb.
+@group(0) @binding(4) var layer3d: texture_2d<f32>;
 struct Out { @builtin(position) pos: vec4<f32>, @location(0) t: vec2<f32>, @location(1) @interpolate(flat) piece: u32 };
 @vertex fn vs(@builtin(vertex_index) i: u32, @builtin(instance_index) n: u32) -> Out {
     let corner = array<vec2<f32>, 6>(vec2(0.0, 0.0), vec2(1.0, 0.0), vec2(0.0, 1.0), vec2(1.0, 0.0), vec2(1.0, 1.0), vec2(0.0, 1.0))[i];
@@ -41,6 +44,22 @@ fn to_linear(c: vec3<f32>) -> vec3<f32> {
         if p.wrap.y > p.wrap.x { u = p.wrap.x + fract((u - p.wrap.x) / (p.wrap.y - p.wrap.x)) * (p.wrap.y - p.wrap.x); }
         c = textureSampleLevel(screens, linear_sampler, vec2<f32>(u, s.y), 0.0);
         if p.params.z == 0.0 { c.a = 1.0; }
+        let mode = u32(p.color.x);
+        if mode != 0u {
+            let size = vec2<f32>(textureDimensions(layer3d));
+            let d3 = textureLoad(layer3d, vec2<i32>(clamp(vec2<f32>(u, s.y) * size, vec2<f32>(0.0), size - 1.0)), 0);
+            let front = d3.a > 0.6;
+            // Nearest texels here, so the 3D model's edge does not bleed into the pixels next to it.
+            c = textureLoad(screens, vec2<i32>(clamp(vec2<f32>(u, s.y) * size, vec2<f32>(0.0), size - 1.0)), 0);
+            if p.params.z == 0.0 { c.a = 1.0; }
+            if mode == 1u && s.y < p.color.y {
+                // Above the cut: only the 3D model in front (reaching past it), drawn over whatever is there.
+                c.a = select(0.0, 1.0, front);
+            } else if mode == 2u && front {
+                // The 3D model in front shows in another piece: here show the 2D layer behind it, or nothing.
+                c = select(vec4<f32>(0.0), vec4<f32>(d3.rgb, 1.0), d3.a > 0.9);
+            }
+        }
     } else if kind == 1u {
         // Sharp bilinear: crisp DS pixels without uneven widths at fractional scales.
         let engine = u32(p.params.w);
@@ -96,6 +115,8 @@ pub struct Inputs<'a> {
     pub size: (u32, u32),
     pub scale: u32,
     pub margin: u32,
+    /// The 3D layer alone (`Compositor::mask`), viewed like `screens`.
+    pub layer3d: &'a wgpu::TextureView,
     /// Both engines' backdrop layers (`Compositor::backdrop`).
     pub backdrop: &'a wgpu::Buffer,
     /// Engine A shows on the top screen.
@@ -133,6 +154,11 @@ impl PiecesPass {
                     ty: wgpu::BufferBindingType::Uniform,
                     has_dynamic_offset: false,
                     min_binding_size: None,
+                }),
+                entry(4, wgpu::ShaderStages::FRAGMENT, wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
                 }),
             ],
         });
@@ -190,7 +216,12 @@ impl PiecesPass {
                     let ux = |v: f32| (v + inputs.margin as f32) * s / tw;
                     let src = [ux(x), (y + row) * s / th, w * s / tw, h * s / th];
                     let wrap = p.wrap.map_or([0.0; 4], |[a, b]| [ux(a), ux(b), 0.0, 0.0]);
-                    (0.0, src, wrap, 0.0, [0.0; 4])
+                    let mask = match p.mask {
+                        Mask::None => [0.0; 4],
+                        Mask::ThreeDAbove(rows) => [1.0, (rows + row) * s / th, 0.0, 0.0],
+                        Mask::Hide3D => [2.0, 0.0, 0.0, 0.0],
+                    };
+                    (0.0, src, wrap, 0.0, mask)
                 }
                 Source::Backdrop { bottom } => {
                     let engine = if bottom == inputs.a_top { 1.0 } else { 0.0 };
@@ -217,6 +248,7 @@ impl PiecesPass {
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.sampler) },
                 wgpu::BindGroupEntry { binding: 2, resource: inputs.backdrop.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 3, resource: self.uniform.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(inputs.layer3d) },
             ],
         });
         pass.set_pipeline(&self.pipeline);

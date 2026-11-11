@@ -79,6 +79,9 @@ pub struct Compositor {
     capture_age: [Option<u32>; 4],
     /// Combined layout: both engines' background layer over a 512x512 map period (see `two_d.wgsl`'s `backdrop`).
     backdrop: Option<wgpu::Buffer>,
+    /// Combined layout: the 3D layer alone with its depth order in alpha (see `compose.wgsl`), same size as the
+    /// output; 1x1 otherwise.
+    mask: wgpu::Texture,
 }
 
 impl Compositor {
@@ -161,7 +164,27 @@ impl Compositor {
             staging: vec![0; 2 * PIXELS],
             two_d: None,
             backdrop: None,
+            mask: Self::mask_texture(gpu, 1, 1),
         }
+    }
+
+    fn mask_texture(gpu: &Gpu, width: u32, height: u32) -> wgpu::Texture {
+        gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("compositor 3D layer"),
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: Self::FORMAT,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[wgpu::TextureFormat::Rgba8UnormSrgb],
+        })
+    }
+
+    /// Combined layout: the 3D layer alone (alpha 1 in front of the 2D layers, 0.5 behind), aligned with
+    /// [`Compositor::output`].
+    pub fn mask(&self) -> &wgpu::Texture {
+        &self.mask
     }
 
     /// Combined layout: also draw each engine's background layer alone ([`Compositor::backdrop`]) and give the
@@ -175,8 +198,10 @@ impl Compositor {
                 usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
                 mapped_at_creation: false,
             }));
-        } else if !on {
+            self.mask = Self::mask_texture(gpu, self.output.width(), self.output.height());
+        } else if !on && self.backdrop.is_some() {
             self.backdrop = None;
+            self.mask = Self::mask_texture(gpu, 1, 1);
         }
     }
 
@@ -331,6 +356,7 @@ impl Compositor {
     fn dispatch(&self, gpu: &Gpu, layer3d: &wgpu::Texture) -> &wgpu::Texture {
         let view3d = layer3d.create_view(&Default::default());
         let out = self.output.create_view(&Default::default());
+        let mask = self.mask.create_view(&Default::default());
         let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("compositor"),
             layout: &self.pipeline.get_bind_group_layout(0),
@@ -342,6 +368,7 @@ impl Compositor {
                 wgpu::BindGroupEntry { binding: 4, resource: wgpu::BindingResource::TextureView(&out) },
                 wgpu::BindGroupEntry { binding: 5, resource: self.uniform.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 6, resource: self.top.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 7, resource: wgpu::BindingResource::TextureView(&mask) },
             ],
         });
         let mut encoder = gpu.device.create_command_encoder(&Default::default());

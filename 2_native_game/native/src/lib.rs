@@ -519,7 +519,8 @@ fn emulate(
             last_poll = Instant::now();
             let mut pads = pads.borrow_mut();
             pads.poll();
-            let quit = !w.is_open() || bindings.quit(&w, &pads);
+            w.pause_key(bindings.quit(&w, &pads));
+            let quit = !w.is_open();
             let (buttons, touch) = if live_input { input(&w, &bindings, &pads) } else { (0, None) };
             Some(recomp::machine::IdleAction {
                 quit,
@@ -591,7 +592,12 @@ fn emulate(
                 if let Some(w) = window.as_ref() {
                     let mut pads = pads.borrow_mut();
                     pads.poll();
-                    if !w.is_open() || bindings.quit(w, &pads) {
+                    w.pause_key(bindings.quit(w, &pads));
+                    // The pause menu (Esc): the game waits here; the pacing below absorbs the gap afterwards.
+                    while w.paused() && w.is_open() {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    if !w.is_open() {
                         break;
                     }
                     if scripted.is_none() {
@@ -778,7 +784,8 @@ fn emulate(
                     // milliseconds (the guest idling on a load), so wait until the wall clock
                     // catches up instead of sleeping a fixed 2 ms per step (the window has its own thread).
                     while let Some(ahead) = limited.then(|| emulated.checked_sub(start.elapsed().saturating_sub(skew))).flatten() {
-                        if ahead < Duration::from_millis(1) || !w.is_open() || bindings.quit(w, &pads.borrow()) {
+                        w.pause_key(bindings.quit(w, &pads.borrow()));
+                        if ahead < Duration::from_millis(1) || !w.is_open() || w.pause_request.load(Ordering::Acquire) {
                             break;
                         }
                         std::thread::sleep(ahead.min(Duration::from_millis(4)));
@@ -957,6 +964,9 @@ fn input(window: &HostLink, bindings: &Bindings, pads: &pad::Pads) -> (u16, Opti
         d.set(state);
         out
     });
+    if window.guard_input(buttons != 0 || window.touch().is_some()) {
+        return (0, None); // the button that closed the pause menu is still held
+    }
     (buttons, window.touch())
 }
 

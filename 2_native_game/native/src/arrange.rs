@@ -64,10 +64,21 @@ pub enum Source {
     Solid(u32),
 }
 
+/// How a screen piece treats the 3D layer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Mask {
+    None,
+    /// Above this source row only the 3D layer shows (a model that reaches past the piece's cut).
+    ThreeDAbove(f32),
+    /// The 3D layer is left out where it is in front (another piece shows it).
+    Hide3D,
+}
+
 /// Identity of a piece across arrangements, so a change of scene can slide it to its new place.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Key {
     Backdrop,
+    Shadow,
     Title,
     Top,
     Bottom,
@@ -88,6 +99,7 @@ pub struct Piece {
     pub alpha: f32,
     /// Use the screen's alpha (0 where it shows only its backdrop), so the shared backdrop shows through.
     pub see_through: bool,
+    pub mask: Mask,
 }
 
 /// Rows of the top screen's title bar on the "Select ..." screens.
@@ -109,6 +121,7 @@ pub fn arrange(scene: Scene, width: f32, height: f32, margin: u32) -> Vec<Piece>
         fade: fade.map(|f| f * soft(k)),
         alpha: 1.0,
         see_through,
+        mask: Mask::None,
     };
     // The screen's background picture (its furthest-back layer, live: it scrolls and fades with the game) behind
     // everything, scaled to the window width (only narrow windows wrap it beyond 256 columns), top-aligned so
@@ -126,6 +139,7 @@ pub fn arrange(scene: Scene, width: f32, height: f32, margin: u32) -> Vec<Piece>
             fade: [0.0; 4],
             alpha: 1.0,
             see_through: false,
+            mask: Mask::None,
         };
         (piece, kb, sx)
     };
@@ -161,17 +175,43 @@ pub fn arrange(scene: Scene, width: f32, height: f32, margin: u32) -> Vec<Piece>
             let fade_x = |left: bool| if (left && title_x > 0.5) || (!left && title_x + 256.0 * kb < cw - 0.5) { 1.0 } else { 0.0 };
             vec![
                 back,
-                Piece { fade: [fade_x(true), fade_x(false), 0.0, 0.0].map(|f| f * soft(kb)), ..screen(Key::Title, false, [0.0, 0.0, 256.0, t], title_x, 0.0, kb, [0.0; 4], true) },
-                screen(Key::Top, false, [0.0, t, 256.0, 192.0 - t], x, yt, k, [1.0, 1.0, 0.6, 1.0], true),
+                Piece {
+                    fade: [fade_x(true), fade_x(false), 0.0, 0.0].map(|f| f * soft(kb)),
+                    mask: Mask::Hide3D,
+                    ..screen(Key::Title, false, [0.0, 0.0, 256.0, t], title_x, 0.0, kb, [0.0; 4], true)
+                },
+                // The preview from the screen's top row: above the title bar's rows only its 3D model shows (a tall
+                // character's head reaches over the title), below it everything.
+                Piece {
+                    mask: Mask::ThreeDAbove(t),
+                    ..screen(Key::Top, false, [0.0, 0.0, 256.0, 192.0], x, yt - t * k, k, [1.0, 1.0, 0.0, 1.0], true)
+                },
                 screen(Key::Bottom, true, [0.0, 0.0, 256.0, 192.0], x + 256.0 * k, yb, k, [1.0, 1.0, 1.0, 0.6], true),
             ]
         }
         Scene::Title => {
-            // The logo picture melts into the menu's backdrop with wide soft edges.
-            let mut v = side_by_side(true, false, true);
-            let wide = 2.5 * soft((cw / 512.0).min(1.0));
-            v[1].fade = [if v[1].dst[0] > 0.5 { wide } else { 0.0 }, wide, wide, wide];
-            v
+            // The logo picture as a clean card with a soft shadow on the left, the menu's buttons on the right running
+            // off the window's edge as they run off the DS screen's, both the same size and centred in height.
+            let (back, _, _) = backdrop(true);
+            let (margin_l, gap) = (10.0, 6.0);
+            let k = ((cw - margin_l - gap) / 512.0).min(1.0);
+            let free = cw - 512.0 * k - gap; // only on very wide windows: split it around the card
+            let (x, y) = (if free > margin_l { free / 2.0 } else { margin_l }, (192.0 - 192.0 * k) / 2.0);
+            let card = screen(Key::Top, false, [0.0, 0.0, 256.0, 192.0], x, y, k, [0.0; 4], false);
+            let spread = 6.0 * u;
+            let shadow = Piece {
+                key: Key::Shadow,
+                source: Source::Solid(0x0a1a40),
+                src: [0.0; 4],
+                wrap: None,
+                dst: [card.dst[0] - spread + 2.0 * u, card.dst[1] - spread + 3.0 * u, card.dst[2] + 2.0 * spread, card.dst[3] + 2.0 * spread],
+                fade: [spread * 1.6; 4],
+                alpha: 0.55,
+                see_through: false,
+                mask: Mask::None,
+            };
+            let buttons = screen(Key::Bottom, true, [0.0, 0.0, 256.0, 192.0], (cw - 256.0 * k).min(x + 256.0 * k + gap + free / 2.0), y, k, [1.0, 0.0, 1.0, 1.0], true);
+            vec![back, shadow, card, buttons]
         }
         Scene::Results => {
             let mut v = side_by_side(true, true, true);
