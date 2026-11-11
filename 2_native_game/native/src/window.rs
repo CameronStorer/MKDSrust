@@ -7,7 +7,7 @@ use mkds_builder::controls;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU32, Ordering},
 };
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
@@ -64,6 +64,8 @@ pub struct HostLink {
     finished: AtomicBool,
     proxy: Mutex<Option<EventLoopProxy<()>>>,
     gpu_2d_stats: Mutex<(std::time::Duration, u64, usize)>,
+    /// The game's scene and race phase ([`crate::arrange::phase`]) for the Combined layout.
+    phase: AtomicU32,
 }
 
 impl HostLink {
@@ -77,6 +79,7 @@ impl HostLink {
             finished: AtomicBool::new(false),
             proxy: Mutex::new(None),
             gpu_2d_stats: Mutex::new(Default::default()),
+            phase: AtomicU32::new(crate::arrange::UNKNOWN),
         })
     }
 
@@ -118,6 +121,11 @@ impl HostLink {
         }
         drop(q);
         self.wake();
+    }
+
+    /// The game's current scene ([`crate::arrange::phase`]), published with each frame.
+    pub fn set_phase(&self, phase: u32) {
+        self.phase.store(phase, Ordering::Release);
     }
 
     /// The emulation ended (normally or with an error): close the window.
@@ -176,10 +184,20 @@ impl Display {
     /// DS pixels added on each side of the screens: the Widescreen mod's setting, with the GPU renderer only.
     pub fn margin(&self, gpu: bool) -> u32 {
         if self.widescreen_mod && gpu && self.settings.renderer == mkds_builder::settings::Renderer::Gpu {
-            self.settings.widescreen.margin()
+            match self.settings.widescreen.margin() {
+                // Combined is a widescreen picture: 16:9 unless another shape is chosen.
+                0 if self.combined(gpu) => mkds_builder::settings::Widescreen::W16x9.margin(),
+                m => m,
+            }
         } else {
             0
         }
+    }
+
+    /// The Combined layout is on: Widescreen mod, GPU renderer on an adapter that runs it (`gpu`).
+    pub fn combined(&self, gpu: bool) -> bool {
+        self.widescreen_mod && gpu && self.settings.renderer == mkds_builder::settings::Renderer::Gpu
+            && self.settings.layout == mkds_builder::settings::Layout::Combined
     }
 }
 
@@ -259,7 +277,12 @@ impl App {
     fn update_touch(&self) {
         let enabled = !self.link.menu_open.load(Ordering::Acquire) && self.link.preferences.lock().unwrap().as_ref().is_none_or(|(s,_)| s.touch_mouse);
         let touch = match (self.mouse_down && enabled, self.cursor, &self.gfx) {
-            (true, Some(c), Some(g)) => g.layout.touch(c.x, c.y).or_else(|| overlay_touch(&g.display, &g.layout, c.x, c.y)),
+            (true, Some(c), Some(g)) if g.combined_active() => crate::arrange::touch(&g.shown, c.x as f32, c.y as f32)
+                .or_else(|| overlay_touch(&g.display, &g.layout, c.x, c.y)),
+            (true, Some(c), Some(g)) => {
+                let l = g.classic_layout();
+                l.touch(c.x, c.y).or_else(|| overlay_touch(&g.display, &l, c.x, c.y))
+            }
             _ => None,
         };
         self.link.input.lock().unwrap().touch = touch;
@@ -271,7 +294,8 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
-        let (w, h) = if self.display.side_by_side { (W * 2, H / 2) } else { (W, H) };
+        let combined = self.display.settings.layout == mkds_builder::settings::Layout::Combined && self.display.widescreen_mod;
+        let (w, h) = if combined { ((256 + 2 * self.display.margin(true)) * 3 / 2, 288) } else if self.display.side_by_side { (W * 2, H / 2) } else { (W, H) };
         let factor = self.display.settings.window_size;
         let attrs = Window::default_attributes()
             .with_title(self.title.clone())
@@ -355,12 +379,13 @@ impl ApplicationHandler for App {
                 let PhysicalKey::Code(code) = event.physical_key else { return };
                 if event.state == ElementState::Pressed && !event.repeat && code == KeyCode::F9 && self.display.widescreen_mod {
                     if let Some(g) = &mut self.gfx {
-                        // Off -> Picture -> Track -> Off
+                        // Off -> Picture -> Track -> Off; Combined always shows the map in races: Picture <-> Track
+                        let combined = g.combined_active();
                         let s = &mut g.menu.settings;
-                        (s.map_overlay, s.map_overlay_track) = match (s.map_overlay, s.map_overlay_track) {
+                        (s.map_overlay, s.map_overlay_track) = match (s.map_overlay || combined, s.map_overlay_track) {
                             (false, _) => (true, false),
                             (true, false) => (true, true),
-                            (true, true) => (false, false),
+                            (true, true) => (combined, false),
                         };
                     }
                     if let Some(w) = &self.window { w.request_redraw(); }
@@ -477,9 +502,10 @@ fn physical_name(code: KeyCode) -> Option<&'static str> {
 
 /// The map overlay's rectangle (DS pixels of the 3D screen, bottom-right with a small inset), opacity 0-255 and
 /// style, when the Widescreen mod's MapOverlay is on.
-pub fn map_overlay(display: &Display, margin: u32) -> Option<([u32; 4], u32, OverlayStyle)> {
+/// `force`: the Combined layout's race, which always shows it.
+pub fn map_overlay(display: &Display, margin: u32, force: bool) -> Option<([u32; 4], u32, OverlayStyle)> {
     let s = &display.settings;
-    if !display.widescreen_mod || !s.map_overlay {
+    if !display.widescreen_mod || !(s.map_overlay || force) {
         return None;
     }
     let style = if s.map_overlay_track { OverlayStyle::Track } else { OverlayStyle::Picture };
@@ -492,7 +518,7 @@ pub fn map_overlay(display: &Display, margin: u32) -> Option<([u32; 4], u32, Ove
 
 /// Window pixel inside the map overlay -> the touch-screen pixel it shows (clicking the overlay taps the map).
 fn overlay_touch(display: &Display, layout: &Layout, px: f64, py: f64) -> Option<(u8, u8)> {
-    let (r, _, style) = map_overlay(display, layout.margin)?;
+    let (r, _, style) = map_overlay(display, layout.margin, layout.force_overlay)?;
     let t = layout.top;
     let sw = 256.0 + 2.0 * layout.margin as f64;
     let (x, y) = ((px - t.x) / t.w * sw, (py - t.y) / t.h * 192.0);
@@ -522,6 +548,8 @@ pub struct Layout {
     pub side_by_side: bool,
     /// Widescreen DS pixels on each side of both screens.
     pub margin: u32,
+    /// Combined layout in a race: the map overlay shows whatever the MapOverlay setting says.
+    pub force_overlay: bool,
 }
 
 impl Layout {
@@ -532,7 +560,7 @@ impl Layout {
         let (w, h) = (256.0 * s, 192.0 * s);
         let top = Rect { x, y, w, h };
         let bottom = if side_by_side { Rect { x: x + w, y, w, h } } else { Rect { x, y: y + h, w, h } };
-        Layout { top, bottom, side_by_side, margin: 0 }
+        Layout { top, bottom, side_by_side, margin: 0, force_overlay: false }
     }
 
     /// `margin`: widescreen DS pixels on each side of both screens (0 = the DS's 256 columns).
@@ -545,7 +573,14 @@ impl Layout {
         let first = Rect { x: (width as f64-cw*scale)/2.0, y: (height as f64-ch*scale)/2.0, w: sw*scale, h: 192.0*scale };
         let second = if settings.single_screen { Rect { w: 0.0, h: 0.0, ..first } } else if side { Rect { x: first.x+(sw+gap)*scale, ..first } } else { Rect { y: first.y+(192.0+gap)*scale, ..first } };
         let (top,bottom) = if settings.swap_screens { (second,first) } else { (first,second) };
-        Layout { top,bottom,side_by_side: side, margin }
+        Layout { top,bottom,side_by_side: side, margin, force_overlay: false }
+    }
+
+    /// Combined layout: `top` is where the race's wide 3D screen goes (the arrangement draws the rest).
+    fn combined(width: u32, height: u32, margin: u32, race: bool) -> Layout {
+        let pieces = crate::arrange::arrange(crate::arrange::Scene::Race, width as f32, height as f32, margin);
+        let [x, y, w, h] = pieces[0].dst.map(|v| v as f64);
+        Layout { top: Rect { x, y, w, h }, bottom: Rect { x, y, w: 0.0, h: 0.0 }, side_by_side: false, margin, force_overlay: race }
     }
 
     /// Window pixel -> bottom-screen pixel, if it lies on the bottom screen (outside a widescreen side bar).
@@ -605,6 +640,14 @@ struct Presenter {
     /// are finished on the CPU.
     compute_ok: bool,
     menu: crate::menu::Menu,
+    /// Combined layout: the pass that draws the arrangement, the pieces shown last (touch maps through them), the
+    /// arrangement a transition started from, the scene arranged for and when it changed.
+    pieces: Option<crate::gpu::pieces::PiecesPass>,
+    pub(crate) shown: Vec<crate::arrange::Piece>,
+    from: Vec<crate::arrange::Piece>,
+    scene: Option<crate::arrange::Scene>,
+    since: std::time::Instant,
+    a_top: bool,
 }
 
 impl Presenter {
@@ -701,14 +744,38 @@ impl Presenter {
         if !compute_ok {
             eprintln!("This graphics adapter cannot run the GPU renderer; the CPU finishes each frame (as --renderer software).");
         }
-        let layout = Layout::configured(config.width, config.height, &display.settings, display.margin(compute_ok));
+        let layout = Presenter::layout_for(config.width, config.height, &display, compute_ok, false);
         let scale = display.scale.unwrap_or_else(|| layout.auto_scale());
         eprintln!("Display: {} renderer at {scale}x, {}", gpu.adapter.get_info().name, if display.scale.is_none() { "Auto" } else { "fixed" });
         let menu = crate::menu::Menu::new(&window, &gpu, config.format, &display);
         Ok(Presenter {
             window, gpu, surface, config, screens, bind, bind_layout, sampler, pipeline, layout,
             rgba: vec![0; (W * H * 4) as usize], gpu_path: None, scale, display, showing_gpu: false, compute_ok, menu,
+            pieces: None, shown: Vec::new(), from: Vec::new(), scene: None, since: std::time::Instant::now(), a_top: true,
         })
+    }
+
+    fn layout_for(width: u32, height: u32, display: &Display, compute_ok: bool, race: bool) -> Layout {
+        let margin = display.margin(compute_ok);
+        if display.combined(compute_ok) {
+            Layout::combined(width, height, margin, race)
+        } else {
+            Layout::configured(width, height, &display.settings, margin)
+        }
+    }
+
+    /// The layout for frames the Combined layout does not draw (software frames keep the classic layouts).
+    fn classic_layout(&self) -> Layout {
+        if self.display.combined(self.compute_ok) {
+            Layout::configured(self.config.width, self.config.height, &self.display.settings, 0)
+        } else {
+            self.layout
+        }
+    }
+
+    /// The Combined layout is drawing this frame (GPU frames; software frames keep the classic layouts).
+    pub(crate) fn combined_active(&self) -> bool {
+        self.display.combined(self.compute_ok) && self.showing_gpu
     }
 
     fn apply_settings(&mut self) {
@@ -748,7 +815,7 @@ impl Presenter {
         self.config.width = size.width;
         self.config.height = size.height;
         self.surface.configure(&self.gpu.device, &self.config);
-        self.layout = Layout::configured(size.width, size.height, &self.display.settings, self.display.margin(self.compute_ok));
+        self.layout = Presenter::layout_for(size.width, size.height, &self.display, self.compute_ok, self.scene == Some(crate::arrange::Scene::Race));
         if self.gpu_path.as_ref().is_some_and(|(r, _, _)| r.margin() != self.layout.margin) {
             self.gpu_path = None; // rebuilt at the new width with the next frame
         }
@@ -792,12 +859,19 @@ impl Presenter {
                         Err(e) => eprintln!("Texture pack not used: {e}"),
                     }
                 }
-                let compositor = Compositor::new_wide(&self.gpu, self.scale, self.layout.margin);
+                let mut compositor = Compositor::new_wide(&self.gpu, self.scale, self.layout.margin);
+                compositor.set_combined(&self.gpu, self.display.combined(self.compute_ok));
                 let bind = self.bind_texture(compositor.output(), self.config.format.is_srgb());
                 self.gpu_path = Some((renderer, compositor, bind));
             }
+            let combined = self.display.combined(self.compute_ok);
+            let scene = crate::arrange::Scene::of(link.phase.load(Ordering::Acquire));
+            self.layout.force_overlay = combined && scene == crate::arrange::Scene::Race;
+            self.a_top = f.snap.a_top();
             let (renderer, compositor, _) = self.gpu_path.as_mut().unwrap();
-            compositor.set_overlay(map_overlay(&self.display, self.layout.margin));
+            compositor.set_combined(&self.gpu, combined);
+            let overlay = map_overlay(&self.display, self.layout.margin, self.layout.force_overlay);
+            compositor.set_overlay(if combined && scene != crate::arrange::Scene::Race { None } else { overlay });
             let layer = renderer.render(&self.gpu, &f.snap);
             let start = std::time::Instant::now();
             compositor.render_raw(&self.gpu, &f.snap, layer);
@@ -843,8 +917,10 @@ impl Presenter {
                 })],
                 ..Default::default()
             });
-            let l = self.layout;
-            if l.top.w >= 1.0 || l.bottom.w >= 1.0 {
+            let l = self.classic_layout();
+            if self.combined_active() {
+                self.draw_combined(&mut pass, link);
+            } else if l.top.w >= 1.0 || l.bottom.w >= 1.0 {
                 pass.set_pipeline(&self.pipeline);
                 let bind = match (&self.gpu_path, self.showing_gpu) {
                     (Some((_, _, gpu_bind)), true) => gpu_bind,
@@ -863,6 +939,45 @@ impl Presenter {
         self.window.pre_present_notify();
         self.gpu.queue.present(surface_texture);
         Ok(())
+    }
+}
+
+impl Presenter {
+    /// Combined layout: the scene's arrangement (sliding from the previous one for [`crate::arrange::TRANSITION`]).
+    fn draw_combined(&mut self, pass: &mut wgpu::RenderPass<'_>, link: &HostLink) {
+        use crate::arrange;
+        let Some((_, compositor, _)) = &self.gpu_path else { return };
+        let Some(backdrop) = compositor.backdrop() else { return };
+        let scene = arrange::Scene::of(link.phase.load(Ordering::Acquire));
+        let (w, h) = (self.config.width, self.config.height);
+        let target = arrange::arrange(scene, w as f32, h as f32, self.layout.margin);
+        let now = std::time::Instant::now();
+        if self.scene != Some(scene) {
+            self.from = if self.scene.is_some() { std::mem::take(&mut self.shown) } else { target.clone() };
+            self.since = now;
+            self.scene = Some(scene);
+        }
+        let t = now.duration_since(self.since).as_secs_f32() / arrange::TRANSITION;
+        self.shown = if t >= 1.0 { target } else { arrange::blend(&self.from, &target, t) };
+        if t < 1.0 {
+            self.window.request_redraw();
+        }
+        let out = compositor.output();
+        let view = out.create_view(&wgpu::TextureViewDescriptor {
+            format: self.config.format.is_srgb().then_some(wgpu::TextureFormat::Rgba8UnormSrgb),
+            usage: Some(wgpu::TextureUsages::TEXTURE_BINDING),
+            ..Default::default()
+        });
+        let inputs = crate::gpu::pieces::Inputs {
+            screens: &view,
+            size: (out.width(), out.height()),
+            scale: compositor.scale(),
+            margin: compositor.margin(),
+            backdrop,
+            a_top: self.a_top,
+        };
+        let pieces = self.pieces.get_or_insert_with(|| crate::gpu::pieces::PiecesPass::new(&self.gpu, self.config.format));
+        pieces.draw(&self.gpu, pass, &inputs, &self.shown, w, h);
     }
 }
 
@@ -899,7 +1014,7 @@ mod tests {
         let settings = mkds_builder::settings::Settings { single_screen: true, map_overlay: true, map_overlay_size: 50, map_overlay_track: true, ..s.clone() };
         let display = Display { settings: settings.clone(), controls_path: None, scale: None, smooth: false, side_by_side: false, fullscreen: false, texture_pack: None, dump_textures: None, widescreen_mod: true };
         let l = Layout::configured(336,192,&settings,40);
-        let (r, _, _) = map_overlay(&display, 40).unwrap();
+        let (r, _, _) = map_overlay(&display, 40, false).unwrap();
         assert_eq!(r, [336 - 72 - 4, 192 - 96 - 4, 72, 96]);
         assert_eq!(overlay_touch(&display, &l, (r[0] + 36) as f64, (r[1] + 48) as f64), Some((112 + 72, 96)));
         assert_eq!(overlay_touch(&display, &l, 10.0, 10.0), None);

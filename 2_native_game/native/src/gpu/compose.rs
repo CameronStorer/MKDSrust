@@ -24,7 +24,8 @@ struct Frame {
     a_top: u32,
     /// Widescreen: DS pixels added on each side of both screens.
     margin: u32,
-    pad: u32,
+    /// Combined layout: alpha 0 where only the backdrop/background layer shows.
+    alpha_mode: u32,
     /// Map overlay: x, y, width, height in output pixels of the 3D screen (0 alpha = none).
     overlay: [u32; 4],
     overlay_alpha: u32,
@@ -76,6 +77,8 @@ pub struct Compositor {
     /// engine A's screen from the last frame that captured into it, and how many frames ago.
     captured: Vec<wgpu::Texture>,
     capture_age: [Option<u32>; 4],
+    /// Combined layout: both engines' background layer over a 512x512 map period (see `two_d.wgsl`'s `backdrop`).
+    backdrop: Option<wgpu::Buffer>,
 }
 
 impl Compositor {
@@ -157,7 +160,29 @@ impl Compositor {
             output,
             staging: vec![0; 2 * PIXELS],
             two_d: None,
+            backdrop: None,
         }
+    }
+
+    /// Combined layout: also draw each engine's background layer alone ([`Compositor::backdrop`]) and give the
+    /// output alpha 0 where a screen shows only that layer.
+    pub fn set_combined(&mut self, gpu: &Gpu, on: bool) {
+        if on && self.backdrop.is_none() {
+            let n = super::two_d::BACKDROP_SIZE as u64;
+            self.backdrop = Some(gpu.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("compositor backdrop"),
+                size: 2 * n * n * 4,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }));
+        } else if !on {
+            self.backdrop = None;
+        }
+    }
+
+    /// Combined layout: per engine (A first), 512x512 packed `0xRRGGBBAA` background-layer pixels.
+    pub fn backdrop(&self) -> Option<&wgpu::Buffer> {
+        self.backdrop.as_ref()
     }
 
     pub fn scale(&self) -> u32 {
@@ -209,7 +234,7 @@ impl Compositor {
             pad: [0; 2],
         };
         let (overlay, overlay_alpha, style) = self.overlay_fields();
-        let frame = Frame { engines: [engine(a), engine(b)], scale: self.scale, a_top: a_top as u32, margin: self.margin, pad: 0, overlay, overlay_alpha, overlay_style: style, pad2: [0; 2] };
+        let frame = Frame { engines: [engine(a), engine(b)], scale: self.scale, a_top: a_top as u32, margin: self.margin, alpha_mode: 0, overlay, overlay_alpha, overlay_style: style, pad2: [0; 2] };
         gpu.queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&frame));
         self.dispatch(gpu, layer3d)
     }
@@ -223,6 +248,9 @@ impl Compositor {
         assert_eq!((layer3d.width(), layer3d.height()), ((256 + 2 * self.margin) * self.scale, 192 * self.scale), "3D layer scale");
         let renderer = self.two_d.get_or_insert_with(|| super::two_d::Renderer2d::new(gpu));
         renderer.render(gpu, snap, &self.base, &self.other, &self.info, &self.top);
+        if let Some(back) = &self.backdrop {
+            renderer.render_backdrop(gpu, back);
+        }
         let engine = |offset: usize| {
             let r = |a: usize| u16::from_le_bytes([snap.io[offset + a], snap.io[offset + a + 1]]) as u32;
             let d = r(0) | r(2) << 16;
@@ -234,7 +262,7 @@ impl Compositor {
         };
         let (overlay, overlay_alpha, style) = self.overlay_fields();
         let frame = Frame { engines: [engine(0), engine(0x1000)], scale: self.scale,
-            a_top: ((snap.io[0x305] >> 7) & 1) as u32, margin: self.margin, pad: 0, overlay, overlay_alpha, overlay_style: style, pad2: [0; 2] };
+            a_top: ((snap.io[0x305] >> 7) & 1) as u32, margin: self.margin, alpha_mode: self.backdrop.is_some() as u32, overlay, overlay_alpha, overlay_style: style, pad2: [0; 2] };
         gpu.queue.write_buffer(&self.uniform, 0, bytemuck::bytes_of(&frame));
         self.dispatch(gpu, layer3d);
         self.carry_capture(gpu, snap);

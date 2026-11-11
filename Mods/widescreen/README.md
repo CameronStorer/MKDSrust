@@ -15,7 +15,15 @@ the sides at the same height ("Hor+"), so nothing is stretched or zoomed. The HU
    heads and the timer float over the 3D view, with the map's background left out. Click the map once to switch the
    game to its whole-course view; clicking the overlay taps the touch screen. F9 cycles Off → Picture → Track.
 
+6. Want the whole game on one widescreen screen, menus included? Choose **Screen layout → Combined** in F10 (or
+   `Layout = Combined` in settings.txt). Every menu is rebuilt from both screens: the title bar spans the top, the
+   preview (character, kart, course) sits next to the touch screen's buttons over one live backdrop, the title screen
+   shows the logo next to its menu, and races fill the screen with the map in the corner (F9: Picture or Track).
+   After the finish the race and the results sit side by side. Click the touch-screen part with the mouse as usual;
+   clicks elsewhere do not touch. Combined uses 16:9 unless you pick another Widescreen shape.
+
 ## Changes
+- 1.3.0: Combined layout: one widescreen picture built from both screens, arranged per scene, with transitions.
 - 1.2.0: Track style for the map overlay (outline and heads only, no background); clicking the overlay taps the
   touch screen.
 - 1.1.0: map overlay (F9); no more flickering side bars when both screens show 3D (the pre-race course preview).
@@ -30,7 +38,9 @@ GPU renderer keeps those parts and draws them into extra columns on each side (2
 - The game hides some objects (karts, items, props) once they leave its own 4:3 view, so they may appear late at
   the far edges.
 - 2D screens (menus, the HUD) stay 4:3 in the middle.
-- Needs the GPU renderer (the software renderer stays 4:3).
+- Needs the GPU renderer (the software renderer stays 4:3; Combined then shows Stacked).
+- Combined knows the title screen, the "Select ..." screens, races and results; other screens (setup dialogs, award
+  ceremony, multiplayer) show both screens side by side.
 
 ## Files
 `mod.json` only: the renderer code ships with MKDSrust (`2_native_game/native/src/gpu`), and this mod switches it on.

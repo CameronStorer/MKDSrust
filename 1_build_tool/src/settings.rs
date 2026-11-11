@@ -16,6 +16,9 @@ pub enum Layout {
     Stacked,
     /// Top screen left, bottom screen right (wide monitors).
     SideBySide,
+    /// Widescreen mod (GPU renderer): one widescreen picture built from both screens, rearranged per scene (menus
+    /// side by side over one backdrop, races full width with the map overlay). Otherwise the same as `Stacked`.
+    Combined,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -175,7 +178,8 @@ impl Settings {
                     s.layout = match value.to_ascii_lowercase().as_str() {
                         "stacked" => Layout::Stacked,
                         "sidebyside" | "side-by-side" | "side by side" => Layout::SideBySide,
-                        _ => return Err(bad("Layout must be Stacked or SideBySide")),
+                        "combined" => Layout::Combined,
+                        _ => return Err(bad("Layout must be Stacked, SideBySide or Combined")),
                     }
                 }
                 "widescreen" => {
@@ -259,7 +263,7 @@ impl Settings {
             if self.renderer == Renderer::Gpu { "GPU" } else { "Software" },
             self.scale.map_or("Auto".to_string(), |s| s.to_string()),
             if self.smooth { "Smooth" } else { "Sharp" },
-            if self.layout == Layout::Stacked { "Stacked" } else { "SideBySide" },
+            match self.layout { Layout::Stacked => "Stacked", Layout::SideBySide => "SideBySide", Layout::Combined => "Combined" },
             self.widescreen.name(),
             if self.map_overlay { "Yes" } else { "No" },
             self.map_overlay_size,
@@ -338,6 +342,9 @@ mod tests {
         assert_eq!(s.scale, Some(3));
         assert!(s.smooth && s.fullscreen);
         assert_eq!(s.layout, Layout::SideBySide);
+        let c = Settings { layout: Layout::Combined, ..Settings::default() };
+        assert_eq!(Settings::parse(&c.to_text()).unwrap().layout, Layout::Combined);
+        assert_eq!(Settings::parse("Layout = combined").unwrap().layout, Layout::Combined);
         assert_eq!(s.texture_pack, Some(PathBuf::from("C:\\packs\\hd")));
         assert_eq!(Settings::parse(&s.to_text()).unwrap(), s);
         assert_eq!(Settings::parse("Scale = auto").unwrap().scale, None);

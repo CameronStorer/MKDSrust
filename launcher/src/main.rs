@@ -781,6 +781,7 @@ impl Launcher {
                 Layout::SideBySide,
                 "Side by side",
             );
+            ui.selectable_value(&mut self.settings.layout, Layout::Combined, "Combined (Widescreen mod)");
         });
         ui.checkbox(&mut self.settings.smooth, "Smooth filtering");
         ui.checkbox(&mut self.settings.fullscreen, "Start fullscreen / borderless");

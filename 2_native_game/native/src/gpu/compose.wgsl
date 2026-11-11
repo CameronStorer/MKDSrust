@@ -1,7 +1,7 @@
 // Screen compositor (block 2 stage B2.3): `recomp::gfx2d::Split::pixel` for every sample of both screens.
 // Integer maths throughout, so a 3D layer of 256x192 reproduces the software screens exactly.
 struct Engine { eva: u32, evb: u32, bright_mode: u32, bright: u32, master_mode: u32, master: u32, pad0: u32, pad1: u32 }
-struct Frame { engines: array<Engine, 2>, scale: u32, a_top: u32, margin: u32, pad1: u32, overlay: vec4<u32>, overlay_alpha: u32, overlay_style: u32, pad3: u32, pad4: u32 }
+struct Frame { engines: array<Engine, 2>, scale: u32, a_top: u32, margin: u32, alpha_mode: u32, overlay: vec4<u32>, overlay_alpha: u32, overlay_style: u32, pad3: u32, pad4: u32 }
 @group(0) @binding(0) var<storage, read> base: array<u32>;   // [engine][pixel] packed RRGGBBAA
 @group(0) @binding(1) var<storage, read> other: array<u32>;  // [engine][pixel]
 @group(0) @binding(2) var<storage, read> info: array<u32>;   // [engine][pixel]
@@ -67,6 +67,14 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
     let a3 = c3 & 255u;
     var c = 0u;
+    // Combined layout: alpha 0 where the screen shows only its backdrop/background layer (the window draws the
+    // wide backdrop there), 255 where a foreground layer or the 3D layer is visible.
+    var alpha = 255u;
+    if frame.alpha_mode != 0u && gid.x >= m && gid.x < m + 256u * s {
+        let i = engine * 49152u + (y3 / s) * 256u + (gid.x - m) / s;
+        let visible3d = a3 != 0u && (info[i] & 3u) != 0u;
+        if top[i] == 0u && !visible3d { alpha = 0u; }
+    }
     if gid.x < m || gid.x >= m + 256u * s {
         // Widescreen side columns: no 2D layers exist there. The 3D screen shows its 3D layer (black where empty),
         // the other screen is black; the master brightness (fades) still applies.
@@ -92,5 +100,5 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
             c = mix_weights(mini, frame.overlay_alpha, c, 255u - frame.overlay_alpha, 255u);
         }
     }
-    textureStore(output, vec2<u32>(gid.xy), vec4<f32>(vec4<u32>(ch(c, 24u), ch(c, 16u), ch(c, 8u), 255u)) / 255.0);
+    textureStore(output, vec2<u32>(gid.xy), vec4<f32>(vec4<u32>(ch(c, 24u), ch(c, 16u), ch(c, 8u), alpha)) / 255.0);
 }

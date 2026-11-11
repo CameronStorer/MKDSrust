@@ -6,6 +6,7 @@ pub mod assets;
 pub mod gpu;
 mod pad;
 pub mod window;
+pub mod arrange;
 mod script;
 mod mods;
 mod watch;
@@ -747,6 +748,8 @@ fn emulate(
                             busy.store(true, Ordering::Release);
                             let snap_started = Instant::now();
                             let job = session.render_snapshot();
+                            // Combined layout: which scene this frame shows (a plain RAM read).
+                            w.set_phase(arrange::phase(&session.machine.hw.main));
                             stats.snapshot_time += snap_started.elapsed();
                             if options.stats && options.software_renderer == Some(true) && jobs % 120 == 0 {
                                 parity = Some(session.screens());

@@ -11,6 +11,7 @@ pub struct Renderer2d {
     maps: wgpu::Buffer,
     mapping: wgpu::ComputePipeline,
     pipeline: wgpu::ComputePipeline,
+    backdrop: wgpu::ComputePipeline,
     previous: Vec<u8>,
     pub uploaded: usize,
 }
@@ -31,7 +32,7 @@ impl Renderer2d {
             raw: buffer("2D raw", RAW_SIZE as u64, wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST),
             mapped: buffer("2D mapped", STRIDE as u64 * 2, wgpu::BufferUsages::STORAGE),
             maps: buffer("2D mappings", 9 * 16, wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST),
-            mapping: pipeline("map_memory"), pipeline: pipeline("split"), previous: Vec::new(), uploaded: 0,
+            mapping: pipeline("map_memory"), pipeline: pipeline("split"), backdrop: pipeline("backdrop"), previous: Vec::new(), uploaded: 0,
         }
     }
 
@@ -110,7 +111,29 @@ impl Renderer2d {
         }
         gpu.queue.submit([encoder.finish()]);
     }
+
+    /// After [`Renderer2d::render`]: each engine's background layer alone over a 512x512 map period into `back`
+    /// ([`BACKDROP_SIZE`] squared u32 per engine, packed RRGGBBAA, master brightness applied).
+    pub fn render_backdrop(&self, gpu: &Gpu, back: &wgpu::Buffer) {
+        let bind = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("2D backdrop"), layout: &self.backdrop.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry { binding: 0, resource: self.raw.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: self.mapped.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 7, resource: back.as_entire_binding() }],
+        });
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&self.backdrop);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups(64, 64, 2);
+        }
+        gpu.queue.submit([encoder.finish()]);
+    }
 }
+
+/// Pixels of one engine's backdrop map period (512 x 512).
+pub const BACKDROP_SIZE: u32 = 512;
 
 #[cfg(test)]
 mod tests {

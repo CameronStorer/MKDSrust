@@ -243,7 +243,19 @@ impl Menu {
                         Layout::SideBySide,
                         "Side by side",
                     );
+                    if self.widescreen_mod {
+                        ui.selectable_value(&mut self.settings.layout, Layout::Combined, "Combined (mod)");
+                    }
                 });
+                if self.settings.layout == Layout::Combined {
+                    if !self.widescreen_mod {
+                        ui.small("Combined needs the Widescreen mod; showing Stacked.");
+                    } else if self.settings.renderer != settings::Renderer::Gpu {
+                        ui.small("Combined needs the GPU renderer; showing Stacked.");
+                    } else {
+                        ui.small("One widescreen picture from both screens: menus side by side, races full width with the map (F9: Picture or Track). Single screen, swap and gap do not apply.");
+                    }
+                }
                 if self.widescreen_mod {
                     ui.horizontal(|ui| {
                         ui.label("Widescreen (mod)");

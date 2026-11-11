@@ -8,6 +8,9 @@
 // Map overlay (Widescreen mod): the top layer's own colour, 0 where it is the backdrop or the background layer
 // (the enabled background drawn furthest back), so a map can be shown without its backdrop pattern.
 @group(0) @binding(6) var<storage, read_write> top: array<u32>;
+// Combined layout (Widescreen mod): each engine's background layer alone over a whole 512x512 map period, so the
+// window can extend the menus' backdrop (BG maps wrap) beyond the screen's 256 x 192 pixels.
+@group(0) @binding(7) var<storage, read_write> back: array<u32>;
 const STRIDE = 0xca000u;
 var<private> engine: u32;
 var<private> d: u32;
@@ -290,3 +293,31 @@ fn split(@builtin(global_invocation_id) id: vec3<u32>) {
     }
 }
 
+
+// The layer `split` treats as the background (the enabled background drawn furthest back), or 5 for none.
+fn back_layer() -> u32 {
+    var back = 5u; var back_key = 0u;
+    for (var bg = 0u; bg < 4u; bg++) {
+        if (d & (0x100u << bg)) == 0u || (bg == 0u && (d & 8u) != 0u) { continue; }
+        let key = ((reg(8u + bg * 2u) & 3u) << 2u) | bg;
+        if back == 5u || key >= back_key { back = bg; back_key = key; }
+    }
+    return back;
+}
+
+@compute @workgroup_size(8,8)
+fn backdrop(@builtin(global_invocation_id) id: vec3<u32>) {
+    engine = id.z;
+    d = reg(0u) | (reg(2u) << 16u);
+    let x = id.x; let y = id.y; let index = engine * 262144u + y * 512u + x;
+    if ((d >> 16u) & 3u) != 1u || (d & 0x80u) != 0u { back[index] = 255u; return; }
+    var layer = back_layer();
+    var c = 0u;
+    if layer != 5u { c = background(layer, x, y); }
+    if c == 0u { c = rgb(pal(0u)); layer = 5u; }
+    let blend = reg(0x50u); let mode = (blend >> 6u) & 3u;
+    if (mode == 2u || mode == 3u) && (blend & (1u << layer)) != 0u { c = brighten(c, mode, min(reg(0x54u) & 31u, 16u)); }
+    let master = reg(0x6cu); let mm = master >> 14u;
+    if (mm == 1u || mm == 2u) && (master & 31u) != 0u { c = brighten(c, select(3u, 2u, mm == 1u), min(master & 31u, 16u)); }
+    back[index] = c;
+}

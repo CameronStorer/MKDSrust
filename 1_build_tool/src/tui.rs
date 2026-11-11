@@ -306,7 +306,7 @@ fn setting_value(s: &Settings, row: usize) -> String {
         0 => if s.renderer == Renderer::Gpu { "GPU" } else { "Software" }.into(),
         1 => s.scale.map_or("Auto".into(), |v| format!("{v}x")),
         2 => if s.smooth { "Smooth" } else { "Sharp" }.into(),
-        3 => if s.layout == ScreenLayout::Stacked { "Stacked" } else { "Side by side" }.into(),
+        3 => match s.layout { ScreenLayout::Stacked => "Stacked", ScreenLayout::SideBySide => "Side by side", ScreenLayout::Combined => "Combined (Widescreen mod)" }.into(),
         _ => if s.fullscreen { "Yes" } else { "No" }.into(),
     }
 }
@@ -322,7 +322,11 @@ fn change_setting(s: &mut Settings, row: usize, forward: bool) {
             s.scale = order[if forward { (at + 1) % order.len() } else { (at + order.len() - 1) % order.len() }];
         }
         2 => s.smooth = !s.smooth,
-        3 => s.layout = if s.layout == ScreenLayout::Stacked { ScreenLayout::SideBySide } else { ScreenLayout::Stacked },
+        3 => {
+            let order = [ScreenLayout::Stacked, ScreenLayout::SideBySide, ScreenLayout::Combined];
+            let at = order.iter().position(|v| *v == s.layout).unwrap_or(0);
+            s.layout = order[if forward { (at + 1) % 3 } else { (at + 2) % 3 }];
+        }
         _ => s.fullscreen = !s.fullscreen,
     }
 }
@@ -597,13 +601,19 @@ mod tests {
         assert_eq!(s.scale, None, "wraps around to Auto");
         change_setting(&mut s, 1, false);
         assert_eq!(s.scale, Some(8));
-        for row in [0, 2, 3, 4] {
+        for row in [0, 2, 4] {
             let before = setting_value(&s, row);
             change_setting(&mut s, row, true);
             assert_ne!(setting_value(&s, row), before);
             change_setting(&mut s, row, true);
             assert_eq!(setting_value(&s, row), before, "two-value settings toggle");
         }
+        // Layout cycles Stacked, Side by side, Combined and back (and backwards).
+        let before = setting_value(&s, 3);
+        for _ in 0..3 { change_setting(&mut s, 3, true); }
+        assert_eq!(setting_value(&s, 3), before);
+        change_setting(&mut s, 3, false);
+        assert_eq!(s.layout, ScreenLayout::Combined);
     }
 
     #[test]
