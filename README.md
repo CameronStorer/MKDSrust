@@ -180,7 +180,7 @@ all other trademarks belong to their respective owners.
 - [Wheel Wizard](https://github.com/TeamWheelWizard/WheelWizard): launcher workflow inspiration.
 - [GBATEK](https://problemkaputt.de/gbatek.htm), [melonDS](https://github.com/melonDS-emu/melonDS) and [DeSmuME](https://github.com/TASEmulators/desmume): public hardware and architecture references.
 - [N64Recomp](https://github.com/N64Recomp/N64Recomp), [ultramodern / N64ModernRuntime](https://github.com/N64Recomp/N64ModernRuntime), [RT64](https://github.com/rt64/rt64) and [aurora](https://github.com/encounter/aurora): translation, native service and presentation references.
-- [tylzars/mkds](https://github.com/tylzars/mkds): the matching C decompilation (MIT); function names, struct layouts and signatures were cross-checked against it, with the author's permission. No code was copied.
+- [tylzars/mkds](https://github.com/tylzars/mkds): the matching C decompilation (MIT); function names, struct layouts and signatures were cross-checked against it. No code was copied.
 - [ds-decomp](https://github.com/AetiasHax/ds-decomp) and public MKDS mapping research: research references; reference status does not grant permission to copy code.
 - Rust and dependency authors, including wgpu, eframe/egui and corosensei, and dictionary and verification contributors.
 
