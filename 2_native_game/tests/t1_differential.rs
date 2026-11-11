@@ -36,7 +36,8 @@ impl Drop for EmitLock {
 fn emit_lock() -> EmitLock {
     let guard = EMIT.lock().unwrap_or_else(|e| e.into_inner());
     let old = std::env::var_os("MKDS_POLL_DIRECT");
-    if old.is_none() { unsafe { std::env::set_var("MKDS_POLL_DIRECT", "0"); } }
+    // an empty value counts as unset (scripts often clear variables with `VAR=`)
+    if old.as_ref().map_or(true, |v| v.is_empty()) { unsafe { std::env::set_var("MKDS_POLL_DIRECT", "0"); } }
     EmitLock(guard, old)
 }
 
