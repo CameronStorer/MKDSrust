@@ -14,7 +14,8 @@ straight into your game.
 - **Download, pick your ROM, play.** The [launcher](https://github.com/CameronStorer/MKDSrust/releases/latest)
   sets everything up itself: no Visual Studio, no Rust install.
 - **Mods built in.** Tick a mod in the launcher and rebuild. First official mod:
-  [Widescreen](Mods/widescreen) (16:10, 16:9 or 21:9, with a see-through track map overlay).
+  [Widescreen](Mods/widescreen): 16:10, 16:9 or 21:9, a see-through track map overlay, and the **Combined** layout
+  that rearranges the whole game (menus, race, results) into one widescreen picture, no second screen needed.
 - **Readable source.** Every build includes the generated Rust for your copy of the game, with real function
   and field names.
 
@@ -24,7 +25,7 @@ straight into your game.
 |---|---|
 | **Recompilation**: the whole game runs natively | ✅ Complete. All 12,736 functions translated; exact mode matches the DS frame for frame. |
 | **Decompilation**: functions named and typed | ✅ Complete in scope (99.5% of 9,496 functions; ARM7 and online code excluded). |
-| **Launcher and mods** | ✅ Released ([latest](https://github.com/CameronStorer/MKDSrust/releases/latest)). Next mod: a *Single Screen* layout for Widescreen (the whole game in one frame, no bottom screen). |
+| **Launcher and mods** | ✅ Released ([latest](https://github.com/CameronStorer/MKDSrust/releases/latest)). Widescreen 1.3 adds the Combined layout: the whole game in one widescreen picture. |
 | **Readable Rust**: plain Rust without the simulated DS | 🟡 In progress. 39% of functions have real parameters and 20% no longer use the simulated CPU. Now testing a route that runs converted code directly on the game's memory. |
 | **MKDSrust Toolbox** (asset editor) | ⏸ Paused. |
 
