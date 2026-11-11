@@ -86,6 +86,8 @@ pub enum Scene {
     Race,
     /// After the finish (scene 2, results on the touch screen).
     Results,
+    /// The boot splash (scene 9: Nintendo logo, ESRB notice): both screens stacked on black, as on the DS.
+    Splash,
     /// First-time setup dialogs (scene 11) and anything else: both screens side by side.
     Other,
 }
@@ -97,6 +99,7 @@ impl Scene {
             (1, _) => Scene::Select,
             (2, false) => Scene::Race,
             (2, true) => Scene::Results,
+            (9, _) => Scene::Splash,
             _ => Scene::Other,
         }
     }
@@ -267,6 +270,18 @@ pub fn arrange(scene: Scene, width: f32, height: f32, margin: u32) -> Vec<Piece>
             let mut v = side_by_side(true, true, true);
             v[0] = Piece { source: Source::Solid(0x10182c), ..v[0] };
             v
+        }
+        Scene::Splash => {
+            // Its pictures are white on black, so the screens' black edges vanish into a black window; stacked at
+            // half height they read like the DS's own splash. (Its backdrop layer is the notice text itself.)
+            let k = 0.5;
+            let x = (cw - 256.0 * k) / 2.0;
+            let black = Piece { key: Key::Backdrop, source: Source::Solid(0), src: [0.0; 4], wrap: None, dst: [0.0, 0.0, width, height], fade: [0.0; 4], alpha: 1.0, see_through: false, mask: Mask::None };
+            vec![
+                black,
+                screen(Key::Top, false, [0.0, 0.0, 256.0, 192.0], x, 0.0, k, [0.0; 4], false),
+                screen(Key::Bottom, true, [0.0, 0.0, 256.0, 192.0], x, 96.0, k, [0.0; 4], false),
+            ]
         }
         Scene::Other => side_by_side(false, false, true),
     }
