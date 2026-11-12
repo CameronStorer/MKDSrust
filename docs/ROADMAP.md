@@ -43,7 +43,7 @@ _Status: draft of 2026-11-11, based on four research reports in [docs/research/]
 
 | Part | What it is | Ships as |
 |---|---|---|
-| Launcher | Tauri app (planned; egui today): ROM, Build, Play, Mods, Toolbox, Export tabs | Download (small) |
+| Launcher | One native egui app with dockable panels (professional-tool layout): ROM, Build, Play, Mods, Toolbox and project tabs | Download (small, single program) |
 | Generator | ROM machine code to readable Rust, names and types from our dictionary | Prebuilt, inside the launcher |
 | Runtime | Native renderer, audio, input, file system; decoupling the game from DS hardware | Our source, compiled on the user's PC (prebuilt later) |
 | Toolbox | Asset editors (models, tracks, textures, text, music) | Optional component, a launcher tab |
@@ -72,20 +72,22 @@ _Status: draft of 2026-11-11, based on four research reports in [docs/research/]
   weather, cups) need data files. These become first-party example mods.
 - **The other port:** DS Kart Recompiled (EU only, MIT) builds in about 5 minutes on 8 cores with a 200 MB download.
   Our edges: a mod system, readable named source, USA (and later EU), and modular downloads.
-- **Launcher stack:** one Tauri backend with our format crates built in; on-demand tabs are downloaded frontend
-  bundles served through a verifying custom protocol; toolchains are downloaded components; updates are signed
-  (tauri-plugin-updater 2.12+, signed versions required).
+- **Launcher stack (decided 2026-11-12):** one native egui app, not Tauri. Smallest download (no web engine, no Node.js),
+  no WebKitGTK problems on Linux, a professional docking layout (`egui_dock`), and 3D views on our own wgpu renderer.
+  The Toolbox's Rust crates (formats, game data, core) move in; its React screens are rebuilt in egui. Heavy parts
+  (Rust toolchain, DS toolchain) stay optional downloads with signed manifests.
 
 ## Milestones
 
 | # | Milestone | Contents | Status |
 |---|---|---|---|
 | 1 | Lighter builds (0.7.1) | Generator on all cores, prebuilt generator, compile jobs by memory, installer archives removed, readable-source toggle, no console windows. First build 6 min → 4 min 18 s, game folder 342 → 157 MB, race identical | Done |
-| 2 | Build page and decomp-only path | Obvious component toggles with sizes; source and assets without a compiler | Next |
+| 2 | Decomp-only path | Source and assets without a compiler (76 s, no toolchain); Build card offers it; full Build page with component toggles comes with milestone 4 | Done (0.8.0) |
 | 3 | Saves | Import save (shows its progress; melonDS/flashcart .sav, DeSmuME .dsv), export, unlock all on a separate test save; per-user data no longer copied into portable installs | Done |
-| 4 | One app | Launcher moves to Tauri + React; Toolbox becomes an on-demand tab | Planned |
+| 3b | Profiles | Each profile has its own mods, textures, settings, save and game folder; switch freely; originals never touched; the launcher reopens where you left off (profile, project, tab) | Next |
+| 4 | One app | Docking egui app: Build page with obvious component toggles (sizes, times), Toolbox rebuilt as tabs, mod projects as tabs (open/save), tied to profiles | Planned |
 | 5 | Mod API with two backends | Hooks on named functions (replace/before/after/decision/events), `mod.toml`, conflict check; PC build; DS backend first via NCPatcher with generated C stubs, then our own injector on ds-rom; DS-compatibility check (code size, heap, hardware limits); BPS/xdelta export | Planned |
-| 5b | First-party example mods | Real 200cc, item-distribution editor, alt skins, speedrun quality-of-life, music/cup tables as data | Planned |
+| 5b | First-party example mods | Smarter CPU racers (DS tier + extra features when the 133 MHz DSi clock is detected), tricks anywhere (when the kart gets real air, no track edits), real 200cc, item-distribution editor, alt skins, speedrun quality-of-life, music/cup tables as data | Planned |
 | 6 | Community | Mod sharing, templates, docs for modders and their AI tools | Planned |
 | ∞ | Readability and decoupling | More functions as plain, typed, structured Rust without the simulated DS; smaller, faster builds as a result | Ongoing |
 
