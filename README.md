@@ -29,6 +29,8 @@ straight into your game.
 | **Readable Rust**: plain Rust without the simulated DS | 🟡 In progress. 39% of functions have real parameters and 20% no longer use the simulated CPU. Now testing a route that runs converted code directly on the game's memory. |
 | **MKDSrust Toolbox** (asset editor) | ⏸ Paused. |
 
+Where this is going: **[the roadmap](docs/ROADMAP.md)**, MKDSrust as the complete modding tool for Mario Kart DS.
+
 Windows and Linux both have a release launcher; a Linux build plays the same race frame for frame as the Windows build. macOS is untested.
 
 ## Quick start
