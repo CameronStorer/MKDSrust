@@ -165,10 +165,19 @@ Keep filenames; replacement dimensions must be an integer multiple from 1–8 of
 
 ### Save files
 
-Progress saves automatically under the platform data directory in
-`MKDSrust/saves/<original ROM sha1>.sav`. Use **Open save folder** in launcher settings.
+Progress saves automatically in the data folder, as `saves/<original ROM sha1>.sav`.
+The launcher's **Saves** card (on Home) shows what a save holds (Grand Prix trophies and grades, unlocked cups,
+characters, karts and Mirror, missions, time trials) and can:
+
+- **Import save…**: a melonDS or flashcart `.sav`, a DeSmuME `.dsv` (its footer is removed) or a save from an
+  earlier MKDSrust install. It is checked first, and your current save is copied to `saves/backup/` before it is
+  replaced. (New portable installs no longer copy data from the per-user folder; import your save instead.)
+- **Export save…**: a raw `.sav` that emulators and flashcarts read.
+- **Unlock all (for testing)**: makes a separate test save, `saves/<sha1>.unlocked.sav`, from yours with every
+  cup in every class, Mirror, all karts and the four secret characters unlocked. Records are not changed, and your
+  own save is never touched: switch between **My save** and **Test save** at any time.
+
 A flat 256 KiB `save.sav` beside the executable is imported if no user save exists.
-Compatible flat DeSmuME/melonDS saves can be copied to the user save path.
 `MKDS_SAVE=off` disables saving; `MKDS_SAVE=<path>` chooses another file.
 Record/replay sessions use blank in-memory saves.
 

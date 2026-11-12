@@ -8,6 +8,7 @@ pub mod dsfiles;
 #[cfg(feature = "diff")]
 pub mod modding;
 pub mod modpkg;
+pub mod mkds_save;
 
 extern crate self as mkds_builder;
 pub mod build;

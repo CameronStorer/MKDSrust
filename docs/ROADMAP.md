@@ -82,7 +82,7 @@ _Status: draft of 2026-11-11, based on four research reports in [docs/research/]
 |---|---|---|---|
 | 1 | Lighter builds (0.7.1) | Generator on all cores, prebuilt generator, compile jobs by memory, installer archives removed, readable-source toggle, no console windows. First build 6 min → 4 min 18 s, game folder 342 → 157 MB, race identical | Done |
 | 2 | Build page and decomp-only path | Obvious component toggles with sizes; source and assets without a compiler | Next |
-| 3 | Saves | Import save (shows its progress), unlock all on a copy | Next |
+| 3 | Saves | Import save (shows its progress; melonDS/flashcart .sav, DeSmuME .dsv), export, unlock all on a separate test save; per-user data no longer copied into portable installs | Done |
 | 4 | One app | Launcher moves to Tauri + React; Toolbox becomes an on-demand tab | Planned |
 | 5 | Mod API with two backends | Hooks on named functions (replace/before/after/decision/events), `mod.toml`, conflict check; PC build; DS backend first via NCPatcher with generated C stubs, then our own injector on ds-rom; DS-compatibility check (code size, heap, hardware limits); BPS/xdelta export | Planned |
 | 5b | First-party example mods | Real 200cc, item-distribution editor, alt skins, speedrun quality-of-life, music/cup tables as data | Planned |

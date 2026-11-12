@@ -316,46 +316,24 @@ pub fn generator(data: &Path, source: &Path) -> Option<PathBuf> {
     Some(exe)
 }
 
-/// Select storage before any cached shared path is read. Migration always preserves originals.
-pub fn initialize() {
-    let Some(exe) = std::env::current_exe().ok() else { return };
+/// The per-user data folder older launchers used (and non-portable installs still use).
+pub fn legacy_dir() -> Option<PathBuf> {
     // Linux: the XDG data folder (~/.local/share/MKDSrust) when the launcher's own folder is not writable.
-    let legacy = if cfg!(windows) { std::env::var_os("APPDATA").map(PathBuf::from) } else {
+    let base = if cfg!(windows) { std::env::var_os("APPDATA").map(PathBuf::from) } else {
         std::env::var_os("XDG_DATA_HOME").map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
-    }.unwrap_or_else(|| PathBuf::from(".")).join("MKDSrust");
+    };
+    base.map(|b| b.join("MKDSrust"))
+}
+
+/// Select storage before any cached shared path is read. A new portable install starts with an empty data folder:
+/// data in the per-user folder is never copied or changed (saves come in through Home > Saves > Import save).
+pub fn initialize() {
+    let Some(exe) = std::env::current_exe().ok() else { return };
+    let legacy = legacy_dir().unwrap_or_else(|| PathBuf::from(".").join("MKDSrust"));
     let disabled = std::env::var_os("MKDSRUST_NOT_PORTABLE").is_some()
         || legacy.join("MKDSRUST_NOT_PORTABLE").exists();
     let (data, portable) = mkds_builder::paths::select(&exe, &legacy, disabled);
-    if portable && legacy.is_dir() && std::fs::read_dir(&data).map(|mut d| d.next().is_none()).unwrap_or(false) {
-        let answer = rfd::MessageDialog::new().set_title("Existing MKDSrust data")
-            .set_description("Copy existing data into this portable install? Yes: settings, controls, saves and launcher preferences. No: copy everything, including toolchain and cache (may take several minutes). Cancel: start fresh. Originals are always retained.")
-            .set_buttons(rfd::MessageButtons::YesNoCancel).show();
-        let result = match answer {
-            rfd::MessageDialogResult::Yes => {
-                (|| -> std::io::Result<()> {
-                    for name in ["settings.txt", "controls.txt", "launcher.json", "saves"] {
-                        let src = legacy.join(name); let dst = data.join(name);
-                        if src.is_dir() { mkds_builder::controls::migrate_data(&src, &dst)?; }
-                        else if src.is_file() { std::fs::copy(src, dst)?; }
-                    }
-                    Ok(())
-                })()
-            }
-            rfd::MessageDialogResult::No => {
-                mkds_builder::controls::migrate_data(&legacy, &data).and_then(|_| {
-                    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-                        mkds_builder::controls::migrate_data(&PathBuf::from(local).join("MKDSrust/cache"), &data.join("cache"))?;
-                    }
-                    Ok(())
-                })
-            }
-            _ => Ok(()),
-        };
-        if let Err(e) = result {
-            rfd::MessageDialog::new().set_title("Migration incomplete").set_description(format!("{e}\nOriginal data is intact. Copied files remain available.")).show();
-        }
-    }
     if portable {
         let prefs = data.join("launcher.json");
         if let Ok(bytes) = std::fs::read(&prefs) {
