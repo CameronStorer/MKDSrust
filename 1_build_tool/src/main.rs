@@ -66,6 +66,10 @@ struct Args {
     /// Do not keep the generated Rust source tree in the bundle (it is kept by default)
     #[arg(long)]
     no_source: bool,
+    /// With --build: stage the readable source and assets only, without compiling the game (no Rust toolchain
+    /// needed when --generator is given)
+    #[arg(long, requires = "build", conflicts_with_all = ["run", "no_source", "with_acceptance"])]
+    source_only: bool,
     /// Verification only: also build the acceptance executable (adaptive race driver on generated code)
     #[arg(long)]
     with_acceptance: bool,
@@ -370,6 +374,7 @@ fn run() -> Result<i32, BuildError> {
                 jobs: args.jobs,
                 with_interpreter: args.with_interpreter,
                 generator: args.generator.clone(),
+                source_only: args.source_only,
                 cache_dir: if args.no_cache {
                     None
                 } else {
@@ -382,6 +387,10 @@ fn run() -> Result<i32, BuildError> {
     };
     if args.run {
         return build::launch(&bundle, &args.course.into_iter().collect::<Vec<_>>());
+    }
+    if args.source_only {
+        println!("Source: {}\nAssets: {}", bundle.join("source").display(), bundle.join("assets").display());
+        return Ok(0);
     }
     println!(
         "Launch: {}",
@@ -410,5 +419,14 @@ mod defaults_tests {
         assert!(Args::try_parse_from(["builder", "--timing", "exact"]).is_ok());
         assert!(Args::try_parse_from(["builder", "--timing", "native"]).is_ok());
         assert!(Args::try_parse_from(["builder", "--timing", "invalid"]).is_err());
+    }
+
+    #[test]
+    fn source_only_is_a_build_mode_without_executables() {
+        assert!(Args::try_parse_from(["builder", "x.nds", "--build", "--source-only"]).is_ok());
+        assert!(Args::try_parse_from(["builder", "x.nds", "--source-only"]).is_err(), "needs --build");
+        for extra in ["--run", "--no-source", "--with-acceptance"] {
+            assert!(Args::try_parse_from(["builder", "x.nds", "--build", "--source-only", extra]).is_err(), "{extra}");
+        }
     }
 }

@@ -359,6 +359,7 @@ fn start_build(info: RomInfo, cfg: &Config) -> Screen {
                     jobs: None,
                     with_interpreter: false,
                     generator: None,
+                    source_only: false,
                     cache_dir: Some(build::default_cache_dir()),
                 },
                 &mut log,

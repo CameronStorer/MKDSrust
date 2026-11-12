@@ -96,6 +96,50 @@ pub struct RecompileOptions {
     /// A ready-built `mkds_gen` from exactly this source (the release launcher carries one): step 2 then skips
     /// compiling the generator. `None`: build it.
     pub generator: Option<PathBuf>,
+    /// Source and assets only (no compiler): rip, generate, and stage `source/` (always kept), `assets/` and the
+    /// reports with a `generated_source` manifest; skips compiling and the executables. Cargo is never run when
+    /// `generator` is given; without one, Cargo builds the generator or the build stops with a clear message.
+    pub source_only: bool,
+}
+
+/// `artifact_kind` of a source-and-assets-only folder (no executable yet); a playable build is
+/// `generated_native_game`.
+pub const SOURCE_ONLY_KIND: &str = "generated_source";
+
+/// Whether the folder holds a source-and-assets-only build (the launcher then offers "Build playable game").
+#[allow(dead_code)] // used by the launcher, not by the builder binary
+pub fn is_source_only(bundle: &Path) -> bool {
+    std::fs::read(bundle.join("manifest.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .is_some_and(|m| m["artifact_kind"] == SOURCE_ONLY_KIND)
+}
+
+/// Which generator a build runs: the given ready-built one, or one Cargo builds first.
+#[derive(Debug, PartialEq)]
+enum GeneratorPlan {
+    Given(PathBuf),
+    Build(PathBuf),
+}
+
+/// Decided before anything is ripped, so a source-only build without a generator or a toolchain stops at once.
+fn generator_plan(
+    given: Option<&Path>,
+    cargo: &Result<PathBuf, BuildError>,
+    source_only: bool,
+) -> Result<GeneratorPlan, BuildError> {
+    if let Some(g) = given.filter(|g| g.is_file()) {
+        return Ok(GeneratorPlan::Given(g.to_path_buf()));
+    }
+    match cargo {
+        Ok(c) => Ok(GeneratorPlan::Build(c.clone())),
+        Err(_) if source_only => err(
+            "Source and assets need the generator that comes with the release launcher (or --generator <mkds_gen>); \
+             without it, a Rust toolchain is needed to build the generator, and none was found. Use the release \
+             launcher, or install Rust (https://rustup.rs).",
+        ),
+        Err(e) => Err(BuildError(e.0.clone())),
+    }
 }
 
 /// Every generated crate's `recomp` dependency without default features. Cargo unifies features across
@@ -637,6 +681,9 @@ pub fn recompile_with_toolchain(
     toolchain: Option<&Toolchain>,
     log: &mut dyn FnMut(String),
 ) -> Result<PathBuf, BuildError> {
+    if opts.source_only && opts.with_acceptance {
+        return err("The acceptance tool is an executable: it cannot be built with source and assets only.");
+    }
     if !info.reference_match && !opts.allow_unverified {
         return err(
             "This ROM differs from the reference. For an experimental modified-ROM build, allow unverified ROMs.",
@@ -664,10 +711,14 @@ pub fn recompile_with_toolchain(
             "Source checkout needs 2_native_game/Cargo.toml, 2_native_game/Cargo.lock, and address-only dictionary/FUNCTION_BOUNDARIES.csv.",
         );
     }
+    // Resolved lazily: a source-only build with a ready generator never needs (or runs) Cargo.
     let cargo = match toolchain {
-        Some(t) => t.cargo.clone(),
-        None => cargo_path()?,
+        Some(t) => Ok(t.cargo.clone()),
+        None => cargo_path(),
     };
+    let plan = generator_plan(opts.generator.as_deref(), &cargo, opts.source_only)?;
+    let keep_source = opts.keep_source || opts.source_only;
+    let steps = if opts.source_only { 4 } else { 5 };
     let parent = output
         .parent()
         .ok_or_else(|| BuildError("Output has no parent directory.".into()))?;
@@ -721,7 +772,7 @@ pub fn recompile_with_toolchain(
     };
 
     // 1. Rip the ROM's files into the bundle's assets/ (spec: https://github.com/CameronStorer/MKDSrust-Docs).
-    log("[1/5] Ripping the ROM's files into assets/.".into());
+    log(format!("[1/{steps}] Ripping the ROM's files into assets/."));
     let rom_bytes = std::fs::read(&info.path)?;
     if mkds_builder::rom::hex(&<sha2::Sha256 as sha2::Digest>::digest(&rom_bytes)) != info.sha256 {
         return err("ROM changed after inspection; inspect it again.");
@@ -731,36 +782,39 @@ pub fn recompile_with_toolchain(
     std::fs::rename(stage.path().join("rip/assets"), bundle.join("assets"))?;
 
     // 2. Build and run the production generator with explicit inputs (no implicit ROM/metadata).
-    let generator = if let Some(g) = opts.generator.as_ref().filter(|g| g.is_file()) {
-        log("[2/5] Using the generator that comes with the launcher.".into());
-        g.clone()
-    } else {
-        log("[2/5] Building the generator.".into());
-        let mut gen_build = Command::new(&cargo);
-        gen_build
-            .args([
-                "build",
-                "--release",
-                "--locked",
-                "--features",
-                "gen",
-                "--bin",
-                "mkds_gen",
-            ])
-            .arg("--manifest-path")
-            .arg(&recomp_manifest)
-            .arg("--target-dir")
-            .arg(&gen_target)
-            .current_dir(&opts.source)
-            .env_remove("MKDS_ROM")
-            .env_remove("MKDS_FUNCTIONS")
-            .env_remove("MKDS_LIFT_CAP");
-        offline(&mut gen_build);
-        run_cargo(gen_build, log)?
-            .remove("mkds_gen")
-            .ok_or_else(|| BuildError("Cargo did not report the mkds_gen executable.".into()))?
+    let generator = match plan {
+        GeneratorPlan::Given(g) => {
+            log(format!("[2/{steps}] Using the generator that comes with the launcher."));
+            g
+        }
+        GeneratorPlan::Build(cargo) => {
+            log(format!("[2/{steps}] Building the generator."));
+            let mut gen_build = Command::new(&cargo);
+            gen_build
+                .args([
+                    "build",
+                    "--release",
+                    "--locked",
+                    "--features",
+                    "gen",
+                    "--bin",
+                    "mkds_gen",
+                ])
+                .arg("--manifest-path")
+                .arg(&recomp_manifest)
+                .arg("--target-dir")
+                .arg(&gen_target)
+                .current_dir(&opts.source)
+                .env_remove("MKDS_ROM")
+                .env_remove("MKDS_FUNCTIONS")
+                .env_remove("MKDS_LIFT_CAP");
+            offline(&mut gen_build);
+            run_cargo(gen_build, log)?
+                .remove("mkds_gen")
+                .ok_or_else(|| BuildError("Cargo did not report the mkds_gen executable.".into()))?
+        }
     };
-    log("[3/5] Generating Rust from the ROM's machine code (every metadata entry).".into());
+    log(format!("[3/{steps}] Generating Rust from the ROM's machine code (every metadata entry)."));
     let mut gen_cmd = Command::new(&generator);
     gen_cmd
         .arg("--rom")
@@ -942,86 +996,82 @@ pub fn recompile_with_toolchain(
     )?;
     // Seeded from the native host's reviewed lock; only the generated crates are added.
     std::fs::copy(&native_lock, ws.join("Cargo.lock"))?;
-    let mut update = Command::new(&cargo);
-    update
-        .args(["update", "--workspace", "--manifest-path"])
-        .arg(ws.join("Cargo.toml"));
-    offline(&mut update);
-    run_cargo_output(update, log, false)?;
-    let (ws, target_dir) = match &rom_cache {
-        Some(c) => {
-            let cached = c.join("workspace");
-            let (written, unchanged, removed) = sync_tree(&ws, &cached)?;
-            log(format!(
-                "Build cache {}: {written} files changed, {unchanged} unchanged, {removed} removed.",
-                c.display()
-            ));
-            (cached, c.join("target"))
-        }
-        None => (ws, stage.path().join("target")),
-    };
-
-    log("[4/5] Compiling the generated workspace (this takes a while).".into());
-    let mut build_cmd = Command::new(&cargo);
-    build_cmd
-        .args(["build", "--release", "--locked", "-j"])
-        .arg(opts.jobs.unwrap_or_else(default_jobs).max(1).to_string())
-        .arg("--manifest-path")
-        .arg(ws.join("Cargo.toml"))
-        .arg("--target-dir")
-        .arg(&target_dir)
-        .current_dir(stage.path());
-    offline(&mut build_cmd);
-    let mut built = run_cargo(build_cmd, log)?;
-    let exe = built
-        .remove("game")
-        .ok_or_else(|| BuildError("Cargo did not report a built game executable.".into()))?;
-    let acceptance =
-        if opts.with_acceptance {
-            Some(built.remove("acceptance").ok_or_else(|| {
-                BuildError("Cargo did not report the acceptance executable.".into())
-            })?)
-        } else {
-            None
+    // 4. Compile (playable builds only). Source and assets stop before anything that runs Cargo: the seeded lock
+    // stays as it is, and the first `cargo build` adds the generated crates (path crates, nothing downloaded).
+    let mut ws = ws;
+    let mut compiled = None;
+    if opts.source_only {
+        log("Source and assets only: the game is not compiled (the first build completes Cargo.lock).".into());
+    } else {
+        let cargo = cargo?;
+        let mut update = Command::new(&cargo);
+        update
+            .args(["update", "--workspace", "--manifest-path"])
+            .arg(ws.join("Cargo.toml"));
+        offline(&mut update);
+        run_cargo_output(update, log, false)?;
+        let target_dir = match &rom_cache {
+            Some(c) => {
+                let cached = c.join("workspace");
+                let (written, unchanged, removed) = sync_tree(&ws, &cached)?;
+                log(format!(
+                    "Build cache {}: {written} files changed, {unchanged} unchanged, {removed} removed.",
+                    c.display()
+                ));
+                ws = cached;
+                c.join("target")
+            }
+            None => stage.path().join("target"),
         };
 
-    log("[5/5] Staging the bundle.".into());
+        log("[4/5] Compiling the generated workspace (this takes a while).".into());
+        let mut build_cmd = Command::new(&cargo);
+        build_cmd
+            .args(["build", "--release", "--locked", "-j"])
+            .arg(opts.jobs.unwrap_or_else(default_jobs).max(1).to_string())
+            .arg("--manifest-path")
+            .arg(ws.join("Cargo.toml"))
+            .arg("--target-dir")
+            .arg(&target_dir)
+            .current_dir(stage.path());
+        offline(&mut build_cmd);
+        let mut built = run_cargo(build_cmd, log)?;
+        let exe = built
+            .remove("game")
+            .ok_or_else(|| BuildError("Cargo did not report a built game executable.".into()))?;
+        let acceptance =
+            if opts.with_acceptance {
+                Some(built.remove("acceptance").ok_or_else(|| {
+                    BuildError("Cargo did not report the acceptance executable.".into())
+                })?)
+            } else {
+                None
+            };
+        compiled = Some((exe, acceptance));
+    }
+
+    log(format!(
+        "[{steps}/{steps}] Staging the {}.",
+        if opts.source_only { "source and assets" } else { "bundle" }
+    ));
     let (generated_sha, _) = hash_generated(&ws)?;
     std::fs::copy(ws.join("generation.json"), bundle.join("generation.json"))?;
     std::fs::copy(ws.join("coverage.csv"), bundle.join("coverage.csv"))?;
-    if opts.keep_source {
+    if keep_source {
         copy_tree(&ws, &bundle.join("source"))?;
         vendor_runtime(&opts.source, &bundle.join("source"))?;
-        std::fs::write(bundle.join("source/README.txt"), SOURCE_README)?;
+        std::fs::write(bundle.join("source/README.txt"), source_readme(opts.source_only))?;
     }
-    let exe_name = exe.file_name().unwrap().to_string_lossy().into_owned();
-    std::fs::copy(&exe, bundle.join(&exe_name))?;
-    // Saves and settings stay next to the game, so the whole folder can be moved or copied.
-    std::fs::create_dir_all(bundle.join("data"))?;
-    let acceptance_name = match &acceptance {
-        Some(a) => {
-            let name = a.file_name().unwrap().to_string_lossy().into_owned();
-            std::fs::copy(a, bundle.join(&name))?;
-            Some(name)
-        }
-        None => None,
-    };
-    let launcher_name = if cfg!(windows) { "play.exe" } else { "play" };
-    std::fs::copy(std::env::current_exe()?, bundle.join(launcher_name))?;
     let functions = generation["lifted_functions"].as_u64().unwrap_or(0);
-    let manifest_data = json!({
+    let mut manifest_data = json!({
         "format_version": 4,
-        "artifact_kind": "generated_native_game",
+        "artifact_kind": if opts.source_only { SOURCE_ONLY_KIND } else { "generated_native_game" },
         "uses_reference_port": false,
         "rom": info,
-        "executable": exe_name,
-        "launcher": launcher_name,
-        "launch_args": ["--assets", "{assets}"],
         "runtime_reads_rom": false,
         "arm7": if has_arm7 { "lifted" } else { "interpreted (generator produced no LIFTED7)" },
         "interpreter_compiled_in": opts.with_interpreter,
         "readable_names": !dictionary_tables(&opts.source).is_empty(),
-        "executable_sha256": sha256_file(&exe)?,
         "metadata_sha256": sha256_file(&metadata)?,
         "cargo_lock_sha256": sha256_file(&ws.join("Cargo.lock"))?,
         "generation_status": generation["status"],
@@ -1034,7 +1084,7 @@ pub fn recompile_with_toolchain(
         "coverage_report": "coverage.csv",
         "coverage_sha256": sha256_file(&bundle.join("coverage.csv"))?,
         "generated_source_sha256": generated_sha,
-        "generated_source": if opts.keep_source { json!("source") } else { json!(null) },
+        "generated_source": if keep_source { json!("source") } else { json!(null) },
         "mods": mods.iter().map(|m| json!({ "id": m.id, "version": m.version })).collect::<Vec<_>>(),
         "assets": {
             "path": "assets",
@@ -1043,9 +1093,41 @@ pub fn recompile_with_toolchain(
             "assets_sha256": ripped.manifest["assets_sha256"],
             "manifest_sha256": sha256_file(&bundle.join("assets/manifest.json"))?,
         },
-        "build_profile": "release",
-        "acceptance_tool": acceptance_name,
     });
+    let fields = manifest_data.as_object_mut().unwrap();
+    match &compiled {
+        None => {
+            // No executable: launchers offer "Build playable game" instead of Play.
+            fields.insert("playable".into(), json!(false));
+            fields.insert(
+                "cargo_lock".into(),
+                json!("seeded from 2_native_game/native; the first build adds the generated crates"),
+            );
+        }
+        Some((exe, acceptance)) => {
+            let exe_name = exe.file_name().unwrap().to_string_lossy().into_owned();
+            std::fs::copy(exe, bundle.join(&exe_name))?;
+            // Saves and settings stay next to the game, so the whole folder can be moved or copied.
+            std::fs::create_dir_all(bundle.join("data"))?;
+            let acceptance_name = match acceptance {
+                Some(a) => {
+                    let name = a.file_name().unwrap().to_string_lossy().into_owned();
+                    std::fs::copy(a, bundle.join(&name))?;
+                    Some(name)
+                }
+                None => None,
+            };
+            let launcher_name = if cfg!(windows) { "play.exe" } else { "play" };
+            std::fs::copy(std::env::current_exe()?, bundle.join(launcher_name))?;
+            fields.insert("playable".into(), json!(true));
+            fields.insert("executable".into(), json!(exe_name));
+            fields.insert("launcher".into(), json!(launcher_name));
+            fields.insert("launch_args".into(), json!(["--assets", "{assets}"]));
+            fields.insert("executable_sha256".into(), json!(sha256_file(exe)?));
+            fields.insert("build_profile".into(), json!("release"));
+            fields.insert("acceptance_tool".into(), json!(acceptance_name));
+        }
+    }
     std::fs::write(
         bundle.join("manifest.json"),
         serde_json::to_string_pretty(&manifest_data).unwrap() + "\n",
@@ -1055,11 +1137,30 @@ pub fn recompile_with_toolchain(
     }
     std::fs::rename(&bundle, &output)?;
     log(format!(
-        "Native build: {} ({functions} generated functions, status {})",
+        "{}: {} ({functions} generated functions, status {})",
+        if opts.source_only { "Source and assets" } else { "Native build" },
         output.display(),
         generation["status"].as_str().unwrap_or("unknown")
     ));
     Ok(output)
+}
+
+/// `source/README.txt`: what is where, then how to build it. A source-only folder's Cargo.lock does not list the
+/// generated crates yet, so its first build cannot be `--locked`.
+fn source_readme(source_only: bool) -> String {
+    let build = if source_only {
+        "Build the playable game (from this folder; it can be moved anywhere first; needs Rust, https://rustup.rs):
+    cargo build --release
+          The first build adds the generated crates (local folders) to Cargo.lock; every other dependency stays
+          at the version locked there. Later builds can add --locked --offline.
+          Or let the MKDSrust launcher do it: choose \"Playable PC game\" on Home and build.
+"
+    } else {
+        "Rebuild (from this folder; it can be moved anywhere first):
+    cargo build --release --locked --offline     (drop --offline on a machine without cached dependencies)
+"
+    };
+    format!("{SOURCE_README}{build}{SOURCE_README_TAIL}")
 }
 
 /// Placed in the bundle's `source/`: how to read and rebuild the generated code.
@@ -1088,9 +1189,8 @@ calls; `R::ld32`/`R::st32` etc. are the game's memory accesses (DS addresses).
 runtime/  the MKDSrust runtime this code builds against (recomp, mkds_native, mkds_builder; GPL-3.0-or-later),
           copied here so the folder is self-contained.
 
-Rebuild (from this folder; it can be moved anywhere first):
-    cargo build --release --locked --offline     (drop --offline on a machine without cached dependencies)
-Environment switches when running: MKDS_T1=off (exact translations only), MKDS_FLAT=1 (no fibers).
+";
+const SOURCE_README_TAIL: &str = "Environment switches when running: MKDS_T1=off (exact translations only), MKDS_FLAT=1 (no fibers).
 This code is derived from copyrighted game data: keep it for your own use and do not distribute it.
 ";
 
@@ -1326,6 +1426,9 @@ fn launch_impl(
     let m: serde_json::Value =
         serde_json::from_slice(&std::fs::read(bundle.join("manifest.json"))?)
             .map_err(|e| BuildError(format!("Bad manifest: {e}")))?;
+    if m["artifact_kind"] == SOURCE_ONLY_KIND {
+        return err("This folder holds the game's source and assets only. Build the playable PC game to play.");
+    }
     let rom = m["rom"]["path"]
         .as_str()
         .ok_or_else(|| BuildError("Manifest lacks ROM path.".into()))?;
@@ -1748,7 +1851,66 @@ exclude = [\"runtime\"]
             cache_dir: None,
             with_interpreter: false,
             generator: None,
+            source_only: false,
         }
+    }
+
+    #[test]
+    fn source_only_uses_the_given_generator_and_never_needs_cargo() {
+        let d = tempfile::tempdir().unwrap();
+        let generator = d.path().join("mkds_gen.exe");
+        std::fs::write(&generator, b"").unwrap();
+        let no_cargo = err::<PathBuf>("Cargo is missing.");
+        assert_eq!(
+            generator_plan(Some(&generator), &no_cargo, true).unwrap(),
+            GeneratorPlan::Given(generator.clone())
+        );
+        // no generator and no toolchain: a clear message before anything is ripped
+        let e = generator_plan(None, &no_cargo, true).unwrap_err().0;
+        assert!(e.contains("generator that comes with the release launcher"), "{e}");
+        let e = generator_plan(Some(&d.path().join("missing.exe")), &no_cargo, true).unwrap_err().0;
+        assert!(e.contains("release launcher"), "{e}");
+        // a playable build reports the missing toolchain itself
+        assert_eq!(generator_plan(None, &no_cargo, false).unwrap_err().0, "Cargo is missing.");
+        let cargo = Ok(PathBuf::from("cargo"));
+        assert_eq!(generator_plan(None, &cargo, true).unwrap(), GeneratorPlan::Build("cargo".into()));
+    }
+
+    #[test]
+    fn source_only_refuses_the_acceptance_tool() {
+        let d = tempfile::tempdir().unwrap();
+        let rom = d.path().join("x.nds");
+        std::fs::write(&rom, b"abc").unwrap();
+        let out = d.path().join("out");
+        let mut opts = options(d.path(), &out);
+        opts.source_only = true;
+        opts.with_acceptance = true;
+        let e = recompile(&fake_info(&rom, true), &opts, &mut |_| {}).unwrap_err().0;
+        assert!(e.contains("acceptance"), "{e}");
+        assert!(!out.exists());
+    }
+
+    #[test]
+    fn source_only_folder_is_recognised_and_not_launched() {
+        let d = tempfile::tempdir().unwrap();
+        let m = json!({"artifact_kind": SOURCE_ONLY_KIND, "playable": false, "rom": {"path": "x.nds", "sha256": "00"}});
+        std::fs::write(d.path().join("manifest.json"), m.to_string()).unwrap();
+        assert!(is_source_only(d.path()));
+        let e = launch(d.path(), &[]).unwrap_err().0;
+        assert!(e.contains("source and assets only"), "{e}");
+        let other = tempfile::tempdir().unwrap();
+        assert!(!is_source_only(other.path()));
+    }
+
+    #[test]
+    fn source_only_readme_does_not_promise_a_locked_first_build() {
+        let only = source_readme(true);
+        let playable = source_readme(false);
+        assert!(only.starts_with(SOURCE_README) && playable.starts_with(SOURCE_README));
+        assert!(!only.contains("--locked --offline     ("), "the seeded lock lacks the generated crates");
+        assert!(only.contains("cargo build --release\n"));
+        assert!(playable.contains("cargo build --release --locked --offline"));
+        assert!(only.ends_with(SOURCE_README_TAIL) && playable.ends_with(SOURCE_README_TAIL));
     }
 
     #[test]

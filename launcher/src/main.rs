@@ -36,6 +36,9 @@ struct Preferences {
     /// Copy the readable generated Rust into the game folder (`source/`, about 210 MB). Off by default: players
     /// don't need it, and it is the largest part of a build.
     readable_source: bool,
+    /// Build only the readable source and the extracted assets (no compiler, no toolchain download); otherwise the
+    /// playable PC game.
+    source_only: bool,
 }
 fn build_date(stored: &str) -> String {
     // Old launcher versions stored Debug(SystemTime). Preserve a readable migration.
@@ -358,11 +361,17 @@ impl Launcher {
                     self.busy = false;
                     match result {
                         Ok(p) => {
+                            let source_only = build::is_source_only(&p);
                             self.prefs.output = p;
                             self.prefs.fingerprint = stamp;
                             self.prefs.last_build = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs().to_string();
                             self.wizard = 4;
-                            self.message = "Build complete. Ready to play.".into();
+                            self.message = if source_only {
+                                "Source and assets ready: open them from Source code on Home."
+                            } else {
+                                "Build complete. Ready to play."
+                            }
+                            .into();
                             self.save();
                         }
                         Err(e) => {
@@ -394,7 +403,8 @@ impl Launcher {
         };
         let data = self.dir.clone();
         let system = self.prefs.system_toolchain;
-        let keep_source = self.prefs.readable_source;
+        let source_only = self.prefs.source_only;
+        let keep_source = self.prefs.readable_source || source_only;
         let output = build_folder(&self.prefs.output);
         let stamp = fingerprint();
         let mods = self.prefs.mods.clone();
@@ -414,7 +424,9 @@ impl Launcher {
             };
             let prepared = (|| {
                 let source = portable::source(&data, &mut logger)?;
-                let toolchain = if system {
+                // Source and assets need no compiler: the launcher's generator does the work. Only a development
+                // launcher (no generator inside) builds it, with a toolchain that is already installed.
+                let toolchain = if system || (source_only && !portable::ready(&data)) {
                     None
                 } else {
                     Some(portable::install(&data, &mut logger)?)
@@ -457,6 +469,7 @@ impl Launcher {
                 cache_dir: Some(build::default_cache_dir()),
                 with_interpreter: false,
                 generator,
+                source_only,
             };
             let result = std::panic::catch_unwind(|| {
                 build::recompile_with_toolchain(&info, &opts, toolchain.as_ref(), &mut |s| {
@@ -566,18 +579,42 @@ impl Launcher {
         ui.add_space(10.);
 
         // 2. Build
+        let source_only_built = !built && build::is_source_only(&self.prefs.output);
         card().show(ui, |ui| {
             ui.set_min_width(ui.available_width());
-            step(ui, "2", "Build", built && !outdated);
+            step(ui, "2", "Build", (built && !outdated) || source_only_built);
+            ui.add_enabled_ui(!self.busy, |ui| {
+                let mut changed = ui
+                    .radio_value(&mut self.prefs.source_only, true, "Source and assets (about 1 minute, no compiler)")
+                    .changed();
+                changed |= ui.radio_value(&mut self.prefs.source_only, false, "Playable PC game").changed();
+                if changed {
+                    self.save();
+                }
+            });
             ui.label(if outdated {
                 "Your game is built, but MKDSrust, your ROM or your mod selection changed since. Rebuild to update it."
             } else if built {
                 "Your game is built and ready."
+            } else if source_only_built && !self.prefs.source_only {
+                "Your source and assets are ready. Build the playable game to play: it compiles the source on this computer."
+            } else if source_only_built {
+                "Your source and assets are ready (see Source code below). Choose Playable PC game to build the game itself."
+            } else if self.prefs.source_only {
+                "Translates the game into readable Rust and extracts its files on this computer. Nothing is compiled and no compiler is downloaded."
             } else {
                 "Translates the game into Rust and compiles it on this computer. The first build downloads a private Rust toolchain (several hundred MB) and takes several minutes; later builds are faster."
             });
             ui.horizontal(|ui| {
-                let label = if built { "Rebuild" } else { "Build game" };
+                let label = if self.prefs.source_only {
+                    "Build source and assets"
+                } else if built {
+                    "Rebuild"
+                } else if source_only_built {
+                    "Build playable game"
+                } else {
+                    "Build game"
+                };
                 if ui.add_enabled(verified && !self.busy, egui::Button::new(label)).clicked() {
                     self.start_build();
                 }
@@ -626,15 +663,18 @@ impl Launcher {
                     .color(Color32::GRAY),
             );
             let source = self.prefs.output.join("source");
-            let have = built && source.is_dir();
-            if ui
-                .checkbox(&mut self.prefs.readable_source, "Include the source in my builds (about 210 MB)")
-                .on_hover_text("Takes effect on the next build. Playing doesn't need it.")
-                .changed()
+            let have = (built || source_only_built) && source.is_dir();
+            if !self.prefs.source_only
+                && ui
+                    .checkbox(&mut self.prefs.readable_source, "Include the source in my game builds (about 210 MB)")
+                    .on_hover_text("Takes effect on the next build. Playing doesn't need it.")
+                    .changed()
             {
                 self.save();
             }
-            if !have && self.prefs.readable_source {
+            if !have && self.prefs.source_only {
+                ui.label(RichText::new("Build source and assets to create it.").color(Color32::GRAY));
+            } else if !have && self.prefs.readable_source {
                 ui.label(RichText::new("Rebuild to add the source to your game folder.").color(Color32::GRAY));
             }
             let open = |path: PathBuf| std::process::Command::new("explorer.exe").arg(path).spawn().map(|_| ());
@@ -647,7 +687,7 @@ impl Launcher {
                 if ui.add_enabled(have, egui::Button::new("How to read it")).clicked() {
                     let _ = std::process::Command::new("notepad.exe").arg(source.join("README.txt")).spawn();
                 }
-                if ui.add_enabled(built, egui::Button::new("Game folder")).clicked() {
+                if ui.add_enabled(built || source_only_built, egui::Button::new("Game folder")).clicked() {
                     if let Err(e) = open(self.prefs.output.clone()) {
                         self.message = e.to_string();
                     }
@@ -705,7 +745,7 @@ impl Launcher {
             if ui
                 .add_enabled(
                     self.info.as_ref().is_some_and(|i| i.reference_match),
-                    egui::Button::new("Build game"),
+                    egui::Button::new(if self.prefs.source_only { "Build source and assets" } else { "Build game" }),
                 )
                 .clicked()
             {
@@ -1027,10 +1067,21 @@ impl Launcher {
                     ui.label("Official Rust archives are checked against published SHA-256 checksums. Failed downloads can be retried and resumed.");
                     ui.label("Download size: several hundred MB; exact transferred and total bytes appear in the log.");
                     if portable::ready(&self.dir) || self.prefs.system_toolchain {
-                        if ui.button("Continue to build").clicked() { self.wizard = 3; }
-                    } else if ui.add_enabled(!self.busy, egui::Button::new("Install portable toolchain / Retry")).clicked() { self.install_toolchain(); }
+                        if ui.button("Continue to build").clicked() { self.prefs.source_only = false; self.wizard = 3; }
+                    } else if ui.add_enabled(!self.busy, egui::Button::new("Install portable toolchain / Retry")).clicked() { self.prefs.source_only = false; self.install_toolchain(); }
+                    ui.label("Only want the readable source and the game's files? They need no compiler.");
+                    if ui.add_enabled(!self.busy, egui::Button::new("Skip: source and assets only")).clicked() {
+                        self.prefs.source_only = true;
+                        self.save();
+                        self.wizard = 3;
+                    }
                 }
+                3 if self.prefs.source_only => { ui.heading("Generate the source and assets"); ui.label("Translates the game into readable Rust and extracts its files, in about a minute. Nothing is compiled."); self.rom_and_build(ui); }
                 3 => { ui.heading("Build your native game"); ui.label("The first build downloads crates.io dependencies. Keep this window open; compilation can take a while."); self.rom_and_build(ui); }
+                _ if build::is_source_only(&self.prefs.output) => {
+                    ui.heading("Your source and assets are ready"); ui.label("Generated locally from your ROM. Build the playable game from Home whenever you like.");
+                    if ui.button("Go to Home").clicked() { self.prefs.setup_done = true; self.save(); self.page = 0; }
+                }
                 _ => {
                     ui.heading("You're ready to play"); ui.label("Your game was built locally from your ROM.");
                     if ui.button("Go to Home").clicked() { self.prefs.setup_done = true; self.save(); self.page = 0; }
