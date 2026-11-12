@@ -417,6 +417,7 @@ fn run_internal(
         texture_pack: settings.texture_pack.clone(),
         dump_textures: settings.dump_textures.clone(),
         widescreen_mod: options.mods.iter().any(|m| m == "widescreen"),
+        icon: window::banner_icon(rom),
     };
     // The window needs the main thread; the game runs on a second one and meets it through `HostLink`.
     window::run(&title, display, move |link| emulate(rom, image, table, signatures, table7, &options, Some(link), bindings))?

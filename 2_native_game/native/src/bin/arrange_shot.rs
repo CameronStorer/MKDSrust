@@ -61,7 +61,7 @@ fn run() -> Result<(), String> {
     };
     let display = window::Display {
         settings, controls_path: None, scale: Some(scale), smooth: false, side_by_side: false, fullscreen: false,
-        texture_pack: None, dump_textures: None, widescreen_mod: true,
+        texture_pack: None, dump_textures: None, widescreen_mod: true, icon: None,
     };
     let margin = display.margin(true);
     let scene = arrange::Scene::of(phase);

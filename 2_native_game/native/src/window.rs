@@ -16,6 +16,103 @@ use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, PhysicalKey};
 use winit::window::{Fullscreen, Window, WindowId};
 
+/// The cartridge's own 32 x 32 icon from the ROM banner (header word 0x68): 4 x 4 tiles of 8 x 8 pixels,
+/// 4 bits per pixel (low nibble = left pixel) at banner + 0x20, 16 BGR555 colours at banner + 0x220, colour 0
+/// transparent. Returns RGBA bytes, or `None` for a ROM without a usable banner.
+pub fn banner_icon(rom: &[u8]) -> Option<Vec<u8>> {
+    let at = u32::from_le_bytes(rom.get(0x68..0x6C)?.try_into().ok()?) as usize;
+    if at == 0 {
+        return None;
+    }
+    let bits = rom.get(at + 0x20..at + 0x220)?;
+    let pal = rom.get(at + 0x220..at + 0x240)?;
+    let mut rgba = vec![0u8; 32 * 32 * 4];
+    for y in 0..32 {
+        for x in 0..32 {
+            let tile = (y / 8) * 4 + x / 8;
+            let byte = bits[tile * 32 + (y % 8) * 4 + (x % 8) / 2];
+            let index = if x % 2 == 0 { byte & 0xF } else { byte >> 4 } as usize;
+            if index == 0 {
+                continue;
+            }
+            let c = u16::from_le_bytes([pal[index * 2], pal[index * 2 + 1]]);
+            let five = |v: u16| ((v & 0x1F) as u8) << 3 | ((v & 0x1F) as u8) >> 2;
+            rgba[(y * 32 + x) * 4..][..4].copy_from_slice(&[five(c), five(c >> 5), five(c >> 10), 0xFF]);
+        }
+    }
+    rgba.iter().skip(3).step_by(4).any(|&a| a != 0).then_some(rgba)
+}
+
+/// The cartridge icon at `factor` times its size, pixels kept square (the icon is pixel art).
+fn scaled_icon(rgba: &[u8], factor: usize) -> Option<winit::window::Icon> {
+    let n = 32 * factor;
+    let mut out = vec![0u8; n * n * 4];
+    for y in 0..n {
+        for x in 0..n {
+            out[(y * n + x) * 4..][..4].copy_from_slice(&rgba[((y / factor) * 32 + x / factor) * 4..][..4]);
+        }
+    }
+    winit::window::Icon::from_rgba(out, n as u32, n as u32).ok()
+}
+
+/// The game window's app id (Wayland) and class (X11) on Linux.
+#[cfg(all(unix, not(target_os = "macos")))]
+const APP_ID: &str = "mkdsrust-game";
+
+/// Linux: installs (or refreshes) `mkdsrust-game.desktop` and the cartridge icon at 128 x 128 in the user's data
+/// folder (`~/.local/share`), so Wayland docks and task switchers show the cartridge icon for the game window. The
+/// entry is hidden from menus (the launcher has the visible one). Best effort: errors only lose the icon.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn desktop_entry(icon: Option<&[u8]>) {
+    let Some(share) = std::env::var_os("XDG_DATA_HOME").map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share"))) else { return };
+    let Ok(exe) = std::env::current_exe() else { return };
+    let update = |path: std::path::PathBuf, bytes: &[u8]| {
+        if std::fs::read(&path).ok().as_deref() != Some(bytes) {
+            let _ = std::fs::create_dir_all(path.parent().unwrap());
+            let _ = std::fs::write(&path, bytes);
+        }
+    };
+    let mut icon_name = "mkdsrust";
+    if let Some(rgba) = icon {
+        let (n, k) = (128usize, 4usize);
+        let mut big = vec![0u8; n * n * 4];
+        for y in 0..n {
+            for x in 0..n {
+                big[(y * n + x) * 4..][..4].copy_from_slice(&rgba[((y / k) * 32 + x / k) * 4..][..4]);
+            }
+        }
+        let mut png_bytes = Vec::new();
+        let mut encoder = png::Encoder::new(&mut png_bytes, n as u32, n as u32);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        if encoder.write_header().and_then(|mut w| w.write_image_data(&big)).is_ok() {
+            update(share.join("icons/hicolor/128x128/apps/mkdsrust-game.png"), &png_bytes);
+            icon_name = APP_ID;
+        }
+    }
+    let mut exec = String::new();
+    for c in exe.display().to_string().chars() {
+        if matches!(c, '"' | '`' | '$' | '\\') {
+            exec.push('\\');
+        }
+        exec.push(c);
+    }
+    let entry = [
+        "[Desktop Entry]".to_string(),
+        "Type=Application".into(),
+        "Name=MKDSrust game".into(),
+        format!("Exec=\"{exec}\""),
+        format!("Icon={icon_name}"),
+        "Terminal=false".into(),
+        "NoDisplay=true".into(),
+        format!("StartupWMClass={APP_ID}"),
+        String::new(),
+    ]
+    .join("\n");
+    update(share.join(format!("applications/{APP_ID}.desktop")), entry.as_bytes());
+}
+
 /// Decode the compile-time embedded RGBA icon; no runtime asset path is needed.
 fn brand_icon() -> winit::window::Icon {
     let decoder = png::Decoder::new(std::io::Cursor::new(
@@ -215,6 +312,8 @@ pub struct Display {
     pub dump_textures: Option<std::path::PathBuf>,
     /// The Widescreen mod is compiled into this build: `settings.widescreen` applies (GPU renderer).
     pub widescreen_mod: bool,
+    /// The cartridge's 32 x 32 RGBA icon ([`banner_icon`]) for the window and taskbar; `None` = the MKDSrust logo.
+    pub icon: Option<Vec<u8>>,
 }
 
 impl Display {
@@ -334,9 +433,12 @@ impl ApplicationHandler for App {
         let combined = self.display.settings.layout == mkds_builder::settings::Layout::Combined && self.display.widescreen_mod;
         let (w, h) = if combined { ((256 + 2 * self.display.margin(true)) * 3 / 2, 288) } else if self.display.side_by_side { (W * 2, H / 2) } else { (W, H) };
         let factor = self.display.settings.window_size;
+        // The cartridge's icon when the ROM has one (the MKDSrust logo otherwise). Windows shrinks the title-bar icon
+        // to 16-24 pixels, so it gets the original 32 x 32; X11 docks show large icons, so they get 128 x 128.
+        let icon = |factor: usize| self.display.icon.as_deref().and_then(|i| scaled_icon(i, factor)).unwrap_or_else(brand_icon);
         let attrs = Window::default_attributes()
             .with_title(self.title.clone())
-            .with_window_icon(Some(brand_icon()))
+            .with_window_icon(Some(icon(if cfg!(windows) { 1 } else { 4 })))
             .with_inner_size(LogicalSize::new(w * factor, h * factor))
             .with_min_inner_size(LogicalSize::new(w / 2, h / 2))
             .with_fullscreen(self.display.fullscreen.then_some(Fullscreen::Borderless(None)));
@@ -344,7 +446,15 @@ impl ApplicationHandler for App {
         #[cfg(windows)]
         let attrs = {
             use winit::platform::windows::WindowAttributesExtWindows;
-            attrs.with_taskbar_icon(Some(brand_icon()))
+            attrs.with_taskbar_icon(Some(icon(2)))
+        };
+        // Wayland has no window icons: the compositor takes the icon of the .desktop file named like the app id,
+        // which `desktop_entry` installs. X11 gets the same class name.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let attrs = {
+            desktop_entry(self.display.icon.as_deref());
+            let attrs = winit::platform::wayland::WindowAttributesExtWayland::with_name(attrs, APP_ID, APP_ID);
+            winit::platform::x11::WindowAttributesExtX11::with_name(attrs, APP_ID, APP_ID)
         };
         let made = event_loop.create_window(attrs).map_err(|e| format!("Cannot open game window: {e}")).and_then(|w| {
             let w = Arc::new(w);
