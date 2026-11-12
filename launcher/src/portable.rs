@@ -228,6 +228,7 @@ pub fn install(data: &Path, log: &mut dyn FnMut(String)) -> Result<Toolchain, St
                 .to_string()
         })?;
     }
+    drop_downloads(&dir);
     Ok(toolchain(&dir))
 }
 /// The system's `cc` links (Rust's default on Linux); only rustc and cargo come from the data folder.
@@ -270,7 +271,19 @@ pub fn install(data: &Path, log: &mut dyn FnMut(String)) -> Result<Toolchain, St
             log,
         )?;
     }
+    drop_downloads(&dir);
     Ok(toolchain(&dir))
+}
+/// The verified installer archives (about 120 MB on Linux, 320 MB on Windows) are only needed while installing: once
+/// the toolchain checks out they are removed. A later repair downloads them again.
+fn drop_downloads(dir: &Path) {
+    if ready_at(dir) {
+        let _ = std::fs::remove_dir_all(dir.join("downloads"));
+    }
+}
+/// [`ready`] for a toolchain folder.
+fn ready_at(dir: &Path) -> bool {
+    dir.parent().and_then(Path::parent).is_some_and(|data| root(data) == dir && ready(data))
 }
 /// GNU build: llvm-mingw's dlltool, rust-lld as the linker (GNU ld mislinks raw-dylib imports and the game
 /// crashes at start-up), no `--target`; see `Toolchain::portable_gnu`.
@@ -279,6 +292,29 @@ fn toolchain(dir: &Path) -> Toolchain {
     Toolchain::portable_gnu(dir, &llvm_mingw(dir))
 }
 
+
+/// The generator that came with this launcher (release builds), unpacked once per embedded source next to the build
+/// cache; `None` when the launcher carries none (development builds), and the builder compiles it.
+pub fn generator(data: &Path, source: &Path) -> Option<PathBuf> {
+    let bytes: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mkds_gen.bin"));
+    if bytes.is_empty() {
+        return None;
+    }
+    let id = source.file_name()?;
+    let exe = data.join("cache/generator").join(id).join(if cfg!(windows) { "mkds_gen.exe" } else { "mkds_gen" });
+    if std::fs::metadata(&exe).map(|m| m.len()).ok() != Some(bytes.len() as u64) {
+        std::fs::create_dir_all(exe.parent()?).ok()?;
+        let part = exe.with_extension("part");
+        std::fs::write(&part, bytes).ok()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&part, std::fs::Permissions::from_mode(0o755)).ok()?;
+        }
+        std::fs::rename(&part, &exe).ok()?;
+    }
+    Some(exe)
+}
 
 /// Select storage before any cached shared path is read. Migration always preserves originals.
 pub fn initialize() {

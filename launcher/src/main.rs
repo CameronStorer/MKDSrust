@@ -33,6 +33,9 @@ struct Preferences {
     verbose: bool,
     /// Mods to compile into the next build (ids from the mod repository).
     mods: Vec<String>,
+    /// Copy the readable generated Rust into the game folder (`source/`, about 210 MB). Off by default: players
+    /// don't need it, and it is the largest part of a build.
+    readable_source: bool,
 }
 fn build_date(stored: &str) -> String {
     // Old launcher versions stored Debug(SystemTime). Preserve a readable migration.
@@ -391,6 +394,7 @@ impl Launcher {
         };
         let data = self.dir.clone();
         let system = self.prefs.system_toolchain;
+        let keep_source = self.prefs.readable_source;
         let output = build_folder(&self.prefs.output);
         let stamp = fingerprint();
         let mods = self.prefs.mods.clone();
@@ -439,18 +443,20 @@ impl Launcher {
                     return;
                 }
             }
+            let generator = portable::generator(&data, &source);
             let opts = build::RecompileOptions {
                 source,
                 output,
                 allow_unverified: false,
                 offline: false,
                 allow_incomplete: false,
-                keep_source: true,
+                keep_source,
                 mods: mods.clone(),
                 with_acceptance: false,
                 jobs: None,
                 cache_dir: Some(build::default_cache_dir()),
                 with_interpreter: false,
+                generator,
             };
             let result = std::panic::catch_unwind(|| {
                 build::recompile_with_toolchain(&info, &opts, toolchain.as_ref(), &mut |s| {
@@ -621,6 +627,16 @@ impl Launcher {
             );
             let source = self.prefs.output.join("source");
             let have = built && source.is_dir();
+            if ui
+                .checkbox(&mut self.prefs.readable_source, "Include the source in my builds (about 210 MB)")
+                .on_hover_text("Takes effect on the next build. Playing doesn't need it.")
+                .changed()
+            {
+                self.save();
+            }
+            if !have && self.prefs.readable_source {
+                ui.label(RichText::new("Rebuild to add the source to your game folder.").color(Color32::GRAY));
+            }
             let open = |path: PathBuf| std::process::Command::new("explorer.exe").arg(path).spawn().map(|_| ());
             ui.horizontal_wrapped(|ui| {
                 if ui.add_enabled(have, egui::Button::new("View source")).clicked() {
@@ -1043,6 +1059,9 @@ impl Launcher {
             .changed();
         changed |= ui.checkbox(&mut self.prefs.verbose, "Verbose game logging (show console)").changed();
         changed |= ui
+            .checkbox(&mut self.prefs.readable_source, "Include the readable source in builds (about 210 MB)")
+            .changed();
+        changed |= ui
             .checkbox(
                 &mut self.prefs.system_toolchain,
                 "Use system Rust instead of the portable GNU toolchain",
@@ -1391,7 +1410,7 @@ fn create_shortcut() -> Result<PathBuf, String> {
         exe = quote(&exe),
         dir = quote(exe.parent().unwrap_or(Path::new("."))),
     );
-    let out = std::process::Command::new("powershell.exe")
+    let out = crate::protocol::hidden(&mut std::process::Command::new("powershell.exe"))
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .output()
         .map_err(|e| format!("Could not start PowerShell: {e}"))?;

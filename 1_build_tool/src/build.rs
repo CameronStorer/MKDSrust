@@ -93,6 +93,9 @@ pub struct RecompileOptions {
     pub with_interpreter: bool,
     /// Mods to compile in (ids from the checkout's `Mods/` folder, see [`mkds_builder::mods_repo`]).
     pub mods: Vec<String>,
+    /// A ready-built `mkds_gen` from exactly this source (the release launcher carries one): step 2 then skips
+    /// compiling the generator. `None`: build it.
+    pub generator: Option<PathBuf>,
 }
 
 /// Every generated crate's `recomp` dependency without default features. Cargo unifies features across
@@ -259,9 +262,45 @@ fn lock_cache(dir: &Path) -> Result<CacheLock, BuildError> {
     }
 }
 
-/// Default compile parallelism: each generated part crate needs ~0.5-1.5 GB while compiling.
+/// Default compile parallelism: each generated part crate needs ~0.5-1.5 GB while compiling, so one job per 2 GB of
+/// physical memory, at most one per hardware thread (at least 2). Unknown memory: half the threads, at most 8.
 pub fn default_jobs() -> usize {
-    std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).clamp(2, 8))
+    let threads = std::thread::available_parallelism().map_or(2, |n| n.get());
+    match total_memory_gb() {
+        Some(gb) => (gb / 2).clamp(2, threads.max(2)),
+        None => (threads / 2).clamp(2, 8),
+    }
+}
+
+/// Installed physical memory in whole GB.
+fn total_memory_gb() -> Option<usize> {
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        struct MemoryStatusEx {
+            length: u32,
+            load: u32,
+            total_phys: u64,
+            avail_phys: u64,
+            total_page: u64,
+            avail_page: u64,
+            total_virtual: u64,
+            avail_virtual: u64,
+            avail_extended: u64,
+        }
+        unsafe extern "system" {
+            fn GlobalMemoryStatusEx(status: *mut MemoryStatusEx) -> i32;
+        }
+        let mut s = MemoryStatusEx { length: std::mem::size_of::<MemoryStatusEx>() as u32, load: 0, total_phys: 0,
+            avail_phys: 0, total_page: 0, avail_page: 0, total_virtual: 0, avail_virtual: 0, avail_extended: 0 };
+        (unsafe { GlobalMemoryStatusEx(&mut s) } != 0).then(|| (s.total_phys >> 30) as usize)
+    }
+    #[cfg(not(windows))]
+    {
+        let info = std::fs::read_to_string("/proc/meminfo").ok()?;
+        let kb: u64 = info.lines().find(|l| l.starts_with("MemTotal:"))?.split_whitespace().nth(1)?.parse().ok()?;
+        Some((kb >> 20) as usize)
+    }
 }
 
 /// Runs Cargo, forwarding diagnostics to `log`, and returns every executable Cargo reports, by
@@ -649,7 +688,7 @@ pub fn recompile_with_toolchain(
     let offline = |c: &mut Command| {
         if let Some(t) = toolchain {
             c.env("RUSTC", &t.rustc)
-                .env("RUSTDOC", t.rustc.with_file_name("rustdoc.exe"));
+                .env("RUSTDOC", t.rustc.with_file_name(if cfg!(windows) { "rustdoc.exe" } else { "rustdoc" }));
             // No `--target`/CARGO_BUILD_TARGET: the toolchain's host is its target, so the flags apply to
             // build scripts and proc-macros too. The encoded form keeps paths with spaces intact.
             c.env_remove("RUSTFLAGS")
@@ -692,30 +731,35 @@ pub fn recompile_with_toolchain(
     std::fs::rename(stage.path().join("rip/assets"), bundle.join("assets"))?;
 
     // 2. Build and run the production generator with explicit inputs (no implicit ROM/metadata).
-    log("[2/5] Building the generator.".into());
-    let mut gen_build = Command::new(&cargo);
-    gen_build
-        .args([
-            "build",
-            "--release",
-            "--locked",
-            "--features",
-            "gen",
-            "--bin",
-            "mkds_gen",
-        ])
-        .arg("--manifest-path")
-        .arg(&recomp_manifest)
-        .arg("--target-dir")
-        .arg(&gen_target)
-        .current_dir(&opts.source)
-        .env_remove("MKDS_ROM")
-        .env_remove("MKDS_FUNCTIONS")
-        .env_remove("MKDS_LIFT_CAP");
-    offline(&mut gen_build);
-    let generator = run_cargo(gen_build, log)?
-        .remove("mkds_gen")
-        .ok_or_else(|| BuildError("Cargo did not report the mkds_gen executable.".into()))?;
+    let generator = if let Some(g) = opts.generator.as_ref().filter(|g| g.is_file()) {
+        log("[2/5] Using the generator that comes with the launcher.".into());
+        g.clone()
+    } else {
+        log("[2/5] Building the generator.".into());
+        let mut gen_build = Command::new(&cargo);
+        gen_build
+            .args([
+                "build",
+                "--release",
+                "--locked",
+                "--features",
+                "gen",
+                "--bin",
+                "mkds_gen",
+            ])
+            .arg("--manifest-path")
+            .arg(&recomp_manifest)
+            .arg("--target-dir")
+            .arg(&gen_target)
+            .current_dir(&opts.source)
+            .env_remove("MKDS_ROM")
+            .env_remove("MKDS_FUNCTIONS")
+            .env_remove("MKDS_LIFT_CAP");
+        offline(&mut gen_build);
+        run_cargo(gen_build, log)?
+            .remove("mkds_gen")
+            .ok_or_else(|| BuildError("Cargo did not report the mkds_gen executable.".into()))?
+    };
     log("[3/5] Generating Rust from the ROM's machine code (every metadata entry).".into());
     let mut gen_cmd = Command::new(&generator);
     gen_cmd
@@ -753,6 +797,12 @@ pub fn recompile_with_toolchain(
             main.replacen("fn main() {\n", "fn main() {\n    unsafe { std::env::set_var(\"MKDS_NO_MODS\", \"1\") };\n", 1)
         }
     };
+    // the launcher has no console: without this flag Windows opens one for the generator
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        gen_cmd.creation_flags(0x08000000);
+    }
     let out = gen_cmd.output()?;
     for l in String::from_utf8_lossy(&out.stderr)
         .lines()
@@ -1144,7 +1194,13 @@ pub fn build(
         args.push("--offline".into());
     }
     log("Building the Rust port; Cargo may download locked dependencies.".into());
-    let mut child = Command::new(&cargo)
+    let mut command = Command::new(&cargo);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let mut child = command
         .args(&args)
         .current_dir(&opts.source)
         .stdout(Stdio::piped())
@@ -1691,6 +1747,7 @@ exclude = [\"runtime\"]
             jobs: None,
             cache_dir: None,
             with_interpreter: false,
+            generator: None,
         }
     }
 

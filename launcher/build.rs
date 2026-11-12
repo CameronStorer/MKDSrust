@@ -69,4 +69,36 @@ fn main() {
         .expect("tar is required to package source");
     assert!(status.success(), "source packaging failed");
     println!("cargo:rerun-if-changed=../assets/branding");
+    embed_generator(&root, &out);
+}
+
+/// Release builds (`MKDS_EMBED_GENERATOR=1`) carry `mkds_gen` compiled from exactly the source embedded above, so a
+/// player's first build skips compiling it (about 40 s and 400 MB of cache). Otherwise the file stays empty and the
+/// builder compiles the generator as before.
+fn embed_generator(root: &Path, out: &Path) {
+    println!("cargo:rerun-if-env-changed=MKDS_EMBED_GENERATOR");
+    let dest = out.join("mkds_gen.bin");
+    if env::var("MKDS_EMBED_GENERATOR").as_deref() != Ok("1") {
+        fs::write(&dest, []).unwrap();
+        return;
+    }
+    let target = out.join("gen-target");
+    let mut cargo = Command::new(env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
+    // the outer build's settings (target dir, flags for the launcher) must not reach the nested one
+    for (key, _) in env::vars_os() {
+        let k = key.to_string_lossy();
+        if (k.starts_with("CARGO_") && k != "CARGO_HOME") || k == "RUSTFLAGS" || k == "RUSTC_WRAPPER" {
+            cargo.env_remove(&key);
+        }
+    }
+    let status = cargo
+        .args(["build", "--release", "--locked", "--features", "gen", "--bin", "mkds_gen", "--manifest-path"])
+        .arg(root.join("2_native_game/Cargo.toml"))
+        .arg("--target-dir")
+        .arg(&target)
+        .status()
+        .expect("cargo builds the embedded generator");
+    assert!(status.success(), "building the embedded generator failed");
+    let exe = target.join("release").join(if cfg!(windows) { "mkds_gen.exe" } else { "mkds_gen" });
+    fs::copy(exe, dest).unwrap();
 }

@@ -64,7 +64,9 @@ impl Launcher {
         self.catalog.rx = Some(rx);
         self.catalog.status = "Checking GitHub for new mods…".into();
         std::thread::spawn(move || {
-            let result = std::process::Command::new(if cfg!(windows) { "curl.exe" } else { "curl" })
+            let mut curl = std::process::Command::new(if cfg!(windows) { "curl.exe" } else { "curl" });
+            // no console window flashing up on Windows
+            let result = crate::protocol::hidden(&mut curl)
                 .args(["-fsSL", "--proto", "=https", "--max-time", "20", INDEX_URL])
                 .output()
                 .map_err(|e| format!("could not start curl: {e}"))

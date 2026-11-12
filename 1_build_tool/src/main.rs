@@ -69,7 +69,7 @@ struct Args {
     /// Verification only: also build the acceptance executable (adaptive race driver on generated code)
     #[arg(long)]
     with_acceptance: bool,
-    /// Parallel compile jobs for the generated code (default: half your logical CPUs, 2..=8)
+    /// Parallel compile jobs for the generated code (default: one per 2 GB of memory, at most one per CPU thread)
     #[arg(long, value_name = "N")]
     jobs: Option<usize>,
     /// Fresh build in a temporary directory instead of the persistent build cache
@@ -84,6 +84,9 @@ struct Args {
     /// Diagnostics only: compile the reference interpreter into the game (enables --arm7-interpreted)
     #[arg(long)]
     with_interpreter: bool,
+    /// Use this ready-built mkds_gen (made from the same --source) instead of compiling the generator
+    #[arg(long, value_name = "EXE")]
+    generator: Option<PathBuf>,
     /// Instruction timing (default: native; MKDS_TIMING also supported)
     #[arg(long, value_parser = ["native", "exact"])]
     timing: Option<String>,
@@ -366,6 +369,7 @@ fn run() -> Result<i32, BuildError> {
                 with_acceptance: args.with_acceptance,
                 jobs: args.jobs,
                 with_interpreter: args.with_interpreter,
+                generator: args.generator.clone(),
                 cache_dir: if args.no_cache {
                     None
                 } else {
