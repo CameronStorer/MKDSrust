@@ -5,6 +5,7 @@ mod mods_ui;
 mod catalog_ui;
 mod portable;
 mod protocol;
+mod saves_ui;
 mod site;
 use eframe::egui::{self, Color32, RichText};
 use mkds_builder::{
@@ -36,6 +37,8 @@ struct Preferences {
     /// Copy the readable generated Rust into the game folder (`source/`, about 210 MB). Off by default: players
     /// don't need it, and it is the largest part of a build.
     readable_source: bool,
+    /// Play with the "everything unlocked" test save (`saves/<sha1>.unlocked.sav`) instead of the real one.
+    test_save: bool,
 }
 fn build_date(stored: &str) -> String {
     // Old launcher versions stored Debug(SystemTime). Preserve a readable migration.
@@ -78,6 +81,7 @@ struct Launcher {
     mods: mods_ui::ModsState,
     /// `mkdsrust://` links (or "" = come to the front) handed over by a second launcher.
     inbox: Option<Receiver<String>>,
+    saves: saves_ui::SavesState,
 }
 fn fingerprint() -> String {
     use sha2::{Digest, Sha256};
@@ -237,6 +241,7 @@ impl Launcher {
             smoke_frame: std::env::args().any(|a| a == "--smoke-test").then_some(0),
             wizard: 0,
             mods: Default::default(),
+            saves: Default::default(),
             inbox: instance.map(|i| {
                 let ctx = cc.egui_ctx.clone();
                 i.watch(move || ctx.request_repaint())
@@ -474,12 +479,13 @@ impl Launcher {
         let output = self.prefs.output.clone();
         let accuracy = self.prefs.accuracy;
         let verbose = self.prefs.verbose;
+        let save = saves_ui::active_test_save(self.prefs.test_save, &output);
         let (tx, rx) = mpsc::channel();
         self.rx = Some(rx);
         std::thread::spawn(move || {
-            let env = play_env(accuracy, verbose);
+            let env = play_env(accuracy, verbose, save.as_deref());
             let _ = tx.send(Event::Played(
-                build::launch_with_env(&output, &[], &env).map_err(|e| e.to_string()),
+                build::launch_with_env(&output, &[], &borrow_env(&env)).map_err(|e| e.to_string()),
             ));
         });
     }
@@ -613,6 +619,13 @@ impl Launcher {
                 self.play();
             }
             ui.small("In game, press F10 for settings: screen layout, renderer, controls and audio. The game folder is portable: saves and settings live in its data folder.");
+        });
+        ui.add_space(10.);
+
+        // Saves
+        card().show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            self.saves_card(ui);
         });
         ui.add_space(10.);
 
@@ -1373,17 +1386,22 @@ fn quit_with_children() -> ! {
     std::process::exit(0);
 }
 
-/// The game's environment for the launcher's settings (accuracy mode, verbose logging).
-fn play_env(accuracy: bool, verbose: bool) -> Vec<(&'static str, Option<&'static str>)> {
+/// The game's environment for the launcher's settings (accuracy mode, verbose logging, the test save).
+fn play_env(accuracy: bool, verbose: bool, save: Option<&Path>) -> Vec<(&'static str, Option<String>)> {
     let mut env: Vec<_> = ["MKDS_HW_FS", "MKDS_HW_ARM7", "MKDS_HW_TIME", "MKDS_HW_SND"]
         .into_iter()
-        .filter_map(|k| accuracy.then_some((k, Some("exact"))))
+        .filter_map(|k| accuracy.then(|| (k, Some("exact".to_string()))))
         .collect();
-    env.push(("MKDS_VERBOSE", Some(if verbose { "1" } else { "0" })));
+    env.push(("MKDS_VERBOSE", Some(if verbose { "1" } else { "0" }.to_string())));
     if accuracy {
-        env.push(("MKDS_NO_MODS", Some("1")));
+        env.push(("MKDS_NO_MODS", Some("1".to_string())));
     }
+    // The real save is the game's default; the test save is only ever chosen here.
+    env.push(("MKDS_SAVE", save.map(|p| p.to_string_lossy().into_owned())));
     env
+}
+fn borrow_env<'a>(env: &'a [(&'static str, Option<String>)]) -> Vec<(&'static str, Option<&'a str>)> {
+    env.iter().map(|(k, v)| (*k, v.as_deref())).collect()
 }
 
 /// `MKDSrust.exe --play` (the desktop shortcut): start the built game with the launcher's settings and exit, with no
@@ -1395,7 +1413,8 @@ fn play_from_shortcut() -> bool {
     if prefs.output.as_os_str().is_empty() {
         return false;
     }
-    build::launch_detached(&prefs.output, &[], &play_env(prefs.accuracy, false)).is_ok()
+    let save = saves_ui::active_test_save(prefs.test_save, &prefs.output);
+    build::launch_detached(&prefs.output, &[], &borrow_env(&play_env(prefs.accuracy, false, save.as_deref()))).is_ok()
 }
 
 /// Creates `MKDSrust.lnk` on the desktop: this launcher with `--play`, its icon, starting in its folder.
@@ -1483,6 +1502,16 @@ mod tests {
         assert_eq!(map_key(egui::Key::Z), controls::key_index("Z"));
     }
     #[test]
+    fn test_save_is_chosen_only_explicitly() {
+        let env = play_env(false, false, None);
+        assert!(borrow_env(&env).contains(&("MKDS_SAVE", None)), "an inherited MKDS_SAVE never leaks into the game");
+        let env = play_env(false, false, Some(Path::new("t.unlocked.sav")));
+        assert!(borrow_env(&env).contains(&("MKDS_SAVE", Some("t.unlocked.sav"))));
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(saves_ui::active_test_save(true, dir.path()), None, "no bundle, no test save");
+        assert_eq!(saves_ui::active_test_save(false, dir.path()), None);
+    }
+    #[test]
     fn accuracy_defaults_off() {
         let p: Preferences = serde_json::from_str("{}").unwrap();
         assert!(!p.accuracy);
@@ -1514,6 +1543,7 @@ mod tests {
             source_stamp: String::new(),
             smoke_frame: None,
             mods: Default::default(),
+            saves: Default::default(),
             inbox: None,
         }
     }
