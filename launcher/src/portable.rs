@@ -1,4 +1,5 @@
-//! Windows inbox tools only: no Rust installation, VS, shell installer or global PATH edits.
+//! Windows inbox tools only: no Rust installation, VS, shell installer or global PATH edits. On Linux the official
+//! Rust parts go into the same data folder (install-toolchain.sh); the C compiler and headers come from the system.
 use mkds_builder::build::Toolchain;
 use std::{
     io::BufReader,
@@ -6,23 +7,42 @@ use std::{
     process::{Command, Stdio},
 };
 pub const VERSION: &str = "1.96.0";
+#[cfg(windows)]
 pub const TARGET: &str = mkds_builder::build::PORTABLE_GNU_TARGET;
+#[cfg(not(windows))]
+pub const TARGET: &str = "x86_64-unknown-linux-gnu";
 /// llvm-mingw (github.com/mstorsjo/llvm-mingw) supplies the dlltool for raw-dylib imports and the C/C++ compiler
 /// (clang, headers, x86_64 sysroot) for crates whose build scripts compile C. Pinned release and the SHA-256 GitHub
 /// publishes for `llvm-mingw-<release>-ucrt-x86_64.zip`.
+#[cfg(windows)]
 pub const LLVM_MINGW: &str = "20261020";
+#[cfg(windows)]
 pub const LLVM_MINGW_SHA256: &str = "fd5462b7f5d93b2ff981fcd3f9c7e427e47f3203c64ea91c27bcc444eebd74cd";
 pub fn root(data: &Path) -> PathBuf {
     data.join("toolchain").join(format!("{VERSION}-{TARGET}"))
 }
+#[cfg(windows)]
 fn llvm_mingw(dir: &Path) -> PathBuf {
     dir.join("llvm-mingw")
 }
 /// Written by install-toolchain.ps1 once every probe passed. Older markers (no " cc": llvm-mingw `bin/` only, no C
 /// compiler) make `install` run again, which reuses the installed Rust and the cached llvm-mingw archive.
+#[cfg(windows)]
 fn marker() -> String {
     format!("{VERSION} llvm-mingw-{LLVM_MINGW} cc")
 }
+/// Written by install-toolchain.sh once rustc and cargo ran.
+#[cfg(not(windows))]
+fn marker() -> String {
+    format!("{VERSION} linux")
+}
+#[cfg(not(windows))]
+pub fn ready(data: &Path) -> bool {
+    let complete = std::fs::read_to_string(root(data).join("complete")).unwrap_or_default();
+    complete.trim() == marker()
+        && ["bin/rustc", "bin/cargo", "lib/rustlib/x86_64-unknown-linux-gnu/lib"].iter().all(|p| root(data).join(p).exists())
+}
+#[cfg(windows)]
 pub fn ready(data: &Path) -> bool {
     let complete = std::fs::read_to_string(root(data).join("complete")).unwrap_or_default();
     complete.trim() == marker()
@@ -120,6 +140,7 @@ mod tests {
             source(data.path(), &mut |_| panic!("must reuse extracted source")).unwrap()
         );
     }
+    #[cfg(windows)]
     #[test]
     fn portable_toolchain_uses_llvm_mingw_and_lld() {
         let data = tempfile::tempdir().unwrap();
@@ -194,6 +215,33 @@ pub fn source(data: &Path, log: &mut dyn FnMut(String)) -> Result<PathBuf, Strin
     std::fs::write(dir.join("complete"), id).map_err(|e| e.to_string())?;
     Ok(dir)
 }
+#[cfg(not(windows))]
+pub fn install(data: &Path, log: &mut dyn FnMut(String)) -> Result<Toolchain, String> {
+    let dir = root(data);
+    if !ready(data) {
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let script = dir.join("install.sh");
+        std::fs::write(&script, include_str!("../install-toolchain.sh")).map_err(|e| e.to_string())?;
+        run(Command::new("sh").arg(script).arg(&dir).arg(VERSION), log).map_err(|_| {
+            "Toolchain setup stopped. The activity log says why: missing system packages are listed with the \
+             command that installs them; downloads resume on retry."
+                .to_string()
+        })?;
+    }
+    Ok(toolchain(&dir))
+}
+/// The system's `cc` links (Rust's default on Linux); only rustc and cargo come from the data folder.
+#[cfg(not(windows))]
+fn toolchain(dir: &Path) -> Toolchain {
+    Toolchain {
+        cargo: dir.join("bin/cargo"),
+        rustc: dir.join("bin/rustc"),
+        rustflags: Vec::new(),
+        path: vec![dir.join("bin")],
+        env: Vec::new(),
+    }
+}
+#[cfg(windows)]
 pub fn install(data: &Path, log: &mut dyn FnMut(String)) -> Result<Toolchain, String> {
     let dir = root(data);
     if !ready(data) {
@@ -226,6 +274,7 @@ pub fn install(data: &Path, log: &mut dyn FnMut(String)) -> Result<Toolchain, St
 }
 /// GNU build: llvm-mingw's dlltool, rust-lld as the linker (GNU ld mislinks raw-dylib imports and the game
 /// crashes at start-up), no `--target`; see `Toolchain::portable_gnu`.
+#[cfg(windows)]
 fn toolchain(dir: &Path) -> Toolchain {
     Toolchain::portable_gnu(dir, &llvm_mingw(dir))
 }
@@ -234,8 +283,11 @@ fn toolchain(dir: &Path) -> Toolchain {
 /// Select storage before any cached shared path is read. Migration always preserves originals.
 pub fn initialize() {
     let Some(exe) = std::env::current_exe().ok() else { return };
-    let legacy = std::env::var_os("APPDATA").map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(".")).join("MKDSrust");
+    // Linux: the XDG data folder (~/.local/share/MKDSrust) when the launcher's own folder is not writable.
+    let legacy = if cfg!(windows) { std::env::var_os("APPDATA").map(PathBuf::from) } else {
+        std::env::var_os("XDG_DATA_HOME").map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")))
+    }.unwrap_or_else(|| PathBuf::from(".")).join("MKDSrust");
     let disabled = std::env::var_os("MKDSRUST_NOT_PORTABLE").is_some()
         || legacy.join("MKDSRUST_NOT_PORTABLE").exists();
     let (data, portable) = mkds_builder::paths::select(&exe, &legacy, disabled);
@@ -292,6 +344,7 @@ pub fn initialize() {
             if std::fs::create_dir_all(&temp).is_ok() {
                 std::env::set_var("TEMP", &temp);
                 std::env::set_var("TMP", &temp);
+                std::env::set_var("TMPDIR", &temp);
             }
         }
         else { std::env::remove_var("MKDS_PORTABLE"); }

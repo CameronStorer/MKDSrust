@@ -1048,7 +1048,11 @@ impl Launcher {
                 "Use system Rust instead of the portable GNU toolchain",
             )
             .changed();
-        ui.label("System Rust uses your installed default target and may require Visual Studio. Portable GNU is recommended.");
+        ui.label(if cfg!(windows) {
+            "System Rust uses your installed default target and may require Visual Studio. Portable GNU is recommended."
+        } else {
+            "System Rust uses the cargo on your PATH (e.g. from rustup) instead of the copy in the data folder."
+        });
         if changed {
             self.save();
         }
@@ -1434,6 +1438,8 @@ fn main() -> eframe::Result<()> {
                     ))
                     .expect("valid embedded window icon"),
                 )
+                // Linux: matches mkdsrust.desktop (see protocol.rs), which carries the icon on Wayland
+                .with_app_id("mkdsrust")
                 .with_inner_size(smoke_size.unwrap_or([1280., 800.]))
                 .with_min_inner_size([1024., 640.]),
             ..Default::default()
@@ -1619,7 +1625,7 @@ mod build_folder_tests {
 }
 
 fn path_warning(ui: &mut egui::Ui) {
-    if std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.to_string_lossy().chars().count() > 60)).unwrap_or(false) {
+    if cfg!(windows) && std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.to_string_lossy().chars().count() > 60)).unwrap_or(false) {
         ui.colored_label(Color32::YELLOW, "Long install path: move MKDSrust to a shorter folder like C:\\Games\\MKDSrust to avoid Windows path limits.");
     }
 }

@@ -19,9 +19,64 @@ pub fn command_for(exe: &Path) -> String {
 }
 
 /// Register (or repair) the handler for this launcher. Cheap when it is already correct.
+#[cfg(windows)]
 pub fn register(exe: &Path) -> Result<bool, String> {
     register_at(KEY, exe)
 }
+
+/// Linux: a per-user `mkdsrust.desktop` (application menu entry, `mkdsrust://` handler, and the icon Wayland shows
+/// for the launcher's window, whose app id is `mkdsrust`) plus the icon in the user's hicolor theme.
+#[cfg(not(windows))]
+pub fn register(exe: &Path) -> Result<bool, String> {
+    let Some(share) = std::env::var_os("XDG_DATA_HOME").map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".local/share"))) else {
+        return Ok(false);
+    };
+    let entry = desktop_entry(exe);
+    let file = share.join("applications/mkdsrust.desktop");
+    let icon = share.join("icons/hicolor/256x256/apps/mkdsrust.png");
+    if std::fs::read_to_string(&file).is_ok_and(|s| s == entry) && icon.is_file() {
+        return Ok(false);
+    }
+    let write = |path: &Path, bytes: &[u8]| -> Result<(), String> {
+        std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+        std::fs::write(path, bytes).map_err(|e| format!("{}: {e}", path.display()))
+    };
+    write(&icon, include_bytes!("../../assets/branding/icon.png"))?;
+    write(&file, entry.as_bytes())?;
+    // best effort: desktops without these tools still read the file
+    let _ = Command::new("xdg-mime").args(["default", "mkdsrust.desktop", "x-scheme-handler/mkdsrust"]).status();
+    let _ = Command::new("update-desktop-database").arg(share.join("applications")).status();
+    Ok(true)
+}
+
+#[cfg(not(windows))]
+fn desktop_entry(exe: &Path) -> String {
+    // Exec quoting (Desktop Entry spec): inside double quotes, `"`, `` ` ``, `$` and `\` take a backslash
+    let mut exec = String::new();
+    for c in exe.display().to_string().chars() {
+        if matches!(c, '"' | '`' | '$' | '\\') {
+            exec.push('\\');
+        }
+        exec.push(c);
+    }
+    [
+        "[Desktop Entry]",
+        "Type=Application",
+        "Name=MKDSrust",
+        "Comment=Build, mod and play your cartridge natively",
+        &format!("Exec=\"{exec}\" %u"),
+        "Icon=mkdsrust",
+        "Terminal=false",
+        "Categories=Game;",
+        "MimeType=x-scheme-handler/mkdsrust;",
+        "StartupWMClass=mkdsrust",
+        "",
+    ]
+    .join("\n")
+}
+
+#[cfg(windows)]
 fn register_at(key: &str, exe: &Path) -> Result<bool, String> {
     let wanted = command_for(exe);
     let current = hidden(Command::new("reg.exe").args(["query", &format!(r"{key}\shell\open\command"), "/ve"]))
