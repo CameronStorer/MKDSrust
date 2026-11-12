@@ -4,9 +4,9 @@
 
 # MKDSrust
 
-**Play Mario Kart DS natively on Windows, and mod it.**
+**Play Mario Kart DS natively on Windows and Linux, and mod it.**
 
-MKDSrust turns your own dumped **Mario Kart DS (USA, revision 0)** ROM into a native Windows game. It is not an
+MKDSrust turns your own dumped **Mario Kart DS (USA, revision 0)** ROM into a native Windows or Linux game. It is not an
 emulator: the launcher translates the game's code into Rust on your PC and compiles it, with native graphics,
 audio and input. Races play exactly like the DS (frame for frame in accuracy mode), and mods are compiled
 straight into your game.
@@ -29,13 +29,15 @@ straight into your game.
 | **Readable Rust**: plain Rust without the simulated DS | 🟡 In progress. 39% of functions have real parameters and 20% no longer use the simulated CPU. Now testing a route that runs converted code directly on the game's memory. |
 | **MKDSrust Toolbox** (asset editor) | ⏸ Paused. |
 
-Windows is the main platform. Linux has limited testing; macOS is untested.
+Windows and Linux both have a release launcher; a Linux build plays the same race frame for frame as the Windows build. macOS is untested.
 
 ## Quick start
 
-1. Download `MKDSrust-windows-x64.zip` from the [latest release](https://github.com/CameronStorer/MKDSrust/releases/latest)
-   and unzip it anywhere.
-2. Run `MKDSrust.exe` and follow **Setup**: choose your ROM, let it install its private toolchain, and build.
+1. Download `MKDSrust-windows-x64.zip` (Windows) or `MKDSrust-linux-x64.tar.gz` (Linux) from the
+   [latest release](https://github.com/CameronStorer/MKDSrust/releases/latest) and extract it anywhere.
+   On Linux, first install the build packages, e.g. `sudo apt install build-essential pkg-config libasound2-dev libudev-dev`
+   (the launcher tells you the command for your distro if one is missing).
+2. Run `MKDSrust.exe` (Linux: `./MKDSrust`) and follow **Setup**: choose your ROM, let it install its private toolchain, and build.
    The first build takes a while; later builds are cached.
 3. Press **Play**. Open **Mods** to add Widescreen, then rebuild.
 
@@ -48,7 +50,8 @@ Windows is the main platform. Linux has limited testing; macOS is untested.
 | Game | Your clean, self-dumped USA cartridge ROM, code **AMCE**, revision **0** |
 | Windows launcher | Windows 10/11 64-bit; the release launcher prepares a private portable GNU Rust toolchain |
 | Windows development | Rust 1.96.0; MSVC builds of the launcher require Visual Studio C++ Build Tools |
-| Linux | Stable Rust, C/C++ toolchain, pkg-config, ALSA, udev, X11/Wayland and xkbcommon development libraries |
+| Linux launcher | x86_64, glibc 2.31 or newer (Ubuntu 20.04+, Debian 11+, Fedora 32+); C compiler, pkg-config, ALSA and udev development packages. The launcher installs its own Rust. |
+| Linux development | Stable Rust, C/C++ toolchain, pkg-config, ALSA, udev, X11/Wayland and xkbcommon development libraries |
 | macOS | Stable native Rust toolchain and Apple command line tools; untested |
 | Resources | About 2 GB free disk space; 8 GB RAM recommended; internet for initial dependencies |
 
