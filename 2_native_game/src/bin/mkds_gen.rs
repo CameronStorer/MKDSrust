@@ -923,6 +923,47 @@ fn poll_context_paths(jobs: &[(String, &lift::Func, String, Option<String>)], fa
     }
 }
 
+/// `f(0..n)` on every core, results in index order. Each worker starts with a copy of the calling thread's
+/// emitter tables ([`raise_emit::emit_state`]) and emissions only read shared state, so the output is the same
+/// as a loop on one thread. `MKDS_GEN_THREADS=N` caps the workers (1 = the plain loop).
+fn par_map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+    let cores = std::thread::available_parallelism().map_or(1, |p| p.get());
+    let cap = std::env::var("MKDS_GEN_THREADS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|&v| v > 0);
+    let workers = cap.unwrap_or(cores).min(n);
+    if workers <= 1 {
+        return (0..n).map(f).collect();
+    }
+    let state = raise_emit::emit_state();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut out: Vec<Option<T>> = (0..n).map(|_| None).collect();
+    std::thread::scope(|s| {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                std::thread::Builder::new()
+                    .stack_size(64 << 20)
+                    .spawn_scoped(s, || {
+                        raise_emit::set_emit_state(&state);
+                        let mut done = Vec::new();
+                        loop {
+                            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            if i >= n {
+                                break done;
+                            }
+                            done.push((i, f(i)));
+                        }
+                    })
+                    .expect("spawn a generator worker")
+            })
+            .collect();
+        for h in handles {
+            for (i, v) in h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)) {
+                out[i] = Some(v);
+            }
+        }
+    });
+    out.into_iter().map(|v| v.expect("every index ran")).collect()
+}
+
 /// An ARM9 function: its translation and, when the exact passes are on, its raised version.
 fn lifted9(segment: String, f: &lift::Func, id: String, img: &lift::Image) -> Lifted {
     let code = lift::emit_full(f, &id, Some(img), None, raise());
@@ -932,9 +973,7 @@ fn lifted9(segment: String, f: &lift::Func, id: String, img: &lift::Image) -> Li
         Err("T1 off (MKDS_NO_T1)")
     } else {
         let _ = raise_emit::take_dump();
-        let t = with_notes9(&segment, f.entry, |n| raise_emit::emit_t1_annotated(f, &id, Some(img), n));
-        TYPE_DUMP.lock().unwrap().extend(raise_emit::take_dump());
-        t
+        with_notes9(&segment, f.entry, |n| raise_emit::emit_t1_annotated(f, &id, Some(img), n))
     };
     let fields = if t1.is_ok() { ir::take_field_uses() } else { Vec::new() };
     let direct = raise_emit::take_direct();
@@ -1447,12 +1486,15 @@ fn run() -> Result<ExitCode, String> {
             let mut passed: BTreeMap<(u32, u8), BTreeMap<String, BTreeSet<u32>>> = BTreeMap::new();
             // distinct callers of each function (direct calls)
             let mut fan_in: HashMap<u32, usize> = HashMap::new();
-            for (seg, f, id, src) in &jobs {
+            let found = par_map(jobs.len(), |i| {
+                let (seg, f, id, src) = &jobs[i];
                 let img = image(src);
                 let _ = with_notes9(seg, f.entry, |n| raise_emit::emit_t1_annotated(f, id, Some(&img), n));
                 let _ = ir::take_field_uses();
-                let raise_emit::Types { calls, own_args, own_ret, callees, .. } = raise_emit::take_types();
                 let _ = raise_emit::take_dump();
+                raise_emit::take_types()
+            });
+            for ((_, f, _, _), raise_emit::Types { calls, own_args, own_ret, callees, .. }) in jobs.iter().zip(found) {
                 if let Some(st) = own_ret {
                     rets.entry(f.entry & !1).or_default().insert(st);
                 }
@@ -1521,7 +1563,7 @@ fn run() -> Result<ExitCode, String> {
         let poll_requested = raise_emit::poll_direct_enabled();
         poll_selected = poll_requested;
         let context_paths = if poll_requested {
-            let initial: Vec<_> = jobs.iter().map(|(seg, f, id, src)| emit_facts(seg, f, id, src)).collect();
+            let initial: Vec<_> = par_map(jobs.len(), |i| { let (seg, f, id, src) = &jobs[i]; emit_facts(seg, f, id, src) });
             poll_context_paths(&jobs, &initial)
         } else { HashSet::new() };
         let mut poll_before = [0usize; 2];
@@ -1553,8 +1595,8 @@ fn run() -> Result<ExitCode, String> {
             for _ in 0..64 {
                 raise_emit::set_boundary(conventions.clone());
                 let mut next = conventions.clone();
-                for (seg, f, id, src) in &jobs {
-                    let x = emit_facts(seg, f, id, src);
+                let found = par_map(jobs.len(), |i| { let (seg, f, id, src) = &jobs[i]; emit_facts(seg, f, id, src) });
+                for ((seg, f, _, _), x) in jobs.iter().zip(found) {
                     let d = &mut next.get_mut(&f.entry).unwrap().iter_mut().find(|r| r.0 == *seg).unwrap().1;
                     d.preserved &= x.as_ref().map_or(0, |x| x.preserved);
                     d.params |= x.as_ref().map_or(0x100F, |x| x.boundary_params);
@@ -1566,7 +1608,7 @@ fn run() -> Result<ExitCode, String> {
             if poll_requested && poll_pass == 1 { poll_boundary = conventions.clone(); }
             raise_emit::set_boundary(conventions);
         }
-        let mut facts: Vec<Option<raise_emit::Facts>> = jobs.iter().map(|(seg, f, id, src)| emit_facts(seg, f, id, src)).collect();
+        let mut facts: Vec<Option<raise_emit::Facts>> = par_map(jobs.len(), |i| { let (seg, f, id, src) = &jobs[i]; emit_facts(seg, f, id, src) });
         if poll_pass == 1 {
             // All address-taken entries are a conservative superset of possible IRQ callbacks.
             // Include the installed SDK dispatcher and its context-switching exit even when
@@ -1581,7 +1623,7 @@ fn run() -> Result<ExitCode, String> {
             let sample: Vec<String> = failed.iter().take(8).map(|&i| format!("{}/{:#X}", jobs[i].0, jobs[i].1.entry)).collect();
             eprintln!("mkds_gen: poll-direct IRQ proof: {} candidates, {} preserved, {} unproven ({sample:?}); polls use {}", handlers.len(), handlers.len() - failed.len(), failed.len(), if proven { "sp/lr only" } else { "full IRQ/context spill" });
             if proven {
-                facts = jobs.iter().map(|(seg, f, id, src)| emit_facts(seg, f, id, src)).collect();
+                facts = par_map(jobs.len(), |i| { let (seg, f, id, src) = &jobs[i]; emit_facts(seg, f, id, src) });
             }
             // The online area is outside readable-source work. Do not add to its direct set.
             for (i, x) in facts.iter_mut().enumerate() {
@@ -1671,9 +1713,9 @@ fn run() -> Result<ExitCode, String> {
             raise_emit::set_direct(table(&sigs));
             let mut changed = false;
             let keys: Vec<usize> = sigs.keys().copied().collect();
-            for i in keys {
-                let (seg, f, id, src) = &jobs[i];
-                let x = emit_facts(seg, f, id, src).expect("a closed function emits");
+            let found = par_map(keys.len(), |k| { let (seg, f, id, src) = &jobs[keys[k]]; emit_facts(seg, f, id, src) });
+            for (i, x) in keys.into_iter().zip(found) {
+                let x = x.expect("a closed function emits");
                 let d = sigs.get_mut(&i).unwrap();
                 let (p, r) = (d.params | x.live_in, d.rets | x.written);
                 if (p, r) != (d.params, d.rets) {
@@ -1691,13 +1733,12 @@ fn run() -> Result<ExitCode, String> {
         }
         raise_emit::set_direct(table(&sigs));
         // the final check with the real callee signatures (the first pass assumed the calling convention)
-        let mut bad = Vec::new();
-        for &i in sigs.keys() {
-            let (seg, f, id, src) = &jobs[i];
-            if emit_facts(seg, f, id, src).is_none_or(|x| x.escape.is_some()) {
-                bad.push(i);
-            }
-        }
+        let keys: Vec<usize> = sigs.keys().copied().collect();
+        let escaped = par_map(keys.len(), |k| {
+            let (seg, f, id, src) = &jobs[keys[k]];
+            emit_facts(seg, f, id, src).is_none_or(|x| x.escape.is_some())
+        });
+        let bad: Vec<usize> = keys.into_iter().zip(escaped).filter(|&(_, e)| e).map(|(i, _)| i).collect();
         if bad.is_empty() {
             break 'outer (sigs, rounds);
         }
@@ -1751,8 +1792,10 @@ fn run() -> Result<ExitCode, String> {
                 raise_emit::set_direct(table);
                 let mut changed = false;
                 after = (0, 0);
-                for (&i, d) in &mut sigs {
-                    let (seg, f, id, src) = &jobs[i];
+                let snapshot: Vec<(usize, raise_emit::DirectSig)> = sigs.iter().map(|(&i, d)| (i, d.clone())).collect();
+                let found = par_map(snapshot.len(), |k| -> Result<raise_emit::Facts, String> {
+                    let (i, d) = &snapshot[k];
+                    let (seg, f, id, src) = &jobs[*i];
                     let img = image(src);
                     raise_emit::set_current(seg, Some(d.clone()));
                     with_notes9(seg, f.entry, |n| raise_emit::emit_t1_annotated(f, id, Some(&img), n))
@@ -1762,6 +1805,10 @@ fn run() -> Result<ExitCode, String> {
                     let _ = raise_emit::take_types();
                     let _ = raise_emit::take_dump();
                     let _ = ir::take_field_uses();
+                    Ok(x)
+                });
+                for (d, x) in sigs.values_mut().zip(found) {
+                    let x = x?;
                     if round == 0 { before.0 += x.cpu_before_flags as usize; before.1 += x.flag_calls_before; }
                     after.0 += x.cpu as usize;
                     after.1 += x.flag_calls_after;
@@ -1782,7 +1829,9 @@ fn run() -> Result<ExitCode, String> {
             // and which parameters are `fx32` values; a printing change only
             raise_emit::set_typed_info(HashMap::new());
             let mut info: HashMap<String, raise_emit::TypedInfo> = HashMap::new();
-            for (&i, d) in &sigs {
+            let snapshot: Vec<(usize, &raise_emit::DirectSig)> = sigs.iter().map(|(&i, d)| (i, d)).collect();
+            let found = par_map(snapshot.len(), |k| -> Result<(String, raise_emit::TypedInfo), String> {
+                let (i, d) = snapshot[k];
                 let (seg, f, id, src) = &jobs[i];
                 let img = image(src);
                 raise_emit::set_current(seg, Some(d.clone()));
@@ -1793,7 +1842,11 @@ fn run() -> Result<ExitCode, String> {
                 let _ = raise_emit::take_types();
                 let _ = raise_emit::take_dump();
                 let _ = ir::take_field_uses();
-                info.insert(d.name.clone(), raise_emit::TypedInfo { lr_implicit: x.lr_leaf && d.params >> 14 & 1 != 0, fx: x.fx_params });
+                Ok((d.name.clone(), raise_emit::TypedInfo { lr_implicit: x.lr_leaf && d.params >> 14 & 1 != 0, fx: x.fx_params }))
+            });
+            for r in found {
+                let (name, ti) = r?;
+                info.insert(name, ti);
             }
             let (lr, fx) = (info.values().filter(|i| i.lr_implicit).count(), info.values().filter(|i| i.fx != 0).count());
             eprintln!("mkds_gen: typed signatures: {} direct functions, {lr} with an implicit lr, {fx} with fx32 parameters", sigs.len());
@@ -1845,10 +1898,16 @@ fn run() -> Result<ExitCode, String> {
         raise_emit::set_direct(poll_flat::table(&own_sig));
         raise_emit::set_boundary(poll_boundary);
     }
-    for (seg, f, id, src) in &jobs {
+    // the type dump is taken per function and kept in job order
+    let emitted = par_map(jobs.len(), |i| {
+        let (seg, f, id, src) = &jobs[i];
         let img = image(src);
         raise_emit::set_current(seg, own_sig.get(&(seg.clone(), f.entry)).cloned());
-        let mut lifted = lifted9(seg.clone(), f, id.clone(), &img);
+        let lifted = lifted9(seg.clone(), f, id.clone(), &img);
+        (lifted, raise_emit::take_dump())
+    });
+    for ((_, _, id, _), (mut lifted, dump)) in jobs.iter().zip(emitted) {
+        TYPE_DUMP.lock().unwrap().extend(dump);
         if let Some(flat) = flat.remove(id) { poll_flat::attach(&mut lifted, flat); }
         funcs.push(lifted);
     }

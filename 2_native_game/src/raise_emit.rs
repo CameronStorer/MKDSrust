@@ -285,6 +285,37 @@ pub fn nospill_enabled() -> bool {
     crate::lift::timing_native() && std::env::var("MKDS_SPILL").map_or(true, |v| v != "keep")
 }
 
+/// The tables an emission reads besides its arguments (all per thread): the generator copies them into its worker
+/// threads so a function prints the same on any thread.
+#[derive(Clone, Default)]
+pub struct EmitState {
+    direct: HashMap<u32, Vec<(String, DirectSig)>>,
+    boundary: HashMap<u32, Vec<(String, BoundarySig)>>,
+    typed_info: HashMap<String, TypedInfo>,
+    current: (String, Option<DirectSig>),
+    poll_irq_preserved: bool,
+}
+
+/// This thread's [`EmitState`].
+pub fn emit_state() -> EmitState {
+    EmitState {
+        direct: DIRECT.with(|d| d.borrow().clone()),
+        boundary: BOUNDARY.with(|d| d.borrow().clone()),
+        typed_info: TYPED_INFO.with(|t| t.borrow().clone()),
+        current: CURRENT.with(|c| c.borrow().clone()),
+        poll_irq_preserved: poll_direct::irq_preserved(),
+    }
+}
+
+/// Installs a copy of another thread's [`EmitState`] on this thread.
+pub fn set_emit_state(s: &EmitState) {
+    DIRECT.with(|d| *d.borrow_mut() = s.direct.clone());
+    BOUNDARY.with(|d| *d.borrow_mut() = s.boundary.clone());
+    TYPED_INFO.with(|t| *t.borrow_mut() = s.typed_info.clone());
+    CURRENT.with(|c| *c.borrow_mut() = s.current.clone());
+    poll_direct::set_irq_preserved(s.poll_irq_preserved);
+}
+
 /// Sets the direct-callable functions (see [`DirectSig`]).
 pub fn set_direct(map: HashMap<u32, Vec<(String, DirectSig)>>) {
     DIRECT.with(|d| *d.borrow_mut() = map);

@@ -17,6 +17,9 @@ pub fn set_irq_preserved(proven: bool) {
     IRQ_PRESERVED.with(|p| p.set(proven));
 }
 
+/// The proof as set (the generator copies it into its worker threads).
+pub fn irq_preserved() -> bool { IRQ_PRESERVED.with(|p| p.get()) }
+
 pub fn narrow() -> bool { enabled() && IRQ_PRESERVED.with(|p| p.get()) }
 
 /// Save the dispatcher's stale register file as well: a direct caller may have
